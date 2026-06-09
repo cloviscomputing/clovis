@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+Default path alignment release.
+
+- Set the npm CLI/MCP default ledger path to `~/.clovis/clovis.db`.
+- Keep `CLOVIS_DB` and `--db` overrides unchanged for explicit deployments.
+- Document the new default path in the README.
+
 ## 0.1.2
 
 Public repository readiness release.
