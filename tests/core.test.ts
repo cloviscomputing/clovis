@@ -265,7 +265,7 @@ describe("ledger core", () => {
 describe("app and package surface", () => {
   it("keeps every MCP tool name wired to a signature and handler", () => {
     expect(Object.keys(TOOL_SIGNATURES).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(TOOL_SIGNATURES.create_transaction).toBe("(date: str, amount: float, from_account_id: str, to_account_id: str, description: str, status: str = 'pending', asset_id: str | None = None, branch: str | None = None) -> dict");
+    expect(TOOL_SIGNATURES.create_transaction).toBe("(date: string, amount: number, from_account_id: string, to_account_id: string, description: string, status?: string, asset_id?: string | null, branch?: string | null) => Record<string, unknown>");
     for (const name of TOOL_NAMES) expect(toolHandlers[name]).toBeTypeOf("function");
   });
 

@@ -22,7 +22,7 @@ type TestContext = {
   schedules: Record<string, string>;
 };
 
-type ParityCase = {
+type ContractCase = {
   mutation: "read" | "write" | "dry-run";
   args: (ctx: TestContext) => Args;
   setup?: (ctx: TestContext) => void;
@@ -38,7 +38,7 @@ afterEach(() => {
 function createContext(): TestContext {
   const previousDb = process.env.CLOVIS_DB;
   const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
-  const dir = mkdtempSync(join(tmpdir(), "clovis-parity-"));
+  const dir = mkdtempSync(join(tmpdir(), "clovis-contract-"));
   const db = join(dir, "ledger.db");
   process.env.CLOVIS_DB = db;
   process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
@@ -120,7 +120,7 @@ function ensureImportBatch(ctx: TestContext): void {
     counterpart_id: ctx.accounts["Opening Balances"],
     transactions: [{ date: "2026-06-21", amount: 10, description: "Batch Import" }],
     status: "pending",
-    batch_label: "Parity Batch"
+    batch_label: "Contract Batch"
   }, ctx.ledger) as any;
   ctx.batches.import = result.batch_id;
   ctx.tx.imported = result.transactions[0].id;
@@ -140,7 +140,7 @@ function ensureRecatBatch(ctx: TestContext): void {
 
 function ensureCheckpoint(ctx: TestContext): void {
   if (ctx.checkpoints.closed) return;
-  ctx.checkpoints.closed = String(ctx.ledger.closePeriod("Parity close", "2026-05-31").id);
+  ctx.checkpoints.closed = String(ctx.ledger.closePeriod("Contract close", "2026-05-31").id);
 }
 
 function ensureSchedule(ctx: TestContext): void {
@@ -308,9 +308,9 @@ const CASES = {
   update_account: { mutation: "write", args: (ctx) => ({ id: ctx.accounts["Delete Me"], name: "Delete Me Updated", code: "6999" }), assert: expectObject },
   update_asset: { mutation: "write", args: (ctx) => ({ asset_id: ctx.assets.unused, name: "Canadian Dollar Updated" }), assert: expectObject },
   void_by_filter: { mutation: "dry-run", args: () => ({ status: "pending", dry_run: true }), assert: expectObject }
-} satisfies Record<ToolName, ParityCase>;
+} satisfies Record<ToolName, ContractCase>;
 
-describe("MCP parity matrix", () => {
+describe("MCP contract matrix", () => {
   it("has one explicit contract case for every MCP tool", () => {
     expect(Object.keys(TOOL_SIGNATURES).sort()).toEqual([...TOOL_NAMES].sort());
     expect(Object.keys(CASES).sort()).toEqual([...TOOL_NAMES].sort());

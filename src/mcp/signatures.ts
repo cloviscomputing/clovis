@@ -1,137 +1,1329 @@
-export const TOOL_SIGNATURES = {
-  "account_register": "(account_id: str, asset_id: str | None = None, date_from: str | None = None, date_to: str | None = None, time_from: str | None = None, time_to: str | None = None, branch: str | None = None, status: str | None = None, limit: int = 100, offset: int = 0, summary: bool = False) -> dict",
-  "add_match_rule": "(account_id: str, pattern: str) -> dict",
-  "add_match_rules": "(rules: list[dict]) -> dict",
-  "age_of_money": "(days: int = 30) -> dict",
-  "apply_match_rules": "(catch_all_account_id: str, date_from: str | None = None, date_to: str | None = None, dry_run: bool = True) -> dict",
-  "apply_pattern": "(pattern: str, target_account: str, force: bool = False, persist_rule: bool = False, dry_run: bool = True, source_account: str | None = None, date_from: str | None = None, date_to: str | None = None) -> dict",
-  "apply_reconciliation_plan": "(file_path: str, account_id: str, counterpart_account_id: str, expected_balance: float | None = None, currency: str = 'USD', asset_id: str | None = None, date_col: str | None = None, amount_col: str | None = None, desc_col: str | None = None, inflow_col: str | None = None, outflow_col: str | None = None, skip_rows: int = 0, amount_convention: str = 'signed', statement_type: str | None = None, date_tolerance_days: int = 3, min_likely_score: float = 0.72, row_indexes: list[int] | None = None, commit_imported: bool = False, annotate_posted_matches: bool = True, allow_review_skip: bool = False, require_balance_match: bool = True, dry_run: bool = True) -> dict",
-  "apply_rollover": "(year: int, month: int) -> dict",
-  "assert_balance": "(account_id: str, expected: float, date: str | None = None, asset_id: str | None = None, status: str | None = None) -> dict",
-  "assert_balances": "(assertions: list, status: str | None = None) -> dict",
-  "audit_categorization": "(date_from: str | None = None, date_to: str | None = None, min_occurrences: int = 2, status: str = 'posted', mode: str = 'budget') -> dict",
-  "backup_now": "(output_path: str | None = None, compact: bool = False) -> dict",
-  "backup_status": "() -> dict",
-  "balance_sheet": "(date: str | None = None, branch: str | None = None, compact: bool = False, include_pending: bool = False, hide_zero: bool = False, quote_asset_id: str | None = None, account_ids: list[str] | None = None, entity_id: str | None = None) -> dict",
-  "budget_rollover_preview": "(year: int, month: int) -> dict",
-  "budget_status": "(account: str | None = None, year: int | None = None, month: int | None = None, rollup: bool = False, status: str = 'posted', quote_asset_id: str | None = None) -> dict",
-  "budget_summary": "(year: int | None = None, month: int | None = None, status: str = 'posted', quote_asset_id: str | None = None) -> dict",
-  "buy_security": "(account_id: str, symbol: str, shares: float, total_cost_cents: int, date: str, commission_cents: int = 0, status: str = 'posted') -> dict",
-  "cash_flow": "(year: int, month: int, branch: str | None = None, compact: bool = False, include_pending: bool = False, quote_asset_id: str | None = None) -> dict",
-  "cash_projection": "(year: int | None = None, month: int | None = None, asset_account_ids: list[str] | None = None, liability_account_ids: list[str] | None = None, entity_id: str | None = None, earmarks: list[dict] | None = None, include_pending: bool = True, include_planned: bool = True, quote_asset_id: str | None = None) -> dict",
-  "close_period": "(name: str, as_of: str, description: str | None = None) -> dict",
-  "commit_batch": "(tx_ids: list[str] | None = None, batch_id: str | None = None, date_from: str | None = None, date_to: str | None = None, account_id: str | None = None, dry_run: bool = False) -> dict",
-  "compare_scenarios": "(branch_a: str | None = None, branch_b: str | None = None, as_of_a: str | None = None, as_of_b: str | None = None, asset_id: str | None = None) -> dict",
-  "consolidate_transfers": "(account_a: str, account_b: str, transfer_account_id: str | None = None, date_tolerance_days: int = 1, dry_run: bool = True) -> dict",
-  "copy_budgets": "(from_year: int, from_month: int, to_year: int, to_month: int) -> dict",
-  "count_transactions": "(account_id: str | None = None, status: str | None = None, date_from: str | None = None, date_to: str | None = None) -> dict",
-  "create_account": "(name: str, type: str, code: str = '', parent_id: str = '', color_hex: str = '#888888') -> dict",
-  "create_accounts": "(accounts: list[dict]) -> dict",
-  "create_asset": "(symbol: str, asset_type: str = 'currency', decimals: int = 2, name: str = '') -> dict",
-  "create_branch": "(name: str) -> dict",
-  "create_price": "(asset_id: str, quote_id: str, rate: float, time: str) -> dict",
-  "create_scheduled_transaction": "(date: str, amount: float, from_account_id: str, to_account_id: str, description: str = '', frequency: str = 'monthly', end_date: str | None = None) -> dict",
-  "create_transaction": "(date: str, amount: float, from_account_id: str, to_account_id: str, description: str, status: str = 'pending', asset_id: str | None = None, branch: str | None = None) -> dict",
-  "delete_account": "(id: str) -> dict",
-  "delete_asset": "(asset_id: str, force: bool = False) -> dict",
-  "delete_budget": "(account: str, year: int | None = None, month: int | None = None, include_overrides: bool = False) -> dict",
-  "delete_budgets": "(accounts: list[str] | None = None, year: int | None = None, month: int | None = None, include_overrides: bool = False) -> dict",
-  "delete_goal": "(account: str) -> dict",
-  "delete_match_rule": "(account_id: str, pattern: str) -> dict",
-  "delete_match_rules": "(rules: list[dict]) -> dict",
-  "delete_tag": "(tag_id: str) -> dict",
-  "delete_tags": "(entity_type: str, entity_id: str, key: str | None = None, val: str | None = None, dry_run: bool = True) -> dict",
-  "delete_transaction": "(id: str, hard_delete: bool = False) -> dict",
-  "detect_recurring": "(months: int = 6, year: int | None = None, month: int | None = None, min_occurrences: int = 2, amount_tolerance_pct: float = 5.0, account_id: str | None = None) -> list[dict]",
-  "discard_batch": "(tx_ids: list[str] | None = None, batch_id: str | None = None, date_from: str | None = None, date_to: str | None = None, account_id: str | None = None, dry_run: bool = True) -> dict",
-  "discard_branch": "(name: str) -> dict",
-  "export_ledger": "(output_path: str | None = None, entity_id: str | None = None, date_from: str | None = None, date_to: str | None = None, account_ids: list[str] | None = None) -> dict",
-  "export_transactions": "(account_id: str | None = None, date_from: str | None = None, date_to: str | None = None, output_path: str | None = None) -> dict",
-  "financial_overview": "(year: int | None = None, month: int | None = None, status: str = 'active', quote_asset_id: str | None = None) -> dict",
-  "financial_picture": "(year: int | None = None, month: int | None = None, quote_asset_id: str | None = None, status: str = 'combined', include_pending: bool = True) -> dict",
-  "find_pending_duplicates": "(account_id: str | None = None, date_from: str | None = None, date_to: str | None = None, date_tolerance_days: int = 3) -> dict",
-  "flip_entries": "(tx_ids: list[str]) -> dict",
-  "forecast": "(account_id: str, as_of: str | None = None) -> dict",
-  "forecast_month_end": "(year: int | None = None, month: int | None = None, status: str = 'posted', quote_asset_id: str | None = None) -> dict",
-  "fx_transfer": "(from_account_id: str, to_account_id: str, from_amount: float, to_amount: float, from_asset_id: str, to_asset_id: str, fx_account_id: str, date: str, description: str, status: str = 'posted', record_rate: bool = True) -> dict",
-  "get_account": "(id: str) -> dict",
-  "get_account_by_name": "(name: str) -> dict | None",
-  "get_asset_by_symbol": "(symbol: str) -> dict | None",
-  "get_balance": "(account_id: str) -> dict",
-  "get_price": "(asset_id: str, quote_id: str, as_of: str) -> dict | None",
-  "get_transaction": "(id: str) -> dict",
-  "goal_progress": "(account: str) -> dict",
-  "holdings": "(account_id: str | None = None, asset_type: str | None = None) -> list[dict]",
-  "import_file": "(file_path: str, account_id: str, counterpart_account_id: str, currency: str = 'USD', asset_id: str | None = None, date_col: str | None = None, amount_col: str | None = None, desc_col: str | None = None, inflow_col: str | None = None, outflow_col: str | None = None, counterpart_col: str | None = None, tag_cols: dict[str, str] | None = None, skip_rows: int = 0, status: str = 'pending', amount_convention: str = 'signed', show_duplicates: bool = False, statement_type: str | None = None) -> dict",
-  "import_ledger": "(file_path: str | None = None, data: str | None = None, preserve_ids: bool = True, dry_run: bool = False) -> dict",
-  "import_transactions": "(account_id: str, counterpart_id: str, transactions: list[dict], status: str = 'pending', dry_run: bool = False, batch_label: str | None = None, tags: dict[str, str] | None = None, amount_convention: str = 'signed', date_tolerance_days: int = 1, asset_id: str | None = None, skip_dedup: bool = False, statement_type: str | None = None) -> dict",
-  "income_statement": "(year: int, month: int | None = None, branch: str | None = None, compact: bool = False, include_pending: bool = False, account_ids: list[str] | None = None, entity_id: str | None = None, quote_asset_id: str | None = None, status: str | None = None) -> dict",
-  "init_defaults": "(template: str = 'personal') -> dict",
-  "inspect_transaction": "(tx_id: str) -> dict",
-  "integrity_check": "() -> dict",
-  "invert_import": "(batch_id: str) -> dict",
-  "list_accounts": "(type: str | None = None, parent_id: str | None = None, include_counts: bool = False, tree: bool = False) -> list[dict]",
-  "list_assets": "(asset_type: str | None = None) -> list[dict]",
-  "list_backups": "() -> list[dict]",
-  "list_branches": "() -> list[dict]",
-  "list_checkpoints": "() -> list[dict]",
-  "list_entries": "(tx_id: str) -> list[dict]",
-  "list_entries_by_asset": "(asset_id: str, limit: int = 100, offset: int = 0) -> dict",
-  "list_goals": "() -> list",
-  "list_import_batches": "(limit: int = 20, date_from: str | None = None) -> list[dict]",
-  "list_match_rules": "() -> list[dict]",
-  "list_prices": "() -> list[dict]",
-  "list_scheduled": "() -> list[dict]",
-  "list_tags": "(entity_type: str, entity_id: str) -> list[dict]",
-  "list_transactions": "(account_id: str | None = None, category_id: str | None = None, asset_id: str | None = None, year: int | None = None, month: int | None = None, status: str | None = None, limit: int = 50, offset: int = 0, compact: bool = True, sort: str = 'date_desc') -> dict",
-  "list_uncategorized": "(catch_all_account_id: str | None = None, status: str = 'pending', date_from: str | None = None, date_to: str | None = None, limit: int = 50, offset: int = 0, compact: bool = False) -> dict",
-  "list_unmatched_transfers": "(date_tolerance_days: int = 3) -> list[dict]",
-  "match_transfer_pairs": "(clearing_account: str | None = None, account_a: str | None = None, account_b: str | None = None, date_from: str | None = None, date_to: str | None = None, date_tolerance_days: int = 0, match_by: str = 'amount+date+code', dry_run: bool = True) -> dict",
-  "match_transfers": "(account_a: str, account_b: str, date_tolerance_days: int = 1, dry_run: bool = True, status: str = 'pending') -> dict",
-  "merge_accounts": "(sources: list[str], target: str, delete_sources: bool = True) -> dict",
-  "merge_branch": "(source: str) -> dict",
-  "migrate_asset_entries": "(from_asset_id: str, to_asset_id: str, dry_run: bool = True) -> dict",
-  "move_transactions": "(from_account: str, to_account: str, dry_run: bool = True) -> dict",
-  "net_worth": "(date: str | None = None, branch: str | None = None, include_pending: bool = False, quote_asset_id: str | None = None) -> dict",
-  "pending_summary": "(year: int | None = None, month: int | None = None) -> dict",
-  "plan_transaction": "(date: str, amount: float, from_account_id: str, to_account_id: str, description: str, branch: str | None = None) -> dict",
-  "post_journal_entry": "(date: str, legs: list[dict], description: str, status: str = 'pending') -> dict",
-  "preview_commit": "(as_of: str | None = None) -> dict",
-  "preview_import": "(file_path: str, account_id: str, counterpart_account_id: str, rows: int = 3, currency: str = 'USD', asset_id: str | None = None, date_col: str | None = None, amount_col: str | None = None, desc_col: str | None = None, inflow_col: str | None = None, outflow_col: str | None = None, skip_rows: int = 0, amount_convention: str = 'signed', statement_type: str | None = None) -> dict",
-  "process_scheduled": "(through_date: str | None = None) -> dict",
-  "process_statement": "(file_path: str, account_id: str, counterpart_account_id: str, expected_balance: float | None = None, currency: str = 'USD', asset_id: str | None = None, date_col: str | None = None, amount_col: str | None = None, desc_col: str | None = None, inflow_col: str | None = None, outflow_col: str | None = None, counterpart_col: str | None = None, tag_cols: dict[str, str] | None = None, skip_rows: int = 0, amount_convention: str = 'signed', statement_type: str | None = None, transfer_account_id: str | None = None, date_tolerance_days: int = 1, commit: bool = False, show_duplicates: bool = True, preview_rows: int = 10) -> dict",
-  "project_balances": "(through: str, account_ids: list[str] | None = None, include_goals: bool = False, branch: str | None = None, quote_asset_id: str | None = None) -> dict",
-  "project_month_end": "(year: int | None = None, month: int | None = None, expected_inflows: list[dict] | None = None, expected_outflows: list[dict] | None = None, expected_paychecks: list[dict] | None = None, include_pending: bool = True, account_ids: list[str] | None = None, quote_asset_id: str | None = None) -> dict",
-  "recategorize_by_pattern": "(pattern: str, new_account_id: str, old_account_id: str | None = None, date_from: str | None = None, date_to: str | None = None, dry_run: bool = True, persist_rule: bool = False, verbose: bool = False, status: str = 'posted', amount_min: int | None = None, amount_max: int | None = None) -> dict",
-  "recategorize_by_patterns": "(rules: list[dict], date_from: str | None = None, date_to: str | None = None, dry_run: bool = True, persist_rules: bool = False, old_account_id: str | None = None, verbose: bool = False, status: str = 'posted', amount_min: int | None = None, amount_max: int | None = None) -> dict",
-  "recategorize_transaction": "(tx_id: str, new_account_id: str, old_account_id: str | None = None) -> dict",
-  "recognize_gain_loss": "(date: str, amount: float, investment_account_id: str, description: str, gain_loss_account_id: str | None = None, status: str = 'posted', asset_id: str | None = None) -> dict",
-  "reconcile_diff": "(account_id: str, date_from: str | None = None, date_to: str | None = None, branch: str | None = None) -> dict",
-  "reconcile_statement": "(account_id: str, counterpart_id: str, transactions: list[dict], amount_convention: str = 'signed', statement_type: str | None = None) -> dict",
-  "reconcile_statement_plan": "(file_path: str, account_id: str, counterpart_account_id: str | None = None, expected_balance: float | None = None, currency: str = 'USD', asset_id: str | None = None, date_col: str | None = None, amount_col: str | None = None, desc_col: str | None = None, inflow_col: str | None = None, outflow_col: str | None = None, skip_rows: int = 0, amount_convention: str = 'signed', statement_type: str | None = None, date_tolerance_days: int = 3, min_likely_score: float = 0.72, sample_limit: int = 20) -> dict",
-  "reconcile_to_balance": "(account_id: str, target_balance: float, offset_account_id: str, date: str, description: str | None = None, asset_id: str | None = None, status: str = 'posted', dry_run: bool = False) -> dict",
-  "record_investment": "(date: str, amount: float, investment_account_id: str, source_account_id: str, description: str, status: str = 'posted', asset_id: str | None = None) -> dict",
-  "record_opening_balance": "(account_id: str, amount: float, date: str, status: str = 'pending', asset_id: str | None = None, counterpart_account_id: str | None = None) -> dict",
-  "record_opening_balances": "(balances: list[dict], date: str, status: str = 'pending') -> dict",
-  "record_pending_expenses": "(account_id: str, transactions: list[dict], asset_id: str | None = None, batch_label: str | None = None, tags: dict[str, str] | None = None, dry_run: bool = True, skip_dedup: bool = False) -> dict",
-  "reopen_period": "(checkpoint_id: str) -> dict",
-  "repair_integrity": "(dry_run: bool = True, backup: bool = True) -> dict",
-  "rollback_import": "(batch_id: str) -> dict",
-  "rollback_recategorize": "(batch_id: str) -> dict",
-  "search_transactions": "(desc: str | None = None, query: str | None = None, amount_min: int | None = None, amount_max: int | None = None, account_id: str | None = None, status: str | None = None, date_from: str | None = None, date_to: str | None = None, posted_at_from: str | None = None, posted_at_to: str | None = None, limit: int = 50, offset: int = 0, sort: str = 'date_desc') -> dict",
-  "set_budget": "(account: str, amount: float, period: str = 'monthly', year: int | None = None, month: int | None = None, rollover: bool = False) -> dict",
-  "set_budgets": "(budgets: list[dict], year: int | None = None, month: int | None = None) -> dict",
-  "set_goal": "(account: str, target: float, name: str, target_date: str | None = None, priority: int = 1) -> dict",
-  "spending": "(year: int, month: int, branch: str | None = None, include_pending: bool = False, status: str | None = None, account_ids: list[str] | None = None, entity_id: str | None = None, quote_asset_id: str | None = None) -> dict",
-  "spending_rate": "(account: str | None = None, year: int | None = None, month: int | None = None, status: str = 'posted', quote_asset_id: str | None = None) -> list[dict]",
-  "suggest_budgets": "(months: int = 3, year: int | None = None, month: int | None = None, skip_budgeted: bool = True) -> list[dict]",
-  "top_descriptions": "(account_id: str, limit: int = 50, status: str | None = None) -> list[dict]",
-  "transfer": "(from_account_id: str, to_account_id: str, amount: float, date: str, description: str, status: str = 'posted', asset_id: str | None = None) -> dict",
-  "trial_balance": "(branch: str | None = None, status: str | None = None) -> dict",
-  "unbudgeted_spending": "(year: int | None = None, month: int | None = None, status: str = 'posted', quote_asset_id: str | None = None) -> list[dict]",
-  "update_account": "(id: str, name: str | None = None, type: str | None = None, code: str | None = None, parent_id: str | None = None, color_hex: str | None = None) -> dict",
-  "update_asset": "(asset_id: str, symbol: str | None = None, name: str | None = None) -> dict",
-  "void_by_filter": "(date_from: str | None = None, date_to: str | None = None, account_id: str | None = None, status: str | None = None, asset_id: str | None = None, posted_at_from: str | None = None, posted_at_to: str | None = None, dry_run: bool = True, hard_delete: bool = False) -> dict"
-} as const;
+export type ToolValueType =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "object"
+  | "array"
+  | "string[]"
+  | "integer[]"
+  | "object[]";
 
-export type ToolSignatureName = keyof typeof TOOL_SIGNATURES;
+export type ToolTypeDefinition = {
+  type: ToolValueType;
+  nullable?: boolean;
+};
+
+export type ToolParameterOptions = {
+  nullable?: boolean;
+  optional?: boolean;
+  defaultValue?: string | number | boolean | null;
+};
+
+export type ToolParameterDefinition = readonly [
+  name: string,
+  type: ToolValueType,
+  options?: ToolParameterOptions
+];
+
+export type ToolDefinition = {
+  parameters: readonly ToolParameterDefinition[];
+  returns: ToolTypeDefinition;
+};
+
+export const TOOL_DEFINITIONS = {
+  "account_register": {
+    parameters: [
+      ["account_id", "string"],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["time_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["time_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["limit", "integer", { optional: true, defaultValue: 100 }],
+      ["offset", "integer", { optional: true, defaultValue: 0 }],
+      ["summary", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "add_match_rule": {
+    parameters: [
+      ["account_id", "string"],
+      ["pattern", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "add_match_rules": {
+    parameters: [
+      ["rules", "object[]"]
+    ],
+    returns: { type: "object" }
+  },
+  "age_of_money": {
+    parameters: [
+      ["days", "integer", { optional: true, defaultValue: 30 }]
+    ],
+    returns: { type: "object" }
+  },
+  "apply_match_rules": {
+    parameters: [
+      ["catch_all_account_id", "string"],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "apply_pattern": {
+    parameters: [
+      ["pattern", "string"],
+      ["target_account", "string"],
+      ["force", "boolean", { optional: true, defaultValue: false }],
+      ["persist_rule", "boolean", { optional: true, defaultValue: false }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["source_account", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "apply_reconciliation_plan": {
+    parameters: [
+      ["file_path", "string"],
+      ["account_id", "string"],
+      ["counterpart_account_id", "string"],
+      ["expected_balance", "number", { nullable: true, optional: true, defaultValue: null }],
+      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["desc_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["inflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["outflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_rows", "integer", { optional: true, defaultValue: 0 }],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
+      ["min_likely_score", "number", { optional: true, defaultValue: 0.72 }],
+      ["row_indexes", "integer[]", { nullable: true, optional: true, defaultValue: null }],
+      ["commit_imported", "boolean", { optional: true, defaultValue: false }],
+      ["annotate_posted_matches", "boolean", { optional: true, defaultValue: true }],
+      ["allow_review_skip", "boolean", { optional: true, defaultValue: false }],
+      ["require_balance_match", "boolean", { optional: true, defaultValue: true }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "apply_rollover": {
+    parameters: [
+      ["year", "integer"],
+      ["month", "integer"]
+    ],
+    returns: { type: "object" }
+  },
+  "assert_balance": {
+    parameters: [
+      ["account_id", "string"],
+      ["expected", "number"],
+      ["date", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "assert_balances": {
+    parameters: [
+      ["assertions", "array"],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "audit_categorization": {
+    parameters: [
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["min_occurrences", "integer", { optional: true, defaultValue: 2 }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["mode", "string", { optional: true, defaultValue: "budget" }]
+    ],
+    returns: { type: "object" }
+  },
+  "backup_now": {
+    parameters: [
+      ["output_path", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["compact", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "backup_status": {
+    parameters: [
+
+    ],
+    returns: { type: "object" }
+  },
+  "balance_sheet": {
+    parameters: [
+      ["date", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["compact", "boolean", { optional: true, defaultValue: false }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["hide_zero", "boolean", { optional: true, defaultValue: false }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "budget_rollover_preview": {
+    parameters: [
+      ["year", "integer"],
+      ["month", "integer"]
+    ],
+    returns: { type: "object" }
+  },
+  "budget_status": {
+    parameters: [
+      ["account", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["rollup", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "budget_summary": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "buy_security": {
+    parameters: [
+      ["account_id", "string"],
+      ["symbol", "string"],
+      ["shares", "number"],
+      ["total_cost_cents", "integer"],
+      ["date", "string"],
+      ["commission_cents", "integer", { optional: true, defaultValue: 0 }],
+      ["status", "string", { optional: true, defaultValue: "posted" }]
+    ],
+    returns: { type: "object" }
+  },
+  "cash_flow": {
+    parameters: [
+      ["year", "integer"],
+      ["month", "integer"],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["compact", "boolean", { optional: true, defaultValue: false }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "cash_projection": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["liability_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["earmarks", "object[]", { nullable: true, optional: true, defaultValue: null }],
+      ["include_pending", "boolean", { optional: true, defaultValue: true }],
+      ["include_planned", "boolean", { optional: true, defaultValue: true }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "close_period": {
+    parameters: [
+      ["name", "string"],
+      ["as_of", "string"],
+      ["description", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "commit_batch": {
+    parameters: [
+      ["tx_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["batch_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "compare_scenarios": {
+    parameters: [
+      ["branch_a", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["branch_b", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["as_of_a", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["as_of_b", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "consolidate_transfers": {
+    parameters: [
+      ["account_a", "string"],
+      ["account_b", "string"],
+      ["transfer_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 1 }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "copy_budgets": {
+    parameters: [
+      ["from_year", "integer"],
+      ["from_month", "integer"],
+      ["to_year", "integer"],
+      ["to_month", "integer"]
+    ],
+    returns: { type: "object" }
+  },
+  "count_transactions": {
+    parameters: [
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "create_account": {
+    parameters: [
+      ["name", "string"],
+      ["type", "string"],
+      ["code", "string", { optional: true, defaultValue: "" }],
+      ["parent_id", "string", { optional: true, defaultValue: "" }],
+      ["color_hex", "string", { optional: true, defaultValue: "#888888" }]
+    ],
+    returns: { type: "object" }
+  },
+  "create_accounts": {
+    parameters: [
+      ["accounts", "object[]"]
+    ],
+    returns: { type: "object" }
+  },
+  "create_asset": {
+    parameters: [
+      ["symbol", "string"],
+      ["asset_type", "string", { optional: true, defaultValue: "currency" }],
+      ["decimals", "integer", { optional: true, defaultValue: 2 }],
+      ["name", "string", { optional: true, defaultValue: "" }]
+    ],
+    returns: { type: "object" }
+  },
+  "create_branch": {
+    parameters: [
+      ["name", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "create_price": {
+    parameters: [
+      ["asset_id", "string"],
+      ["quote_id", "string"],
+      ["rate", "number"],
+      ["time", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "create_scheduled_transaction": {
+    parameters: [
+      ["date", "string"],
+      ["amount", "number"],
+      ["from_account_id", "string"],
+      ["to_account_id", "string"],
+      ["description", "string", { optional: true, defaultValue: "" }],
+      ["frequency", "string", { optional: true, defaultValue: "monthly" }],
+      ["end_date", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "create_transaction": {
+    parameters: [
+      ["date", "string"],
+      ["amount", "number"],
+      ["from_account_id", "string"],
+      ["to_account_id", "string"],
+      ["description", "string"],
+      ["status", "string", { optional: true, defaultValue: "pending" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_account": {
+    parameters: [
+      ["id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_asset": {
+    parameters: [
+      ["asset_id", "string"],
+      ["force", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_budget": {
+    parameters: [
+      ["account", "string"],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["include_overrides", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_budgets": {
+    parameters: [
+      ["accounts", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["include_overrides", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_goal": {
+    parameters: [
+      ["account", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_match_rule": {
+    parameters: [
+      ["account_id", "string"],
+      ["pattern", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_match_rules": {
+    parameters: [
+      ["rules", "object[]"]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_tag": {
+    parameters: [
+      ["tag_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_tags": {
+    parameters: [
+      ["entity_type", "string"],
+      ["entity_id", "string"],
+      ["key", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["val", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "delete_transaction": {
+    parameters: [
+      ["id", "string"],
+      ["hard_delete", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "detect_recurring": {
+    parameters: [
+      ["months", "integer", { optional: true, defaultValue: 6 }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["min_occurrences", "integer", { optional: true, defaultValue: 2 }],
+      ["amount_tolerance_pct", "number", { optional: true, defaultValue: 5 }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "discard_batch": {
+    parameters: [
+      ["tx_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["batch_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "discard_branch": {
+    parameters: [
+      ["name", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "export_ledger": {
+    parameters: [
+      ["output_path", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "export_transactions": {
+    parameters: [
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["output_path", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "financial_overview": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "active" }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "financial_picture": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "combined" }],
+      ["include_pending", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "find_pending_duplicates": {
+    parameters: [
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }]
+    ],
+    returns: { type: "object" }
+  },
+  "flip_entries": {
+    parameters: [
+      ["tx_ids", "string[]"]
+    ],
+    returns: { type: "object" }
+  },
+  "forecast": {
+    parameters: [
+      ["account_id", "string"],
+      ["as_of", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "forecast_month_end": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "fx_transfer": {
+    parameters: [
+      ["from_account_id", "string"],
+      ["to_account_id", "string"],
+      ["from_amount", "number"],
+      ["to_amount", "number"],
+      ["from_asset_id", "string"],
+      ["to_asset_id", "string"],
+      ["fx_account_id", "string"],
+      ["date", "string"],
+      ["description", "string"],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["record_rate", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "get_account": {
+    parameters: [
+      ["id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "get_account_by_name": {
+    parameters: [
+      ["name", "string"]
+    ],
+    returns: { type: "object", nullable: true }
+  },
+  "get_asset_by_symbol": {
+    parameters: [
+      ["symbol", "string"]
+    ],
+    returns: { type: "object", nullable: true }
+  },
+  "get_balance": {
+    parameters: [
+      ["account_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "get_price": {
+    parameters: [
+      ["asset_id", "string"],
+      ["quote_id", "string"],
+      ["as_of", "string"]
+    ],
+    returns: { type: "object", nullable: true }
+  },
+  "get_transaction": {
+    parameters: [
+      ["id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "goal_progress": {
+    parameters: [
+      ["account", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "holdings": {
+    parameters: [
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_type", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "import_file": {
+    parameters: [
+      ["file_path", "string"],
+      ["account_id", "string"],
+      ["counterpart_account_id", "string"],
+      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["desc_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["inflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["outflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["counterpart_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["tag_cols", "object", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_rows", "integer", { optional: true, defaultValue: 0 }],
+      ["status", "string", { optional: true, defaultValue: "pending" }],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["show_duplicates", "boolean", { optional: true, defaultValue: false }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "import_ledger": {
+    parameters: [
+      ["file_path", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["data", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["preserve_ids", "boolean", { optional: true, defaultValue: true }],
+      ["dry_run", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "import_transactions": {
+    parameters: [
+      ["account_id", "string"],
+      ["counterpart_id", "string"],
+      ["transactions", "object[]"],
+      ["status", "string", { optional: true, defaultValue: "pending" }],
+      ["dry_run", "boolean", { optional: true, defaultValue: false }],
+      ["batch_label", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["tags", "object", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 1 }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_dedup", "boolean", { optional: true, defaultValue: false }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "income_statement": {
+    parameters: [
+      ["year", "integer"],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["compact", "boolean", { optional: true, defaultValue: false }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "init_defaults": {
+    parameters: [
+      ["template", "string", { optional: true, defaultValue: "personal" }]
+    ],
+    returns: { type: "object" }
+  },
+  "inspect_transaction": {
+    parameters: [
+      ["tx_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "integrity_check": {
+    parameters: [
+
+    ],
+    returns: { type: "object" }
+  },
+  "invert_import": {
+    parameters: [
+      ["batch_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "list_accounts": {
+    parameters: [
+      ["type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["parent_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["include_counts", "boolean", { optional: true, defaultValue: false }],
+      ["tree", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_assets": {
+    parameters: [
+      ["asset_type", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_backups": {
+    parameters: [
+
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_branches": {
+    parameters: [
+
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_checkpoints": {
+    parameters: [
+
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_entries": {
+    parameters: [
+      ["tx_id", "string"]
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_entries_by_asset": {
+    parameters: [
+      ["asset_id", "string"],
+      ["limit", "integer", { optional: true, defaultValue: 100 }],
+      ["offset", "integer", { optional: true, defaultValue: 0 }]
+    ],
+    returns: { type: "object" }
+  },
+  "list_goals": {
+    parameters: [
+
+    ],
+    returns: { type: "array" }
+  },
+  "list_import_batches": {
+    parameters: [
+      ["limit", "integer", { optional: true, defaultValue: 20 }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_match_rules": {
+    parameters: [
+
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_prices": {
+    parameters: [
+
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_scheduled": {
+    parameters: [
+
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_tags": {
+    parameters: [
+      ["entity_type", "string"],
+      ["entity_id", "string"]
+    ],
+    returns: { type: "object[]" }
+  },
+  "list_transactions": {
+    parameters: [
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["category_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["limit", "integer", { optional: true, defaultValue: 50 }],
+      ["offset", "integer", { optional: true, defaultValue: 0 }],
+      ["compact", "boolean", { optional: true, defaultValue: true }],
+      ["sort", "string", { optional: true, defaultValue: "date_desc" }]
+    ],
+    returns: { type: "object" }
+  },
+  "list_uncategorized": {
+    parameters: [
+      ["catch_all_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "pending" }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["limit", "integer", { optional: true, defaultValue: 50 }],
+      ["offset", "integer", { optional: true, defaultValue: 0 }],
+      ["compact", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "list_unmatched_transfers": {
+    parameters: [
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "match_transfer_pairs": {
+    parameters: [
+      ["clearing_account", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_a", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_b", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 0 }],
+      ["match_by", "string", { optional: true, defaultValue: "amount+date+code" }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "match_transfers": {
+    parameters: [
+      ["account_a", "string"],
+      ["account_b", "string"],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 1 }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["status", "string", { optional: true, defaultValue: "pending" }]
+    ],
+    returns: { type: "object" }
+  },
+  "merge_accounts": {
+    parameters: [
+      ["sources", "string[]"],
+      ["target", "string"],
+      ["delete_sources", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "merge_branch": {
+    parameters: [
+      ["source", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "migrate_asset_entries": {
+    parameters: [
+      ["from_asset_id", "string"],
+      ["to_asset_id", "string"],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "move_transactions": {
+    parameters: [
+      ["from_account", "string"],
+      ["to_account", "string"],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "net_worth": {
+    parameters: [
+      ["date", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "pending_summary": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "plan_transaction": {
+    parameters: [
+      ["date", "string"],
+      ["amount", "number"],
+      ["from_account_id", "string"],
+      ["to_account_id", "string"],
+      ["description", "string"],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "post_journal_entry": {
+    parameters: [
+      ["date", "string"],
+      ["legs", "object[]"],
+      ["description", "string"],
+      ["status", "string", { optional: true, defaultValue: "pending" }]
+    ],
+    returns: { type: "object" }
+  },
+  "preview_commit": {
+    parameters: [
+      ["as_of", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "preview_import": {
+    parameters: [
+      ["file_path", "string"],
+      ["account_id", "string"],
+      ["counterpart_account_id", "string"],
+      ["rows", "integer", { optional: true, defaultValue: 3 }],
+      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["desc_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["inflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["outflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_rows", "integer", { optional: true, defaultValue: 0 }],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "process_scheduled": {
+    parameters: [
+      ["through_date", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "process_statement": {
+    parameters: [
+      ["file_path", "string"],
+      ["account_id", "string"],
+      ["counterpart_account_id", "string"],
+      ["expected_balance", "number", { nullable: true, optional: true, defaultValue: null }],
+      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["desc_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["inflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["outflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["counterpart_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["tag_cols", "object", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_rows", "integer", { optional: true, defaultValue: 0 }],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["transfer_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 1 }],
+      ["commit", "boolean", { optional: true, defaultValue: false }],
+      ["show_duplicates", "boolean", { optional: true, defaultValue: true }],
+      ["preview_rows", "integer", { optional: true, defaultValue: 10 }]
+    ],
+    returns: { type: "object" }
+  },
+  "project_balances": {
+    parameters: [
+      ["through", "string"],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["include_goals", "boolean", { optional: true, defaultValue: false }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "project_month_end": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["expected_inflows", "object[]", { nullable: true, optional: true, defaultValue: null }],
+      ["expected_outflows", "object[]", { nullable: true, optional: true, defaultValue: null }],
+      ["expected_paychecks", "object[]", { nullable: true, optional: true, defaultValue: null }],
+      ["include_pending", "boolean", { optional: true, defaultValue: true }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "recategorize_by_pattern": {
+    parameters: [
+      ["pattern", "string"],
+      ["new_account_id", "string"],
+      ["old_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["persist_rule", "boolean", { optional: true, defaultValue: false }],
+      ["verbose", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["amount_min", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_max", "integer", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "recategorize_by_patterns": {
+    parameters: [
+      ["rules", "object[]"],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["persist_rules", "boolean", { optional: true, defaultValue: false }],
+      ["old_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["verbose", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["amount_min", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_max", "integer", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "recategorize_transaction": {
+    parameters: [
+      ["tx_id", "string"],
+      ["new_account_id", "string"],
+      ["old_account_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "recognize_gain_loss": {
+    parameters: [
+      ["date", "string"],
+      ["amount", "number"],
+      ["investment_account_id", "string"],
+      ["description", "string"],
+      ["gain_loss_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "reconcile_diff": {
+    parameters: [
+      ["account_id", "string"],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "reconcile_statement": {
+    parameters: [
+      ["account_id", "string"],
+      ["counterpart_id", "string"],
+      ["transactions", "object[]"],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "reconcile_statement_plan": {
+    parameters: [
+      ["file_path", "string"],
+      ["account_id", "string"],
+      ["counterpart_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["expected_balance", "number", { nullable: true, optional: true, defaultValue: null }],
+      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["desc_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["inflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["outflow_col", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_rows", "integer", { optional: true, defaultValue: 0 }],
+      ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
+      ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
+      ["min_likely_score", "number", { optional: true, defaultValue: 0.72 }],
+      ["sample_limit", "integer", { optional: true, defaultValue: 20 }]
+    ],
+    returns: { type: "object" }
+  },
+  "reconcile_to_balance": {
+    parameters: [
+      ["account_id", "string"],
+      ["target_balance", "number"],
+      ["offset_account_id", "string"],
+      ["date", "string"],
+      ["description", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["dry_run", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "record_investment": {
+    parameters: [
+      ["date", "string"],
+      ["amount", "number"],
+      ["investment_account_id", "string"],
+      ["source_account_id", "string"],
+      ["description", "string"],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "record_opening_balance": {
+    parameters: [
+      ["account_id", "string"],
+      ["amount", "number"],
+      ["date", "string"],
+      ["status", "string", { optional: true, defaultValue: "pending" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["counterpart_account_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "record_opening_balances": {
+    parameters: [
+      ["balances", "object[]"],
+      ["date", "string"],
+      ["status", "string", { optional: true, defaultValue: "pending" }]
+    ],
+    returns: { type: "object" }
+  },
+  "record_pending_expenses": {
+    parameters: [
+      ["account_id", "string"],
+      ["transactions", "object[]"],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["batch_label", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["tags", "object", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["skip_dedup", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "reopen_period": {
+    parameters: [
+      ["checkpoint_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "repair_integrity": {
+    parameters: [
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["backup", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
+  "rollback_import": {
+    parameters: [
+      ["batch_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "rollback_recategorize": {
+    parameters: [
+      ["batch_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "search_transactions": {
+    parameters: [
+      ["desc", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["query", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_min", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["amount_max", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["posted_at_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["posted_at_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["limit", "integer", { optional: true, defaultValue: 50 }],
+      ["offset", "integer", { optional: true, defaultValue: 0 }],
+      ["sort", "string", { optional: true, defaultValue: "date_desc" }]
+    ],
+    returns: { type: "object" }
+  },
+  "set_budget": {
+    parameters: [
+      ["account", "string"],
+      ["amount", "number"],
+      ["period", "string", { optional: true, defaultValue: "monthly" }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["rollover", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  },
+  "set_budgets": {
+    parameters: [
+      ["budgets", "object[]"],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "set_goal": {
+    parameters: [
+      ["account", "string"],
+      ["target", "number"],
+      ["name", "string"],
+      ["target_date", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["priority", "integer", { optional: true, defaultValue: 1 }]
+    ],
+    returns: { type: "object" }
+  },
+  "spending": {
+    parameters: [
+      ["year", "integer"],
+      ["month", "integer"],
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "spending_rate": {
+    parameters: [
+      ["account", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "suggest_budgets": {
+    parameters: [
+      ["months", "integer", { optional: true, defaultValue: 3 }],
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["skip_budgeted", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "top_descriptions": {
+    parameters: [
+      ["account_id", "string"],
+      ["limit", "integer", { optional: true, defaultValue: 50 }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "transfer": {
+    parameters: [
+      ["from_account_id", "string"],
+      ["to_account_id", "string"],
+      ["amount", "number"],
+      ["date", "string"],
+      ["description", "string"],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "trial_balance": {
+    parameters: [
+      ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "unbudgeted_spending": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object[]" }
+  },
+  "update_account": {
+    parameters: [
+      ["id", "string"],
+      ["name", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["code", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["parent_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["color_hex", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "update_asset": {
+    parameters: [
+      ["asset_id", "string"],
+      ["symbol", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["name", "string", { nullable: true, optional: true, defaultValue: null }]
+    ],
+    returns: { type: "object" }
+  },
+  "void_by_filter": {
+    parameters: [
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["posted_at_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["posted_at_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }],
+      ["hard_delete", "boolean", { optional: true, defaultValue: false }]
+    ],
+    returns: { type: "object" }
+  }
+} as const satisfies Record<string, ToolDefinition>;
+
+export type ToolSignatureName = keyof typeof TOOL_DEFINITIONS;
+
+function typeDisplay(definition: ToolTypeDefinition): string {
+  let rendered: string;
+  switch (definition.type) {
+    case "string": rendered = "string"; break;
+    case "number": rendered = "number"; break;
+    case "integer": rendered = "number"; break;
+    case "boolean": rendered = "boolean"; break;
+    case "object": rendered = "Record<string, unknown>"; break;
+    case "array": rendered = "unknown[]"; break;
+    case "string[]": rendered = "string[]"; break;
+    case "integer[]": rendered = "number[]"; break;
+    case "object[]": rendered = "Array<Record<string, unknown>>"; break;
+  }
+  return definition.nullable ? `${rendered} | null` : rendered;
+}
+
+function parameterType(parameter: ToolParameterDefinition): ToolTypeDefinition {
+  return { type: parameter[1], nullable: parameter[2]?.nullable };
+}
+
+function renderSignature(definition: ToolDefinition): string {
+  const params = definition.parameters
+    .map((parameter) => `${parameter[0]}${parameter[2]?.optional ? "?" : ""}: ${typeDisplay(parameterType(parameter))}`)
+    .join(", ");
+  return `(${params}) => ${typeDisplay(definition.returns)}`;
+}
+
+export const TOOL_SIGNATURES = Object.fromEntries(
+  Object.entries(TOOL_DEFINITIONS).map(([name, definition]) => [name, renderSignature(definition)])
+) as { [Name in ToolSignatureName]: string };

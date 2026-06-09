@@ -1,11 +1,10 @@
 # Clovis
 
-Clovis is a local-first bookkeeping package for Node.js. It provides a CLI, a
-package API, an MCP server, and a SQLite-backed ledger that runs without a cloud
-account.
+Clovis is a local-first bookkeeping package for Node.js. It provides a SQLite
+ledger engine, package APIs, a command-line interface, and an optional MCP
+server for local agent workflows.
 
-This package is the local ledger implementation. It is not a hosted service and
-not just a protocol document. The durable public surfaces are:
+Clovis is not a hosted service, sync service, or app UI. The public surfaces are:
 
 - the SQLite schema created by the ledger engine
 - the package exports under `clovis`, `clovis/core`, `clovis/app`, and
@@ -13,8 +12,8 @@ not just a protocol document. The durable public surfaces are:
 - the `clovis` CLI
 - the `clovis-mcp` server and its MCP tool signatures
 
-The package is intended to be the reference implementation for the local
-database format while the project is in the `0.x` line.
+This package currently defines the local database format while the project is in
+the `0.x` line.
 
 ## Status
 
@@ -48,6 +47,10 @@ npm install -g clovis
 ```
 
 ## CLI
+
+The CLI covers common setup, account, transaction, import/export, and report
+flows. The broader tool surface is available through `clovis/app` and
+`clovis-mcp`.
 
 ```sh
 clovis --db ./ledger.db init
@@ -163,5 +166,5 @@ npm run release:check
 ```
 
 The release check runs typecheck, build, the full test suite, package dry-run,
-runtime artifact scan, and local path leak scan. The test suite includes a
-contract row for every MCP tool exposed by the package.
+packed-package artifact checks, and packed-package local path leak checks. The
+test suite includes a contract row for every MCP tool exposed by the package.
