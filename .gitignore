@@ -18,3 +18,6 @@ coverage/
 .env.*
 .envrc
 
+# Internal agent/operator reports — never commit
+private/
+
