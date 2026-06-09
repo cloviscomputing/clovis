@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Thin human-facing wrapper over the shared app catalog. The CLI should not
+// own bookkeeping behavior; it only maps flags to tool calls and formats output.
 import { Command } from "commander";
 import { openLedger } from "../app/context.js";
 import { callTool } from "../app/catalog.js";

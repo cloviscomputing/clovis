@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Local release gate. Keep this stricter than a plain test run: it validates
+// source correctness, package contents, and accidental local-path leakage.
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
@@ -26,6 +28,9 @@ function escapeRegExp(value) {
 }
 
 function allowedPackedFile(file) {
+  // The npm package should contain only runtime artifacts and user-facing docs.
+  // Source, tests, local data, and private operational files must never ride
+  // along in a published tarball.
   return file === "README.md" ||
     file === "RELEASING.md" ||
     file === "LICENSE" ||

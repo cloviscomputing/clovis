@@ -2,6 +2,8 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { mcpDbPathFromEnv } from "./context.js";
 
+// Filesystem tools are intentionally rooted beside the MCP ledger unless the
+// host grants a narrower or broader root with CLOVIS_MCP_ALLOWED_ROOT.
 function configuredRoot(): string {
   return realpathSync(resolve(process.env.CLOVIS_MCP_ALLOWED_ROOT || dirname(mcpDbPathFromEnv())));
 }
@@ -33,6 +35,7 @@ export function resolveMcpReadPath(path: string, suffixes?: Set<string>): string
   const root = configuredRoot();
   const requested = requestedPath(root, path);
   if (!existsSync(requested)) throw new Error(`File not found: ${path}`);
+  // Reads use realpath to collapse symlinks before the root check.
   const target = realpathSync(requested);
   if (!underRoot(target, root)) throw new Error(`Path escapes allowed root: ${path}`);
   checkSuffix(target, suffixes);
@@ -45,6 +48,8 @@ export function resolveMcpReadPath(path: string, suffixes?: Set<string>): string
 export function resolveMcpWritePath(path: string, suffixes?: Set<string>): string {
   const root = configuredRoot();
   const requested = requestedPath(root, path);
+  // Writes require an existing real parent and refuse overwrite, which avoids
+  // following a final-path symlink or clobbering user data.
   const parent = realpathSync(dirname(requested));
   const target = resolve(parent, basename(requested));
   if (!underRoot(target, root)) throw new Error(`Path escapes allowed root: ${path}`);

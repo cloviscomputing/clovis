@@ -10,6 +10,8 @@ import { defaultDbPath, mcpDbPathFromEnv } from "../src/app/context.js";
 import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/mcp/signatures.js";
 import { inputShapeFromDefinition } from "../src/mcp/tools.js";
 
+// Core tests are invariant-oriented: schema shape, balancing, currency scale,
+// reports, imports, and public command behavior all meet here.
 const dirs: string[] = [];
 
 function tempLedger(): Ledger {
@@ -46,10 +48,15 @@ describe("ledger core", () => {
       }
       const columns = (table: string) => new Set((ledger.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
       expect(columns("journal_lines").has("quantity")).toBe(true);
+      expect(columns("journal_lines").has("book_id")).toBe(true);
       expect(columns("assets").has("scale")).toBe(true);
       expect(columns("prices").has("quote_asset_id")).toBe(true);
+      expect(columns("sources").has("book_id")).toBe(true);
+      expect(columns("annotations").has("book_id")).toBe(true);
       expect(columns("targets").has("quantity")).toBe(true);
       expect(columns("recurrences").has("quantity")).toBe(true);
+      expect(columns("lots").has("opened_journal_id")).toBe(true);
+      expect(columns("lots").has("status")).toBe(true);
     } finally {
       ledger.close();
     }
@@ -251,6 +258,60 @@ describe("ledger core", () => {
       ledger.close();
     }
   });
+
+  it("rejects account parent cycles before reports can lose balances", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const parent = ledger.createAccount("Parent", "asset");
+      const child = ledger.createAccount("Child", "asset", parent);
+      const equity = ledger.createAccount("Equity", "equity");
+      ledger.recordTransaction("2026-06-01", 100n, equity, child, usd, "Seed", "posted");
+
+      expect(() => ledger.updateAccount(parent, { parent_id: parent })).toThrow(/own parent/);
+      expect(() => ledger.updateAccount(parent, { parent_id: child })).toThrow(/cycle/);
+      expect(ledger.balanceSheet("2026-06-30", usd).total_assets).toBe(100n);
+
+      const doc = {
+        format: "clovis-ledger-v1",
+        assets: [{ id: "asset_usd", symbol: "USD", type: "currency", scale: 2 }],
+        accounts: [
+          { id: "acct_a", name: "A", type: "asset", parent_id: "acct_b" },
+          { id: "acct_b", name: "B", type: "asset", parent_id: "acct_a" }
+        ]
+      };
+      const target = tempLedger();
+      try {
+        const dryRun = target.importDocument(doc, true, true);
+        expect(dryRun.valid).toBe(false);
+        expect(dryRun.errors.join("\n")).toMatch(/cycle/);
+      } finally {
+        target.close();
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("rejects invalid persisted scalar values through core write paths", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      const food = ledger.createAccount("Food", "expense");
+
+      expect(() => ledger.createAsset("WEIRD", "currency", 2.5)).toThrow(/scale/);
+      expect(() => ledger.createPrice(usd, usd, "0", "2026-06-01")).toThrow(/positive/);
+      expect(() => ledger.createPrice(usd, usd, "-1.00", "2026-06-01")).toThrow(/positive/);
+      expect(() => ledger.setBudget(food, usd, 100n, "monthly", 2026, 13)).toThrow(/month/);
+      expect(() => ledger.setGoal(checking, usd, 100n, "Bad date", "2026-99-99")).toThrow(/date/);
+      expect(() => ledger.createRecurrence("2026-06-01", 100n, equity, checking, "Bad", "nonsense", null, usd)).toThrow(/frequency/);
+      expect(() => ledger.createRecurrence("2026-06-01", 0n, equity, checking, "Bad", "monthly", null, usd)).toThrow(/positive/);
+    } finally {
+      ledger.close();
+    }
+  });
 });
 
 describe("app and package surface", () => {
@@ -271,22 +332,29 @@ describe("app and package surface", () => {
       const equity = accounts.find((row) => row.name === "Opening Balances").id;
       const groceries = accounts.find((row) => row.name === "Groceries").id;
       const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, source) as any).id;
+      const brokerage = (callTool("create_account", { name: "Brokerage", type: "asset", default_asset_id: usd }, source) as any).id;
       callTool("create_transaction", { date: "2026-06-01", amount: 25, from_account_id: equity, to_account_id: checking, description: "Seed", status: "posted" }, source);
       callTool("create_price", { asset_id: usd, quote_id: usd, rate: "1.00", time: "2026-06-01" }, source);
       callTool("set_budget", { account: groceries, amount: 100, year: 2026, month: 6 }, source);
       callTool("set_goal", { account: checking, target: 500, name: "Emergency" }, source);
+      callTool("create_scheduled_transaction", { date: "2026-06-15", amount: 5, from_account_id: checking, to_account_id: groceries, description: "Planned groceries", frequency: "monthly" }, source);
+      callTool("buy_security", { account_id: brokerage, symbol: "AAPL", shares: "1.5", total_cost_cents: 12345, date: "2026-06-02" }, source);
       const exported = callTool("export_ledger", {}, source) as any;
       const doc = JSON.parse(exported.data);
       const imported = callTool("import_ledger", { data: exported.data }, target) as any;
       expect(init.accounts_created).toBeGreaterThan(0);
-      expect(imported.transactions).toBe(1);
+      expect(imported.transactions).toBe(doc.transactions.length);
       expect((callTool("integrity_check", {}, target) as any).ok).toBe(true);
       expect(target.listPrices()).toHaveLength(doc.prices.length);
+      expect(target.listLots()).toHaveLength(doc.lots.length);
+      expect(target.listRecurrences()).toHaveLength(doc.scheduled_transactions.length);
+      expect(String(target.listLots()[0].opened_journal_id)).toEqual(expect.stringMatching(/^tx_/));
       expect((target.db.prepare("SELECT quantity, period, year, month FROM targets WHERE type = 'budget'").get() as any)).toMatchObject({ quantity: 10000n, period: "monthly", year: 2026n, month: 6n });
       expect((target.db.prepare("SELECT quantity, name FROM targets WHERE type = 'goal'").get() as any)).toMatchObject({ quantity: 50000n, name: "Emergency" });
 
       const importedFresh = callTool("import_ledger", { data: exported.data, preserve_ids: false }, fresh) as any;
-      expect(importedFresh.transactions).toBe(1);
+      expect(importedFresh.transactions).toBe(doc.transactions.length);
+      expect((callTool("integrity_check", {}, fresh) as any).ok).toBe(true);
       expect(new Set(fresh.listTransactions({ status: null }).map((tx) => tx.id))).not.toEqual(new Set(source.listTransactions({ status: null }).map((tx) => tx.id)));
     } finally {
       source.close();
@@ -738,6 +806,56 @@ describe("app and package surface", () => {
     }
   });
 
+  it("protects lot-linked journals from generic void and delete workflows", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const tx = callTool("buy_security", { account_id: accounts.Checking, symbol: "AAPL", shares: "1.5", total_cost_cents: 12345, date: "2026-06-01" }, ledger) as any;
+      const lot = ledger.listLots()[0];
+      expect(lot.opened_journal_id).toBe(tx.id);
+      expect(lot.status).toBe("open");
+
+      expect(() => callTool("delete_transaction", { id: tx.id }, ledger)).toThrow(/linked investment lots/);
+      expect(() => callTool("delete_transaction", { id: tx.id, hard_delete: true }, ledger)).toThrow(/linked investment lots/);
+      expect(() => callTool("recategorize_transaction", { tx_id: tx.id, new_account_id: accounts.Groceries }, ledger)).toThrow(/linked investment lots/);
+      expect(ledger.getTx(tx.id)?.status).toBe("posted");
+      expect(ledger.listLots()).toHaveLength(1);
+      expect((callTool("integrity_check", {}, ledger) as any).ok).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("cleans owned annotations on hard deletes and repairs orphan annotations", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      const tx = ledger.recordTransaction("2026-06-01", 100n, equity, checking, usd, "Seed", "posted");
+      ledger.createAnnotation("tx", tx.id, "memo", "delete me");
+      ledger.deleteTx(tx.id);
+      expect(ledger.listAnnotations("tx", tx.id)).toEqual([]);
+
+      const temp = ledger.createAccount("Temp", "asset");
+      ledger.createAnnotation("account", temp, "default_asset", usd);
+      ledger.deleteAccount(temp);
+      expect(ledger.listAnnotations("account", temp)).toEqual([]);
+
+      ledger.createAnnotation("tx", "tx_missing", "memo", "orphan");
+      const before = callTool("integrity_check", {}, ledger) as any;
+      expect(before.ok).toBe(false);
+      expect(before.orphan_annotations).toHaveLength(1);
+      const repaired = callTool("repair_integrity", { dry_run: false, backup: false }, ledger) as any;
+      expect(repaired.repaired).toBe(1);
+      expect(repaired.ok).toBe(true);
+      expect(callTool("integrity_check", {}, ledger)).toMatchObject({ ok: true });
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("rolls back security purchase journals when lot recording fails", () => {
     const ledger = tempLedger();
     try {
@@ -928,6 +1046,26 @@ describe("app and package surface", () => {
       }
     } finally {
       source.close();
+    }
+  });
+
+  it("catches import uniqueness conflicts during dry-run", () => {
+    const ledger = tempLedger();
+    try {
+      ledger.createAccount("Checking", "asset");
+      const doc = {
+        format: "clovis-ledger-v1",
+        assets: [{ id: "asset_usd", symbol: "USD", type: "currency", scale: 2 }],
+        accounts: [{ id: "acct_checking", name: "Checking", type: "asset" }]
+      };
+
+      const dryRun = callTool("import_ledger", { data: JSON.stringify(doc), preserve_ids: false, dry_run: true }, ledger) as any;
+      expect(dryRun.valid).toBe(false);
+      expect(dryRun.errors.join("\n")).toMatch(/name already exists/);
+      expect(() => callTool("import_ledger", { data: JSON.stringify(doc), preserve_ids: false }, ledger)).toThrow(/Ledger import validation failed/);
+      expect(ledger.listAccounts().filter((account) => account.name === "Checking")).toHaveLength(1);
+    } finally {
+      ledger.close();
     }
   });
 

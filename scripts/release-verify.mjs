@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// User-path package verification. Unlike release:check, this installs from the
+// public registry into an empty consumer project and exercises the published API.
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +29,8 @@ try {
   writeFileSync(join(dir, "package.json"), "{\"type\":\"module\"}\n", "utf8");
   run("npm", ["install", `clovis@${version}`, "--ignore-scripts", "--no-audit", "--no-fund", "--silent"], { cwd: dir, timeout: 120_000 });
 
+  // Public exports are the package contract. Deep dist imports must stay
+  // blocked so internal files can change without creating accidental APIs.
   const apiCheck = join(dir, "api-check.mjs");
   writeFileSync(apiCheck, [
     "import { Ledger as TopLevelLedger, SCHEMA_VERSION, VERSION } from 'clovis';",

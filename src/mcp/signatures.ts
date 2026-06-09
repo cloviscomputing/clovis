@@ -1,3 +1,5 @@
+// Structured MCP contract. This is the source of truth for tool inputs, return
+// shape summaries, generated text signatures, and runtime Zod schemas.
 export type ToolValueType =
   | "string"
   | "number"

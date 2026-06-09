@@ -2,6 +2,8 @@ import type { Account, AccountType } from "./types.js";
 
 export type NormalSide = "debit" | "credit";
 
+// Accounting reports use normal balances for presentation; journal storage uses
+// signed quantities and remains balanced per asset.
 export function normalSide(accountType: AccountType): NormalSide {
   switch (accountType) {
     case "asset":
@@ -48,4 +50,3 @@ export function annotateAmounts(accountType: AccountType, raw: bigint) {
     credit: dc.credit
   };
 }
-

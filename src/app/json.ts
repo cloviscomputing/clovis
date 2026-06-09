@@ -2,6 +2,8 @@ import { assertSafeNumber, fromAtomicUnits } from "../core/money.js";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
+// Core keeps money and quantities as bigint. Public JSON can only emit safe
+// numbers, so this is the last-mile guard before CLI/MCP responses leave.
 export function publicize(value: unknown, path = "value"): JsonValue {
   if (typeof value === "bigint") return assertSafeNumber(value, path);
   if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
@@ -29,4 +31,3 @@ export function addDisplayFields<T extends Record<string, unknown>>(row: T, quan
   }
   return row;
 }
-

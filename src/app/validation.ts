@@ -2,6 +2,8 @@ import type { Ledger } from "../core/ledger.js";
 import type { AccountType, AssetType, TxStatus } from "../core/types.js";
 import { toAtomicUnits } from "../core/money.js";
 
+// App-level validation normalizes user-facing arguments before they cross into
+// core. Core still enforces accounting invariants and foreign-key integrity.
 export function validateDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error("date must be YYYY-MM-DD");
   const parsed = new Date(`${value}T00:00:00Z`);
@@ -46,6 +48,8 @@ export function parseTxStatus(value?: string | null): TxStatus | null {
 }
 
 export function resolveAsset(ledger: Ledger, ref?: string | null, symbol?: string | null): string {
+  // Symbol creation is explicit here for import/init flows. Generic operations
+  // should pass an asset id or resolve an account default before calling core.
   if (ref) {
     const byId = ledger.getAsset(ref);
     if (byId) return byId.id;

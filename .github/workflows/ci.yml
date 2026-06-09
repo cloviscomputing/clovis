@@ -1,5 +1,8 @@
 name: CI
 
+# CI is the release-readiness gate for every change. It intentionally runs the
+# same package-level check used before publish so main never drifts from what
+# npm would accept.
 on:
   pull_request:
   push:

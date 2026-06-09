@@ -7,6 +7,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, describe, expect, it } from "vitest";
 import { TOOL_NAMES } from "../src/app/index.js";
 
+// These tests exercise the package the way consumers do: built MCP stdio,
+// packed tarball install, public exports, and installed binaries.
 const dirs: string[] = [];
 
 afterEach(() => {

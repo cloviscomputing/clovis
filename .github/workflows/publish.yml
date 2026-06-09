@@ -1,10 +1,14 @@
 name: Publish
 
+# Publishing is deliberately release-driven, not push-driven. GitHub Releases
+# are the human approval point; npm Trusted Publishing supplies provenance.
 on:
   release:
     types:
       - published
 
+# Only one npm publish may run at a time. npm versions are immutable, so racing
+# release jobs would create confusing partial failures.
 concurrency:
   group: npm-publish
   cancel-in-progress: false
@@ -17,6 +21,7 @@ jobs:
   npm:
     runs-on: ubuntu-latest
     env:
+      # Stable releases become latest; prereleases stay on next until promoted.
       NPM_TAG: ${{ github.event.release.prerelease && 'next' || 'latest' }}
     steps:
       - uses: actions/checkout@v4

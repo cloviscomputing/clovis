@@ -8,6 +8,8 @@ import { TOOL_SIGNATURES } from "../src/mcp/signatures.js";
 
 type Args = Record<string, unknown>;
 
+// One contract case per MCP tool. This catches accidental surface drift even
+// when a tool's implementation delegates to shared app/core code.
 type TestContext = {
   ledger: Ledger;
   dir: string;

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Post-publish alignment check. This script answers one question: do git,
+// GitHub Releases, and npm all point at the exact same version and commit?
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -29,6 +31,8 @@ if (!version) fail("package.json version is missing");
 const dirty = run("git", ["status", "--porcelain"]);
 if (dirty) fail(`Working tree is dirty:\n${dirty}`);
 
+// npm records the source commit as gitHead. Verifying it against the local tag
+// catches the most expensive release error: a package built from the wrong ref.
 const head = run("git", ["rev-parse", "HEAD"]);
 let tagCommit;
 try {

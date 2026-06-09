@@ -1,3 +1,5 @@
+// Public core types intentionally include a few compatibility aliases
+// (`asset_type`, `account_type`, `qty_cents`) while core storage stays canonical.
 export type AccountType = "asset" | "liability" | "equity" | "income" | "expense";
 export type AssetType = "currency" | "commodity" | "custom" | "security";
 export type TxStatus = "posted" | "pending" | "planned" | "void";

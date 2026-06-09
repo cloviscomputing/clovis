@@ -1,6 +1,8 @@
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_SAFE = BigInt(Number.MIN_SAFE_INTEGER);
 
+// Money enters as decimal text/number and is stored as integer atomic units at
+// the asset's scale. Avoid floating arithmetic after parsing.
 export function assertSafeNumber(value: bigint, field = "quantity"): number {
   if (value > MAX_SAFE || value < MIN_SAFE) {
     throw new RangeError(`${field} exceeds JavaScript safe integer range`);
@@ -32,6 +34,8 @@ export function toAtomicUnits(value: number | string | bigint, scale: number): b
   const kept = padded.slice(0, scale) || "0";
   const guard = Number(padded[scale] ?? "0");
   let out = whole * 10n ** BigInt(scale) + BigInt(kept);
+  // Half-up rounding at the asset scale keeps imports predictable while storage
+  // remains integer-only.
   if (guard >= 5) out += 1n;
   return negative ? -out : out;
 }
@@ -88,4 +92,3 @@ export function reduceRatio(numerator: bigint, denominator: bigint): { numerator
   const divisor = gcd(numerator, denominator);
   return { numerator: numerator / divisor, denominator: denominator / divisor };
 }
-

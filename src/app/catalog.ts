@@ -10,6 +10,8 @@ import { publicize, stringifyPublic } from "./json.js";
 import { assertMcpDataSize, redactPath, resolveMcpReadPath, resolveMcpWritePath } from "./filesystem.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
+// Shared command catalog for CLI and MCP. This layer translates user/tool
+// arguments into Ledger calls and public JSON shapes; core owns durable state.
 type Args = Record<string, any>;
 type Handler = (ledger: Ledger, args: Args) => unknown;
 type Row = Record<string, any>;
@@ -75,6 +77,8 @@ function asset(ledger: Ledger, ref?: string | null, symbol?: string | null): str
 }
 
 function explicitAsset(ledger: Ledger, ref?: string | null, label = "asset_id"): string {
+  // Currency is never guessed. Callers must provide an asset explicitly or use
+  // an account default that has already been recorded on the ledger.
   if (!ref) throw new Error(`${label} is required; Clovis does not infer a default currency`);
   return resolveAsset(ledger, ref);
 }
@@ -120,12 +124,16 @@ function display(ledger: Ledger, quantity: bigint, assetId?: string | null): num
 }
 
 function accountPublic(row: Account, ledger?: Ledger): Row {
+  // Account rows stay normalized in SQLite; default_asset is exposed from
+  // annotations so callers can understand currency context immediately.
   const defaultAssetId = ledger ? accountDefaultAsset(ledger, row.id) : null;
   const defaultAsset = defaultAssetId ? ledger?.getAsset(defaultAssetId) : null;
   return { ...row, type: row.account_type, default_asset_id: defaultAssetId, default_asset_symbol: defaultAsset?.symbol ?? null };
 }
 
 function entriesPublic(ledger: Ledger, txId: string): Row[] {
+  // Journal lines carry signed atomic quantities. Public entries add account,
+  // asset, and display context without changing the underlying sign convention.
   const accounts = new Map(ledger.listAccounts().map((row) => [row.id, row]));
   const assets = new Map(ledger.listAssets().map((row) => [row.id, row]));
   return ledger.getEntries(txId).map((entry) => {
@@ -144,6 +152,8 @@ function entriesPublic(ledger: Ledger, txId: string): Row[] {
 }
 
 function txPublic(ledger: Ledger, tx: Journal, compact = false): Row {
+  // Representative transaction amounts are derived from the largest line. The
+  // full entries array remains authoritative for multi-leg or multi-asset work.
   const entries = entriesPublic(ledger, tx.id);
   const main = entries.toSorted((a, b) => Number(BigInt(b.quantity) ** 2n - BigInt(a.quantity) ** 2n))[0];
   const amount = main ? (BigInt(main.quantity) < 0n ? -BigInt(main.quantity) : BigInt(main.quantity)) : 0n;
@@ -281,6 +291,8 @@ function incomeStatementRows(ledger: Ledger, year: number, month: number | null,
 }
 
 function parseCsv(text: string): Row[] {
+  // Statement imports use a bounded CSV parser instead of accepting arbitrary
+  // file sizes or column counts through MCP.
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim() !== "");
   if (lines.length === 0) return [];
   const split = (line: string, lineNumber: number) => {
@@ -338,6 +350,8 @@ function parseStatementRows(filePath: string, args: Args = {}): Row[] {
 }
 
 function importTransactionRows(ledger: Ledger, accountId: string, counterpartId: string, rows: Row[], options: Args = {}) {
+  // Statement amounts are signed relative to the statement account: positive
+  // amounts debit the account, negative amounts credit it.
   const status = parseTxStatus(options.status ?? "posted") ?? "posted";
   const assetId = options.asset_id ? explicitAsset(ledger, options.asset_id) : options.currency ? asset(ledger, null, options.currency) : accountAsset(ledger, accountId);
   const created: Row[] = [];
@@ -407,6 +421,8 @@ const MAX_MATCH_INPUT_LENGTH = 2048;
 const NESTED_QUANTIFIER_PATTERN = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/;
 
 function safeMatchRegex(pattern: unknown): RegExp {
+  // Regex rules are user-provided and can run across many rows, so they are
+  // length-bounded and reject obvious catastrophic-backtracking shapes.
   const value = String(pattern ?? "");
   if (!value) throw new Error("pattern is required");
   if (value.length > MAX_MATCH_PATTERN_LENGTH) throw new Error(`pattern must be ${MAX_MATCH_PATTERN_LENGTH} characters or fewer`);
@@ -478,6 +494,8 @@ function mcpRequiresDestructive(name: string, args: Args): boolean {
 }
 
 function assertMcpCapability(name: string, args: Args): void {
+  // MCP can be driven by model output. Filesystem and destructive operations
+  // therefore require explicit environment capabilities.
   const caps = mcpCapabilities();
   const missing: string[] = [];
   if (mcpRequiresFilesystem(name, args) && !hasMcpCapability(caps, "filesystem")) missing.push("filesystem");
@@ -488,6 +506,8 @@ function assertMcpCapability(name: string, args: Args): void {
 }
 
 const handlers: Record<ToolName, Handler> = {
+  // One handler per public tool. Handlers may compose other handlers, but
+  // durable writes still flow through Ledger methods.
   create_asset: (ledger, args) => {
     const assetId = ledger.createAsset(args.symbol, args.asset_type ?? "currency", Number(args.decimals ?? args.scale ?? 2), args.name ?? "");
     return { ...ledger.getAsset(assetId)!, warning: ledger.getAssetBySymbol(args.symbol) ? undefined : undefined };
@@ -1319,7 +1339,14 @@ const handlers: Record<ToolName, Handler> = {
     const before = ledger.integrityCheck();
     const dryRun = args.dry_run !== false;
     const backup = !dryRun && args.backup !== false ? ledger.backupNow().path : null;
-    return { dry_run: dryRun, backup: backup ? redactPath(backup) : args.backup !== false, before, repaired: 0, ok: before.ok };
+    const repairable = [
+      ...((before as Row).orphan_annotations ?? []) as Row[],
+      ...((before as Row).invalid_default_assets ?? []) as Row[]
+    ];
+    const ids = [...new Set(repairable.map((row) => String(row.id)).filter(Boolean))];
+    if (!dryRun) for (const id of ids) ledger.deleteAnnotation(id);
+    const after = dryRun ? before : ledger.integrityCheck();
+    return { dry_run: dryRun, backup: backup ? redactPath(backup) : args.backup !== false, before, repaired: dryRun ? 0 : ids.length, after, ok: (after as Row).ok };
   },
   list_tags: (ledger, args) => ledger.listAnnotations(args.entity_type, args.entity_id),
   delete_tag: (ledger, args) => { ledger.deleteAnnotation(args.tag_id); return { deleted: args.tag_id }; },
@@ -1339,6 +1366,8 @@ const handlers: Record<ToolName, Handler> = {
 export const toolHandlers = handlers;
 
 export function callTool(name: string, args: Args = {}, providedLedger?: Ledger): unknown {
+  // Tests and CLI pass a ledger explicitly. MCP opens from env and checks
+  // capabilities before any disk access.
   if (!TOOL_NAMES.includes(name as ToolName)) throw new Error(`Tool '${name}' is not implemented`);
   const handler = handlers[name as ToolName];
   if (providedLedger) return publicize(handler(providedLedger, args));

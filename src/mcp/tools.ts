@@ -6,6 +6,8 @@ import { TOOL_DEFINITIONS, type ToolDefinition, type ToolParameterDefinition } f
 
 type Shape = Record<string, ZodTypeAny>;
 
+// Runtime schemas are intentionally stricter than TypeScript metadata: dates,
+// array sizes, and text sizes are bounded before tool handlers run.
 const MAX_STRING_LENGTH = 4096;
 const MAX_ARRAY_LENGTH = 1000;
 
