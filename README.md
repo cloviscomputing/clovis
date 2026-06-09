@@ -1,8 +1,8 @@
 # Clovis
 
-Clovis is the official TypeScript implementation of the Clovis local
-bookkeeping engine for Node.js. It provides a CLI, a package API, an MCP
-server, and a SQLite-backed ledger that runs without a cloud account.
+Clovis is a local-first bookkeeping package for Node.js. It provides a CLI, a
+package API, an MCP server, and a SQLite-backed ledger that runs without a cloud
+account.
 
 This package is the local ledger implementation. It is not a hosted service and
 not just a protocol document. The durable public surfaces are:
@@ -13,8 +13,8 @@ not just a protocol document. The durable public surfaces are:
 - the `clovis` CLI
 - the `clovis-mcp` server and its MCP tool signatures
 
-Future Clovis apps are expected to read and write the same local database
-format through this package or through the schema it owns.
+The package is intended to be the reference implementation for the local
+database format while the project is in the `0.x` line.
 
 ## Status
 
@@ -22,10 +22,9 @@ The database format is versioned. The current schema is `SCHEMA_VERSION = 1`.
 Fresh databases are created directly with this schema. Ledger JSON snapshots can
 be exported and imported with `export_ledger` and `import_ledger`.
 
-The schema is intended to be a product contract, not a throwaway cache. Patch
-and minor releases should continue to read schema v1 databases. If a future
-release needs a schema change, it should ship a documented upgrade path before
-Clovis applications depend on it.
+The schema is a versioned local data format, but the package is still pre-1.0.
+Patch releases should continue to read schema v1 databases. Minor releases may
+revise the format and should document the upgrade path.
 
 ## Financial Records
 
@@ -67,6 +66,18 @@ CLOVIS_DB=./ledger.db clovis-mcp
 `clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools are limited to the
 ledger directory by default. Set `CLOVIS_MCP_ALLOWED_ROOT` to allow imports,
 exports, and backups under another local directory.
+
+MCP file operations and destructive operations are disabled unless explicitly
+enabled:
+
+```sh
+CLOVIS_MCP_CAPABILITIES=filesystem clovis-mcp
+CLOVIS_MCP_CAPABILITIES=filesystem,destructive clovis-mcp
+```
+
+Use `filesystem` for local file import/export/backup tools. Use `destructive`
+for delete, rollback, hard state transition, and non-dry-run bulk mutation
+tools.
 
 ## Package API
 
@@ -152,5 +163,5 @@ npm run release:check
 ```
 
 The release check runs typecheck, build, the full test suite, package dry-run,
-runtime artifact scan, and wording/local path scan. The test suite includes a
+runtime artifact scan, and local path leak scan. The test suite includes a
 contract row for every MCP tool exposed by the package.

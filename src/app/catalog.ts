@@ -354,6 +354,75 @@ function unsupportedArguments(values: Args): void {
   if (names.length) throw new Error(`Unsupported MCP parameter(s): ${names.join(", ")}`);
 }
 
+const MCP_FILESYSTEM_TOOLS = new Set([
+  "apply_reconciliation_plan",
+  "backup_now",
+  "import_file",
+  "preview_import",
+  "process_statement"
+]);
+
+const MCP_DESTRUCTIVE_TOOLS = new Set([
+  "close_period",
+  "commit_batch",
+  "delete_account",
+  "delete_asset",
+  "delete_budget",
+  "delete_budgets",
+  "delete_goal",
+  "delete_match_rule",
+  "delete_match_rules",
+  "delete_tag",
+  "delete_transaction",
+  "discard_branch",
+  "merge_accounts",
+  "reopen_period",
+  "rollback_import",
+  "rollback_recategorize"
+]);
+
+function mcpCapabilities(): Set<string> {
+  return new Set(String(process.env.CLOVIS_MCP_CAPABILITIES ?? "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean));
+}
+
+function hasMcpCapability(caps: Set<string>, capability: string): boolean {
+  return caps.has("all") || caps.has(capability);
+}
+
+function mcpRequiresFilesystem(name: string, args: Args): boolean {
+  return MCP_FILESYSTEM_TOOLS.has(name) ||
+    (name === "export_ledger" && args.output_path != null) ||
+    (name === "export_transactions" && args.output_path != null) ||
+    (name === "import_ledger" && args.file_path != null);
+}
+
+function mcpRequiresDestructive(name: string, args: Args): boolean {
+  return MCP_DESTRUCTIVE_TOOLS.has(name) ||
+    (name === "apply_match_rules" && args.dry_run === false) ||
+    (name === "apply_pattern" && args.dry_run === false) ||
+    (name === "apply_reconciliation_plan" && args.dry_run === false) ||
+    (name === "delete_tags" && args.dry_run === false) ||
+    (name === "discard_batch" && args.dry_run === false) ||
+    (name === "migrate_asset_entries" && args.dry_run === false) ||
+    (name === "move_transactions" && args.dry_run === false) ||
+    (name === "process_statement" && args.commit === true) ||
+    (name === "recategorize_by_pattern" && args.dry_run === false) ||
+    (name === "void_by_filter" && args.dry_run === false);
+}
+
+function assertMcpCapability(name: string, args: Args): void {
+  const caps = mcpCapabilities();
+  const missing: string[] = [];
+  if (mcpRequiresFilesystem(name, args) && !hasMcpCapability(caps, "filesystem")) missing.push("filesystem");
+  if (mcpRequiresDestructive(name, args) && !hasMcpCapability(caps, "destructive")) missing.push("destructive");
+  if (missing.length) {
+    throw new Error(`MCP tool '${name}' requires CLOVIS_MCP_CAPABILITIES=${missing.join(",")}`);
+  }
+}
+
 const handlers: Record<ToolName, Handler> = {
   create_asset: (ledger, args) => {
     const assetId = ledger.createAsset(args.symbol, args.asset_type ?? "currency", Number(args.decimals ?? args.scale ?? 2), args.name ?? "");
@@ -1177,6 +1246,7 @@ export function callTool(name: string, args: Args = {}, providedLedger?: Ledger)
   if (!TOOL_NAMES.includes(name as ToolName)) throw new Error(`Tool '${name}' is not implemented`);
   const handler = handlers[name as ToolName];
   if (providedLedger) return publicize(handler(providedLedger, args));
+  assertMcpCapability(name, args);
   const ledger = openMcpLedger();
   try {
     return publicize(handler(ledger, args));

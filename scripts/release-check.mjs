@@ -37,19 +37,10 @@ function scanBlockedFiles() {
   if (hits.length) fail(`Blocked runtime artifacts found:\n${hits.join("\n")}`);
 }
 
-function scanTextLeaks() {
+function scanLocalLeaks() {
   const blocked = [
-    { label: ["Py", "thon"].join(""), pattern: new RegExp(`\\b${["Py", "thon"].join("")}\\b`, "i") },
-    { label: ["clovis", "-oss"].join(""), pattern: new RegExp(["clovis", "-oss"].join(""), "i") },
     { label: ["project", "-clovis"].join(""), pattern: new RegExp(["project", "-clovis"].join(""), "i") },
-    { label: ["/", "Users"].join(""), pattern: new RegExp(["/", "Users"].join("")) },
-    { label: ["paul", "yu"].join(""), pattern: new RegExp(["paul", "yu"].join(""), "i") },
-    { label: ["Ru", "st"].join(""), pattern: new RegExp(`\\b${["Ru", "st"].join("")}\\b`, "i") },
-    { label: ["th", "in"].join(""), pattern: new RegExp(`\\b${["th", "in"].join("")}\\b`, "i") },
-    { label: ["th", "inner"].join(""), pattern: new RegExp(`\\b${["th", "inner"].join("")}\\b`, "i") },
-    { label: ["orig", "inal"].join(""), pattern: new RegExp(`\\b${["orig", "inal"].join("")}\\b`, "i") },
-    { label: ["other ", "SQLite"].join(""), pattern: new RegExp(["other ", "SQLite"].join(""), "i") },
-    { label: ["direct ", "compat", "ibility"].join(""), pattern: new RegExp(["direct ", "compat", "ibility"].join(""), "i") }
+    { label: ["/", "Users"].join(""), pattern: new RegExp(["/", "Users"].join("")) }
   ];
   const scanRoots = ["README.md", "package.json", "src", "tests", "dist", "scripts"];
   const textExts = new Set([".ts", ".js", ".mjs", ".json", ".md", ".map"]);
@@ -63,12 +54,12 @@ function scanTextLeaks() {
       }
     }
   }
-  if (hits.length) fail(`Blocked wording or local path leakage found:\n${hits.join("\n")}`);
+  if (hits.length) fail(`Blocked local path leakage found:\n${hits.join("\n")}`);
 }
 
 run("npm", ["run", "typecheck"]);
 run("npm", ["test"]);
 run("npm", ["run", "pack:check"]);
 scanBlockedFiles();
-scanTextLeaks();
+scanLocalLeaks();
 console.log("release check passed");

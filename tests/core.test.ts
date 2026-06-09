@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -674,14 +674,46 @@ describe("app and package surface", () => {
         callTool("init_defaults", { template: "personal" }, ledger);
         const result = callTool("export_ledger", { output_path: "snapshot.json" }, ledger) as any;
         expect(String(result.file).endsWith("snapshot.json")).toBe(true);
+        expect(String(result.file)).not.toContain(dir);
         expect(() => callTool("export_ledger", { output_path: "snapshot.json" }, ledger)).toThrow(/already exists/);
         expect(() => callTool("export_ledger", { output_path: "../outside.json" }, ledger)).toThrow(/escapes/);
+        const outside = mkdtempSync(join(tmpdir(), "clovis-outside-"));
+        dirs.push(outside);
+        writeFileSync(join(outside, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Escape\n", "utf8");
+        symlinkSync(join(outside, "statement.csv"), join(dir, "statement-link.csv"));
+        symlinkSync(outside, join(dir, "outside-link"));
+        expect(() => callTool("import_file", { file_path: "statement-link.csv", account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger)).toThrow(/escapes/);
+        expect(() => callTool("export_ledger", { output_path: "outside-link/snapshot.json" }, ledger)).toThrow(/escapes/);
       } finally {
         if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
         if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
       }
     } finally {
       ledger.close();
+    }
+  });
+
+  it("requires explicit MCP capabilities for filesystem and destructive tools", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-mcp-cap-"));
+    dirs.push(dir);
+    const previousDb = process.env.CLOVIS_DB;
+    const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+    const previousCaps = process.env.CLOVIS_MCP_CAPABILITIES;
+    process.env.CLOVIS_DB = join(dir, "ledger.db");
+    process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+    try {
+      delete process.env.CLOVIS_MCP_CAPABILITIES;
+      expect(() => callTool("backup_now", {})).toThrow(/filesystem/);
+      expect(() => callTool("delete_account", { id: "missing" })).toThrow(/destructive/);
+      process.env.CLOVIS_MCP_CAPABILITIES = "filesystem";
+      const backup = callTool("backup_now", {}) as any;
+      expect(String(backup.path)).toContain("backups");
+      expect(String(backup.path)).not.toContain(dir);
+      expect(() => callTool("delete_account", { id: "missing" })).toThrow(/destructive/);
+    } finally {
+      if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
+      if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+      if (previousCaps == null) delete process.env.CLOVIS_MCP_CAPABILITIES; else process.env.CLOVIS_MCP_CAPABILITIES = previousCaps;
     }
   });
 
