@@ -603,6 +603,27 @@ describe("app and package surface", () => {
     }
   });
 
+  it("stores import batch provenance on journal source_id", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      const result = callTool("import_transactions", {
+        account_id: checking,
+        counterpart_id: equity,
+        asset_id: usd,
+        batch_label: "June statement",
+        transactions: [{ date: "2026-06-01", amount: 25, description: "Deposit" }]
+      }, ledger) as any;
+      expect(result.batch_id).toEqual(expect.stringMatching(/^batch_/));
+      expect(ledger.getTx(result.transactions[0].id)?.source_id).toBe(result.batch_id);
+      expect(callTool("list_import_batches", {}, ledger)).toContainEqual(expect.objectContaining({ id: result.batch_id, tx_count: 1 }));
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("records security purchases as balanced multi-asset journals", () => {
     const ledger = tempLedger();
     try {
@@ -619,6 +640,22 @@ describe("app and package surface", () => {
       expect(holdings).toContainEqual(expect.objectContaining({ account_name: "AAPL Holdings", asset_symbol: "AAPL", quantity: 150000000 }));
       const lot = ledger.db.prepare("SELECT quantity, cost_quantity FROM lots").get() as any;
       expect(lot).toMatchObject({ quantity: 150000000n, cost_quantity: 12400n });
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("rolls back security purchase journals when lot recording fails", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      (ledger as unknown as { db: { exec(sql: string): void } }).db.exec("CREATE TRIGGER fail_lots BEFORE INSERT ON lots BEGIN SELECT RAISE(ABORT, 'lot failure'); END;");
+      expect(() => callTool("buy_security", { account_id: accounts.Checking, symbol: "AAPL", shares: "1.5", total_cost_cents: 12345, date: "2026-06-01" }, ledger)).toThrow(/lot failure/);
+      expect(ledger.listTransactions({ status: null })).toHaveLength(0);
+      expect(ledger.getAssetBySymbol("AAPL")).toBeNull();
+      expect(ledger.listAccounts().map((account) => account.name)).not.toContain("AAPL Holdings");
+      expect(ledger.listLots()).toHaveLength(0);
     } finally {
       ledger.close();
     }

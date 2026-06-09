@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { SQLInputValue } from "node:sqlite";
 import { Ledger } from "../core/ledger.js";
 import type { Account, AccountType, Asset, Journal, JournalLine, TxStatus } from "../core/types.js";
 import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
@@ -151,22 +150,7 @@ function amountForAccount(ledger: Ledger, txId: string, accountId: string, asset
 }
 
 function budgetRows(ledger: Ledger, accountId?: string | null, year?: number | null, month?: number | null): Row[] {
-  let sql = "SELECT * FROM targets WHERE type = 'budget'";
-  const params: SQLInputValue[] = [];
-  if (accountId) {
-    sql += " AND account_id = ?";
-    params.push(accountId);
-  }
-  if (year != null) {
-    sql += " AND (year IS NULL OR year = ?)";
-    params.push(year);
-  }
-  if (month != null) {
-    sql += " AND (month IS NULL OR month = ?)";
-    params.push(month);
-  }
-  sql += " ORDER BY account_id, year, month";
-  return ledger.db.prepare(sql).all(...params) as Row[];
+  return ledger.listBudgetTargets({ accountId, year, month });
 }
 
 function spendingRows(ledger: Ledger, year?: number | null, month?: number | null, status = "posted", quoteAssetId?: string | null, returnMissing = false): Row[] | { rows: Row[]; missing: Row[] } {
@@ -321,9 +305,13 @@ function importTransactionRows(ledger: Ledger, accountId: string, counterpartId:
       const signed = options.amount_convention === "unsigned_charges" ? -((quantity < 0n) ? -quantity : quantity) : quantity;
       const fingerprint = `${row.date}|${signed}|${String(row.description ?? "").toLowerCase()}`;
       if (!options.skip_dedup && existing.has(fingerprint)) return;
+      const postOptions = {
+        sourceId: options.source_id ? String(options.source_id) : null,
+        externalId: row.external_id ? String(row.external_id) : null
+      };
       const tx = signed >= 0n
-        ? ledger.recordTransaction(String(row.date), signed, rowCounterpart, accountId, assetId, String(row.description ?? ""), status)
-        : ledger.recordTransaction(String(row.date), -signed, accountId, rowCounterpart, assetId, String(row.description ?? ""), status);
+        ? ledger.recordTransaction(String(row.date), signed, rowCounterpart, accountId, assetId, String(row.description ?? ""), status, postOptions)
+        : ledger.recordTransaction(String(row.date), -signed, accountId, rowCounterpart, assetId, String(row.description ?? ""), status, postOptions);
       for (const [key, value] of Object.entries(row.tags ?? {})) tagTx(ledger, tx.id, key, String(value));
       created.push(txPublic(ledger, tx));
       existing.add(fingerprint);
@@ -335,18 +323,11 @@ function importTransactionRows(ledger: Ledger, accountId: string, counterpartId:
 }
 
 function batch(ledger: Ledger, label?: string | null, metadata: Row = {}): string {
-  const batchId = id("batch");
-  ledger.db.prepare("INSERT INTO sources(id, type, label, status, created_at, metadata_json) VALUES (?, 'import', ?, 'open', ?, ?)").run(
-    batchId,
-    label ?? "",
-    now(),
-    JSON.stringify(metadata)
-  );
-  return batchId;
+  return ledger.createSource("import", label, metadata);
 }
 
 function txIdsForBatch(ledger: Ledger, batchId: string): string[] {
-  return (ledger.db.prepare("SELECT entity_id FROM annotations WHERE entity_type = 'tx' AND key = 'import_batch' AND value = ?").all(batchId) as Row[]).map((row) => String(row.entity_id));
+  return ledger.listTransactionIdsForSource(batchId);
 }
 
 function tagTx(ledger: Ledger, txId: string, key: string, value: string): void {
@@ -389,7 +370,7 @@ const handlers: Record<ToolName, Handler> = {
   migrate_asset_entries: (ledger, args) => {
     const fromId = asset(ledger, args.from_asset_id);
     const toId = asset(ledger, args.to_asset_id);
-    const count = Number((ledger.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE asset_id = ?").get(fromId) as Row).c);
+    const count = ledger.countEntriesByAsset(fromId);
     if (args.dry_run === false) return { from_asset_id: fromId, to_asset_id: toId, matched: ledger.migrateAssetEntries(fromId, toId), updated: count, dry_run: false };
     return { from_asset_id: fromId, to_asset_id: toId, matched: count, updated: 0, dry_run: true };
   },
@@ -422,7 +403,7 @@ const handlers: Record<ToolName, Handler> = {
     if (args.include_counts) {
       rows = rows.map((row) => ({
         ...row,
-        transaction_count: (ledger.db.prepare("SELECT count(DISTINCT journal_id) AS c FROM journal_lines WHERE account_id = ?").get(row.id) as Row).c
+        transaction_count: ledger.countTransactionsByAccount(row.id)
       }));
     }
     if (args.tree) {
@@ -529,7 +510,7 @@ const handlers: Record<ToolName, Handler> = {
   },
   list_entries_by_asset: (ledger, args) => {
     const assetId = asset(ledger, args.asset_id);
-    const rows = ledger.db.prepare("SELECT * FROM journal_lines WHERE asset_id = ? ORDER BY journal_id, line_no LIMIT ? OFFSET ?").all(assetId, args.limit ?? 100, args.offset ?? 0) as Row[];
+    const rows = ledger.listEntriesByAsset(assetId, args.limit ?? 100, args.offset ?? 0);
     const entries = rows.map((row) => ({ ...row, tx_id: row.journal_id, qty_cents: row.quantity }));
     return { entries, items: entries, limit: args.limit ?? 100, offset: args.offset ?? 0 };
   },
@@ -578,7 +559,7 @@ const handlers: Record<ToolName, Handler> = {
   move_transactions: (ledger, args) => {
     const source = account(ledger, args.from_account);
     const target = account(ledger, args.to_account);
-    const count = Number((ledger.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE account_id = ?").get(source) as Row).c);
+    const count = ledger.countEntriesByAccount(source);
     return args.dry_run === false ? { matched: count, moved: ledger.moveEntriesBetweenAccounts(source, target), dry_run: false } : { matched: count, moved: 0, dry_run: true };
   },
 
@@ -648,8 +629,7 @@ const handlers: Record<ToolName, Handler> = {
     const assetId = asset(ledger);
     const quantity = amountToQuantity(ledger, assetId, args.amount);
     if (quantity < 0n) throw new Error("Budget amount cannot be negative");
-    ledger.db.prepare("DELETE FROM targets WHERE type = 'budget' AND account_id = ? AND asset_id = ? AND period = ? AND year IS ? AND month IS ?").run(acct.id, assetId, args.period ?? "monthly", args.year ?? null, args.month ?? null);
-    ledger.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(id("budget"), acct.id, assetId, quantity, args.period ?? "monthly", args.year ?? null, args.month ?? null, args.rollover ? "full" : "");
+    ledger.setBudget(acct.id, assetId, quantity, args.period ?? "monthly", args.year ?? null, args.month ?? null, Boolean(args.rollover));
     return { account_id: acct.id, asset_id: assetId, quantity, amount_cents: quantity, period: args.period ?? "monthly", year: args.year ?? null, month: args.month ?? null, rollover: Boolean(args.rollover) };
   },
   set_budgets: (ledger, args) => {
@@ -680,14 +660,10 @@ const handlers: Record<ToolName, Handler> = {
     return status;
   },
   delete_budget: (ledger, args) => {
-    let sql = "DELETE FROM targets WHERE type = 'budget' AND account_id = ?";
-    const params: SQLInputValue[] = [account(ledger, args.account)];
-    if (args.year != null) { sql += " AND year = ?"; params.push(args.year); }
-    if (args.month != null) { sql += " AND month = ?"; params.push(args.month); }
-    const result = ledger.db.prepare(sql).run(...params);
-    return { deleted: Number(result.changes), account_id: params[0] };
+    const accountId = account(ledger, args.account);
+    return { deleted: ledger.deleteBudget(accountId, args.year, args.month), account_id: accountId };
   },
-  delete_budgets: (ledger, args) => args.accounts ? { deleted: (args.accounts as string[]).reduce((sum, acct) => sum + Number((handlers.delete_budget(ledger, { account: acct, year: args.year, month: args.month }) as Row).deleted), 0) } : { deleted: Number(ledger.db.prepare("DELETE FROM targets WHERE type = 'budget'").run().changes) },
+  delete_budgets: (ledger, args) => args.accounts ? { deleted: (args.accounts as string[]).reduce((sum, acct) => sum + Number((handlers.delete_budget(ledger, { account: acct, year: args.year, month: args.month }) as Row).deleted), 0) } : { deleted: ledger.deleteAllBudgets() },
   copy_budgets: (ledger, args) => {
     let copied = 0;
     for (const row of budgetRows(ledger, null, args.from_year, args.from_month)) {
@@ -740,26 +716,25 @@ const handlers: Record<ToolName, Handler> = {
     const assetId = asset(ledger);
     const quantity = amountToQuantity(ledger, assetId, args.target);
     if (quantity <= 0n) throw new Error("Goal target must be positive");
-    ledger.db.prepare("DELETE FROM targets WHERE type = 'goal' AND account_id = ? AND asset_id = ?").run(acct.id, assetId);
-    ledger.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, 'goal', ?, ?, ?, ?, ?, ?)").run(id("goal"), acct.id, assetId, quantity, args.name, args.target_date ?? null, args.priority ?? 1);
+    ledger.setGoal(acct.id, assetId, quantity, args.name, args.target_date ?? null, args.priority ?? 1);
     return { account_id: acct.id, asset_id: assetId, name: args.name, target_quantity: quantity, target_cents: quantity, target_date: args.target_date ?? null, priority: args.priority ?? 1 };
   },
-  list_goals: (ledger) => (ledger.db.prepare("SELECT * FROM targets WHERE type = 'goal' ORDER BY priority, name").all() as Row[]).map((row) => ({ ...row, target_quantity: row.quantity, target_cents: row.quantity, ...handlers.goal_progress(ledger, { account: row.account_id }) as Row })),
+  list_goals: (ledger) => ledger.listGoalTargets().map((row) => ({ ...row, target_quantity: row.quantity, target_cents: row.quantity, ...handlers.goal_progress(ledger, { account: row.account_id }) as Row })),
   goal_progress: (ledger, args) => {
     const acct = account(ledger, args.account);
-    const row = ledger.db.prepare("SELECT * FROM targets WHERE type = 'goal' AND account_id = ? ORDER BY priority, name LIMIT 1").get(acct) as Row | undefined;
+    const row = ledger.getGoalTarget(acct);
     if (!row) throw new Error("Goal not found");
     const balance = ledger.balanceTree(acct, String(row.asset_id), null, null);
-    const target = BigInt(row.quantity);
+    const target = BigInt(row.quantity as string | number | bigint | boolean);
     return { account_id: acct, asset_id: row.asset_id, name: row.name, target_quantity: target, target_cents: target, current_cents: balance, remaining_cents: target > balance ? target - balance : 0n, progress_pct: target ? Number(balance) / Number(target) * 100 : 0 };
   },
-  delete_goal: (ledger, args) => ({ deleted: Number(ledger.db.prepare("DELETE FROM targets WHERE type = 'goal' AND account_id = ?").run(account(ledger, args.account)).changes), account_id: account(ledger, args.account) }),
+  delete_goal: (ledger, args) => ({ deleted: ledger.deleteGoal(account(ledger, args.account)), account_id: account(ledger, args.account) }),
 
   import_transactions: (ledger, args) => {
     if (args.date_tolerance_days != null && args.date_tolerance_days !== 1) unsupportedArguments({ date_tolerance_days: args.date_tolerance_days });
     const batchId = args.dry_run ? null : batch(ledger, args.batch_label, { statement_type: args.statement_type });
     if (args.dry_run) return { created: 0, transactions: [], errors: [], dry_run: true, batch_id: null, imported: 0, skipped: 0, transfer_stats: { matched: 0, unmatched: 0 } };
-    const result = importTransactionRows(ledger, account(ledger, args.account_id), account(ledger, args.counterpart_id), args.transactions ?? [], args);
+    const result = importTransactionRows(ledger, account(ledger, args.account_id), account(ledger, args.counterpart_id), args.transactions ?? [], { ...args, source_id: batchId });
     for (const tx of result.transactions) {
       if (batchId) tagTx(ledger, String(tx.id), "import_batch", batchId);
       for (const [key, value] of Object.entries(args.tags ?? {})) tagTx(ledger, String(tx.id), key, String(value));
@@ -790,18 +765,18 @@ const handlers: Record<ToolName, Handler> = {
     const imported = args.commit ? handlers.import_file(ledger, { ...args, status: "posted" }) as Row : { created: 0, transactions: [] };
     return { ...preview, ...imported, balance_matches: expected == null ? null : true, actual_balance_cents: actualBalance, expected_balance_cents: expected };
   },
-  list_import_batches: (ledger, args) => (ledger.db.prepare("SELECT * FROM sources WHERE type = 'import' ORDER BY created_at DESC LIMIT ?").all(args.limit ?? 20) as Row[]).filter((row) => !args.date_from || String(row.created_at) >= args.date_from).map((row) => ({ ...row, tx_count: txIdsForBatch(ledger, String(row.id)).length })),
+  list_import_batches: (ledger, args) => ledger.listSources("import", args.limit ?? 20).filter((row) => !args.date_from || String(row.created_at) >= args.date_from).map((row) => ({ ...row, tx_count: txIdsForBatch(ledger, String(row.id)).length })),
   rollback_import: (ledger, args) => {
     const txIds = txIdsForBatch(ledger, args.batch_id);
     for (const txId of txIds) if (ledger.getTx(txId)) ledger.voidTx(txId);
-    ledger.db.prepare("UPDATE sources SET status = 'rolled_back' WHERE id = ?").run(args.batch_id);
+    ledger.updateSourceStatus(args.batch_id, "rolled_back");
     return { batch_id: args.batch_id, rolled_back: txIds.length, tx_ids: txIds };
   },
   commit_batch: (ledger, args) => {
     const selected = selectBatchTransactions(ledger, args);
     if (!args.dry_run) {
       for (const txId of selected) if (ledger.getTx(txId)?.status === "pending") ledger.updateTxStatus(txId, "posted");
-      if (args.batch_id) ledger.db.prepare("UPDATE sources SET status = 'committed' WHERE id = ?").run(args.batch_id);
+      if (args.batch_id) ledger.updateSourceStatus(args.batch_id, "committed");
     }
     return { matched: selected.length, committed: args.dry_run ? 0 : selected.length, tx_ids: selected, dry_run: Boolean(args.dry_run) };
   },
@@ -809,7 +784,7 @@ const handlers: Record<ToolName, Handler> = {
     const selected = selectBatchTransactions(ledger, args);
     if (args.dry_run === false) {
       for (const txId of selected) ledger.deleteTx(txId);
-      if (args.batch_id) ledger.db.prepare("UPDATE sources SET status = 'discarded' WHERE id = ?").run(args.batch_id);
+      if (args.batch_id) ledger.updateSourceStatus(args.batch_id, "discarded");
     }
     return { matched: selected.length, discarded: args.dry_run === false ? selected.length : 0, tx_ids: selected, dry_run: args.dry_run !== false };
   },
@@ -875,7 +850,7 @@ const handlers: Record<ToolName, Handler> = {
     return { rules: results.length, matched: results.reduce((s: number, r: any) => s + r.matched, 0), updated: results.reduce((s: number, r: any) => s + r.updated, 0), results, dry_run: args.dry_run !== false };
   },
   rollback_recategorize: (ledger, args) => {
-    const rows = ledger.db.prepare("SELECT entity_id FROM annotations WHERE entity_type = 'tx' AND key = 'recategorize_batch' AND value = ?").all(args.batch_id) as Row[];
+    const rows = ledger.listAnnotationEntityIds("tx", "recategorize_batch", args.batch_id).map((entity_id) => ({ entity_id }));
     let rolled = 0;
     for (const row of rows) {
       const txId = String(row.entity_id);
@@ -924,11 +899,10 @@ const handlers: Record<ToolName, Handler> = {
 
   create_scheduled_transaction: (ledger, args) => {
     const assetId = asset(ledger);
-    const schedId = id("sched");
-    ledger.db.prepare("INSERT INTO recurrences(id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(schedId, validateDate(args.date), amountToQuantity(ledger, assetId, args.amount), account(ledger, args.from_account_id), account(ledger, args.to_account_id), args.description ?? "", args.frequency ?? "monthly", args.end_date ?? null, assetId);
-    return { id: schedId, next_date: args.date, frequency: args.frequency ?? "monthly" };
+    const row = ledger.createRecurrence(validateDate(args.date), amountToQuantity(ledger, assetId, args.amount), account(ledger, args.from_account_id), account(ledger, args.to_account_id), args.description ?? "", args.frequency ?? "monthly", args.end_date ?? null, assetId);
+    return { id: row.id, next_date: args.date, frequency: args.frequency ?? "monthly" };
   },
-  list_scheduled: (ledger) => ledger.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences ORDER BY next_date, id").all() as Row[],
+  list_scheduled: (ledger) => ledger.listRecurrences(),
   process_scheduled: (ledger, args) => {
     const through = args.through_date ?? today();
     const posted: string[] = [];
@@ -941,7 +915,7 @@ const handlers: Record<ToolName, Handler> = {
       else if (row.frequency === "weekly") next.setUTCDate(next.getUTCDate() + 7);
       else if (row.frequency === "yearly") next.setUTCFullYear(next.getUTCFullYear() + 1);
       else next.setUTCMonth(next.getUTCMonth() + 1);
-      ledger.db.prepare("UPDATE recurrences SET next_date = ? WHERE id = ?").run(next.toISOString().slice(0, 10), row.id);
+      ledger.updateRecurrenceNextDate(String(row.id), next.toISOString().slice(0, 10));
     }
     return { posted: posted.length, tx_ids: posted };
   },
@@ -1019,12 +993,12 @@ const handlers: Record<ToolName, Handler> = {
   },
 
   create_branch: (ledger, args) => {
-    ledger.db.prepare("INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at) VALUES (?, ?, 'scenario', ?, ?)").run(args.name, args.name, "book_default", now());
+    ledger.createScenarioBook(args.name);
     return { name: args.name };
   },
-  list_branches: (ledger) => (ledger.db.prepare("SELECT name, created_at, closed_at FROM books WHERE type = 'scenario' ORDER BY name").all() as Row[]).map((row) => ({ ...row, merged_at: null, discarded_at: row.closed_at })),
+  list_branches: (ledger) => ledger.listScenarioBooks().map((row) => ({ ...row, merged_at: null, discarded_at: row.closed_at })),
   merge_branch: (ledger, args) => { handlers.create_branch(ledger, { name: args.source }); ledger.createAnnotation("book", args.source, "merged_at", now()); return { merged: args.source }; },
-  discard_branch: (ledger, args) => { handlers.create_branch(ledger, { name: args.name }); ledger.db.prepare("UPDATE books SET closed_at = ? WHERE id = ?").run(now(), args.name); return { discarded: args.name }; },
+  discard_branch: (ledger, args) => { ledger.discardScenarioBook(args.name); return { discarded: args.name }; },
   compare_scenarios: (ledger, args) => {
     unsupportedArguments({ branch_a: args.branch_a, branch_b: args.branch_b });
     const assetId = asset(ledger, args.asset_id);
@@ -1138,21 +1112,12 @@ const handlers: Record<ToolName, Handler> = {
 
   record_investment: (ledger, args) => handlers.create_transaction(ledger, { from_account_id: args.source_account_id, to_account_id: args.investment_account_id, amount: args.amount, date: args.date, description: args.description, status: args.status ?? "posted", asset_id: args.asset_id }),
   buy_security: (ledger, args) => {
-    const security = ledger.createAsset(args.symbol, "security", 8, args.symbol);
-    const shares = amountToQuantity(ledger, security, args.shares);
     const cashAsset = asset(ledger);
     const investmentAccount = account(ledger, args.account_id);
-    const holdingAccount = ledger.getOrCreateAccount(`${String(args.symbol).toUpperCase()} Holdings`, "asset");
-    const costAccount = ledger.getOrCreateAccount("Investment Cost", "expense");
+    const shares = toAtomicUnits(args.shares, 8);
     const totalCost = BigInt(args.total_cost_cents) + BigInt(args.commission_cents ?? 0);
-    const txId = ledger.postTx(validateDate(args.date), args.status ?? "posted", `Buy ${String(args.symbol).toUpperCase()}`, [
-      [investmentAccount, cashAsset, -totalCost],
-      [costAccount, cashAsset, totalCost],
-      [costAccount, security, -shares],
-      [holdingAccount, security, shares]
-    ]);
-    ledger.db.prepare("INSERT INTO lots(id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(id("lot"), holdingAccount, security, shares, cashAsset, totalCost, args.date);
-    return txWithEntries(ledger, txId);
+    const tx = ledger.recordSecurityPurchase({ symbol: args.symbol, shares, totalCost, cashAssetId: cashAsset, investmentAccountId: investmentAccount, date: validateDate(args.date), status: args.status ?? "posted" });
+    return txWithEntries(ledger, tx.id);
   },
   holdings: (ledger, args) => {
     const acct = args.account_id ? account(ledger, args.account_id) : null;

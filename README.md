@@ -130,7 +130,6 @@ books
 
 annotations(entity_type, entity_id)
 rules -- accounts
-audit_events(entity_type, entity_id)
 meta
 ```
 
@@ -144,7 +143,6 @@ Support tables keep workflow concerns out of the journal core:
 - `recurrences`: scheduled transactions.
 - `period_closes`: closed accounting periods.
 - `lots`: investment lots and cost basis.
-- `audit_events`: audit event records.
 - `meta`: schema version and database metadata.
 
 ## Release Checks

@@ -35,6 +35,7 @@ export interface Journal {
   status: TxStatus;
   description: string;
   source_id: string | null;
+  external_id: string | null;
 }
 
 export interface JournalLine {
@@ -79,4 +80,3 @@ export class InvariantError extends Error {
     this.name = "InvariantError";
   }
 }
-

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, statSync, writeFileSync, copyFileSync } from "node:fs";
+import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { annotateAccount, annotateAmounts, debitCredit, normalAmount, normalSide } from "./accounting.js";
@@ -9,6 +9,17 @@ import { InvariantError } from "./types.js";
 import { decimalToScaled, fromAtomicUnits, gcd, reduceRatio, roundRatio, scaledToNumber, toAtomicUnits } from "./money.js";
 
 type Row = Record<string, unknown>;
+
+type PostTxOptions = {
+  sourceId?: string | null;
+  externalId?: string | null;
+};
+
+type BudgetTargetOptions = {
+  accountId?: string | null;
+  year?: number | null;
+  month?: number | null;
+};
 
 function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -100,7 +111,8 @@ function toJournal(row: Row | undefined): Journal | null {
     posted_at: String(row.posted_at),
     status: txStatus(String(row.status)),
     description: String(row.description ?? ""),
-    source_id: boolDate(row.source_id)
+    source_id: boolDate(row.source_id),
+    external_id: boolDate(row.external_id)
   };
 }
 
@@ -156,7 +168,7 @@ function validateLines(lines: Array<[string, string, bigint]>): void {
 
 export class Ledger {
   readonly path: string;
-  readonly db: DatabaseSync;
+  private readonly db: DatabaseSync;
 
   constructor(path: string) {
     let dbPath = path;
@@ -300,6 +312,90 @@ export class Ledger {
     this.db.prepare("DELETE FROM annotations WHERE id = ?").run(annotationId);
   }
 
+  listAnnotationEntityIds(entityType: string, key: string, value: string): string[] {
+    return (this.db.prepare("SELECT entity_id FROM annotations WHERE entity_type = ? AND key = ? AND value = ? ORDER BY entity_id").all(entityType, key, value) as Row[])
+      .map((row) => String(row.entity_id));
+  }
+
+  createSource(type: string, label?: string | null, metadata: Row = {}, status = "open"): string {
+    const sourceId = id(type === "import" ? "batch" : "source");
+    this.db.prepare("INSERT INTO sources(id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(
+      sourceId,
+      type,
+      label ?? "",
+      status,
+      now(),
+      JSON.stringify(metadata)
+    );
+    return sourceId;
+  }
+
+  listSources(type?: string | null, limit: number | null = 20): Row[] {
+    let sql = "SELECT * FROM sources";
+    const params: SQLInputValue[] = [];
+    if (type) {
+      sql += " WHERE type = ?";
+      params.push(type);
+    }
+    sql += " ORDER BY created_at DESC";
+    if (limit != null) {
+      sql += " LIMIT ?";
+      params.push(limit);
+    }
+    return this.db.prepare(sql).all(...params) as Row[];
+  }
+
+  updateSourceStatus(sourceId: string, status: string): number {
+    return Number(this.db.prepare("UPDATE sources SET status = ? WHERE id = ?").run(status, sourceId).changes);
+  }
+
+  listTransactionIdsForSource(sourceId: string): string[] {
+    const ids = new Set<string>();
+    for (const row of this.db.prepare("SELECT id FROM journals WHERE source_id = ? ORDER BY date, id").all(sourceId) as Row[]) {
+      ids.add(String(row.id));
+    }
+    for (const txId of this.listAnnotationEntityIds("tx", "import_batch", sourceId)) ids.add(txId);
+    return [...ids].sort();
+  }
+
+  tableNames(): string[] {
+    return (this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as Row[]).map((row) => String(row.name));
+  }
+
+  tableColumns(table: string): string[] {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error("Invalid table name");
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((row) => String(row.name));
+  }
+
+  tableRows(table: string): Row[] {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error("Invalid table name");
+    return this.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Row[];
+  }
+
+  countTransactions(): number {
+    return Number((this.db.prepare("SELECT count(*) AS c FROM journals").get() as Row).c);
+  }
+
+  countEntries(): number {
+    return Number((this.db.prepare("SELECT count(*) AS c FROM journal_lines").get() as Row).c);
+  }
+
+  countEntriesByAsset(assetId: string): number {
+    return Number((this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE asset_id = ?").get(assetId) as Row).c);
+  }
+
+  countEntriesByAccount(accountId: string): number {
+    return Number((this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE account_id = ?").get(accountId) as Row).c);
+  }
+
+  countTransactionsByAccount(accountId: string): number {
+    return Number((this.db.prepare("SELECT count(DISTINCT journal_id) AS c FROM journal_lines WHERE account_id = ?").get(accountId) as Row).c);
+  }
+
+  listEntriesByAsset(assetId: string, limit = 100, offset = 0): Row[] {
+    return this.db.prepare("SELECT * FROM journal_lines WHERE asset_id = ? ORDER BY journal_id, line_no LIMIT ? OFFSET ?").all(assetId, limit, offset) as Row[];
+  }
+
   createRule(type: string, accountId: string, pattern: string): string {
     const existing = this.db.prepare("SELECT id FROM rules WHERE type = ? AND account_id = ? AND pattern = ? AND status = 'active'").get(type, accountId, pattern) as Row | undefined;
     if (existing) return String(existing.id);
@@ -323,6 +419,150 @@ export class Ledger {
       if (desc.includes(String(rule.pattern).toLowerCase())) return String(rule.account_id);
     }
     return null;
+  }
+
+  listBudgetTargets(options: BudgetTargetOptions = {}): Row[] {
+    let sql = "SELECT * FROM targets WHERE type = 'budget'";
+    const params: SQLInputValue[] = [];
+    if (options.accountId) {
+      sql += " AND account_id = ?";
+      params.push(options.accountId);
+    }
+    if (options.year != null) {
+      sql += " AND (year IS NULL OR year = ?)";
+      params.push(options.year);
+    }
+    if (options.month != null) {
+      sql += " AND (month IS NULL OR month = ?)";
+      params.push(options.month);
+    }
+    sql += " ORDER BY account_id, year, month";
+    return this.db.prepare(sql).all(...params) as Row[];
+  }
+
+  setBudget(accountId: string, assetId: string, quantity: bigint | number, period = "monthly", year?: number | null, month?: number | null, rollover = false): Row {
+    if (!this.getAccount(accountId)) throw new Error(`Account ${accountId} not found`);
+    if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
+    const amount = BigInt(quantity);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM targets WHERE type = 'budget' AND account_id = ? AND asset_id = ? AND period = ? AND year IS ? AND month IS ?").run(accountId, assetId, period, year ?? null, month ?? null);
+      const targetId = id("budget");
+      this.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
+        targetId,
+        accountId,
+        assetId,
+        amount,
+        period,
+        year ?? null,
+        month ?? null,
+        rollover ? "full" : ""
+      );
+      this.db.exec("COMMIT");
+      return this.db.prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  deleteBudget(accountId: string, year?: number | null, month?: number | null): number {
+    let sql = "DELETE FROM targets WHERE type = 'budget' AND account_id = ?";
+    const params: SQLInputValue[] = [accountId];
+    if (year != null) {
+      sql += " AND year = ?";
+      params.push(year);
+    }
+    if (month != null) {
+      sql += " AND month = ?";
+      params.push(month);
+    }
+    return Number(this.db.prepare(sql).run(...params).changes);
+  }
+
+  deleteAllBudgets(): number {
+    return Number(this.db.prepare("DELETE FROM targets WHERE type = 'budget'").run().changes);
+  }
+
+  setGoal(accountId: string, assetId: string, quantity: bigint | number, name: string, targetDate?: string | null, priority = 1): Row {
+    if (!this.getAccount(accountId)) throw new Error(`Account ${accountId} not found`);
+    if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
+    const amount = BigInt(quantity);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM targets WHERE type = 'goal' AND account_id = ? AND asset_id = ?").run(accountId, assetId);
+      const targetId = id("goal");
+      this.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, 'goal', ?, ?, ?, ?, ?, ?)").run(
+        targetId,
+        accountId,
+        assetId,
+        amount,
+        name,
+        targetDate ?? null,
+        priority
+      );
+      this.db.exec("COMMIT");
+      return this.db.prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listGoalTargets(): Row[] {
+    return this.db.prepare("SELECT * FROM targets WHERE type = 'goal' ORDER BY priority, name").all() as Row[];
+  }
+
+  getGoalTarget(accountId: string): Row | null {
+    return (this.db.prepare("SELECT * FROM targets WHERE type = 'goal' AND account_id = ? ORDER BY priority, name LIMIT 1").get(accountId) as Row | undefined) ?? null;
+  }
+
+  deleteGoal(accountId: string): number {
+    return Number(this.db.prepare("DELETE FROM targets WHERE type = 'goal' AND account_id = ?").run(accountId).changes);
+  }
+
+  createRecurrence(date: string, quantity: bigint | number, fromAccountId: string, toAccountId: string, description: string, frequency: string, endDate: string | null, assetId: string): Row {
+    if (!this.getAccount(fromAccountId) || !this.getAccount(toAccountId)) throw new Error("Account not found");
+    if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
+    const recurrenceId = id("sched");
+    this.db.prepare("INSERT INTO recurrences(id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      recurrenceId,
+      dateOnly(date),
+      BigInt(quantity),
+      fromAccountId,
+      toAccountId,
+      description,
+      frequency,
+      endDate ?? null,
+      assetId
+    );
+    return this.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences WHERE id = ?").get(recurrenceId) as Row;
+  }
+
+  listRecurrences(): Row[] {
+    return this.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences ORDER BY next_date, id").all() as Row[];
+  }
+
+  updateRecurrenceNextDate(recurrenceId: string, nextDate: string): number {
+    return Number(this.db.prepare("UPDATE recurrences SET next_date = ? WHERE id = ?").run(dateOnly(nextDate), recurrenceId).changes);
+  }
+
+  createScenarioBook(name: string): Row {
+    this.db.prepare("INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at) VALUES (?, ?, 'scenario', ?, ?)").run(name, name, DEFAULT_BOOK_ID, now());
+    return this.db.prepare("SELECT name, created_at, closed_at FROM books WHERE id = ?").get(name) as Row;
+  }
+
+  listScenarioBooks(): Row[] {
+    return this.db.prepare("SELECT name, created_at, closed_at FROM books WHERE type = 'scenario' ORDER BY name").all() as Row[];
+  }
+
+  discardScenarioBook(name: string): number {
+    this.createScenarioBook(name);
+    return Number(this.db.prepare("UPDATE books SET closed_at = ? WHERE id = ?").run(now(), name).changes);
+  }
+
+  listLots(): Row[] {
+    return this.db.prepare("SELECT * FROM lots ORDER BY opened_at, id").all() as Row[];
   }
 
   createPrice(assetId: string, quoteId: string, rate: number | string | bigint, time: string, rateScale?: number): string {
@@ -403,62 +643,73 @@ export class Ledger {
     if (row) throw new Error(`Period '${String(row.name)}' is closed through ${String(row.as_of)}; transaction date ${txDate} cannot be modified`);
   }
 
-  postTx(date: string, status: TxStatus | string, description: string | null | undefined, lines: Array<[string, string, bigint | number]>): string {
+  private validateLineRefs(lines: Array<[string, string, bigint]>): void {
+    for (const [accountId, assetId] of lines) {
+      if (!this.getAccount(accountId)) throw new Error(`Account ${accountId} not found`);
+      if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
+    }
+  }
+
+  private insertTx(txDate: string, statusValue: TxStatus, description: string | null | undefined, lines: Array<[string, string, bigint]>, options: PostTxOptions = {}): string {
+    const txId = id("tx");
+    this.db.prepare("INSERT INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+      txId,
+      DEFAULT_BOOK_ID,
+      options.sourceId ?? null,
+      txDate,
+      now(),
+      statusValue,
+      description ?? "",
+      options.externalId ?? null
+    );
+    lines.forEach(([accountId, assetId, quantity], index) => {
+      this.db.prepare("INSERT INTO journal_lines(id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?)").run(
+        id("line"),
+        txId,
+        index + 1,
+        accountId,
+        assetId,
+        quantity
+      );
+    });
+    return txId;
+  }
+
+  postTx(date: string, status: TxStatus | string, description: string | null | undefined, lines: Array<[string, string, bigint | number]>, options: PostTxOptions = {}): string {
     const txDate = dateOnly(date);
     this.assertPeriodOpen(txDate);
     const statusValue = txStatus(String(status));
     const normalized = lines.map(([accountId, assetId, quantity]) => [accountId, assetId, BigInt(quantity)] as [string, string, bigint]);
     validateLines(normalized);
-    for (const [accountId, assetId] of normalized) {
-      if (!this.getAccount(accountId)) throw new Error(`Account ${accountId} not found`);
-      if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
-    }
-    const txId = id("tx");
+    this.validateLineRefs(normalized);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("INSERT INTO journals(id, book_id, date, posted_at, status, description) VALUES (?, ?, ?, ?, ?, ?)").run(
-        txId,
-        DEFAULT_BOOK_ID,
-        txDate,
-        now(),
-        statusValue,
-        description ?? ""
-      );
-      normalized.forEach(([accountId, assetId, quantity], index) => {
-        this.db.prepare("INSERT INTO journal_lines(id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?)").run(
-          id("line"),
-          txId,
-          index + 1,
-          accountId,
-          assetId,
-          quantity
-        );
-      });
+      const txId = this.insertTx(txDate, statusValue, description, normalized, options);
       this.db.exec("COMMIT");
+      return txId;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return txId;
   }
 
-  recordTransaction(date: string, amount: bigint | number, fromAccountId: string, toAccountId: string, assetId: string, description = "", status: TxStatus | string = "pending"): Journal & { entries: JournalLine[] } {
+  recordTransaction(date: string, amount: bigint | number, fromAccountId: string, toAccountId: string, assetId: string, description = "", status: TxStatus | string = "pending", options: PostTxOptions = {}): Journal & { entries: JournalLine[] } {
     const quantity = BigInt(amount);
     const absolute = quantity < 0n ? -quantity : quantity;
     const txId = this.postTx(date, status, description, [
       [fromAccountId, assetId, -absolute],
       [toAccountId, assetId, absolute]
-    ]);
+    ], options);
     return this.txWithEntries(txId);
   }
 
-  recordJournalEntry(date: string, legs: Array<[string, bigint | number]>, description: string, assetId: string, status: TxStatus | string = "pending"): Journal & { entries: JournalLine[] } {
-    const txId = this.postTx(date, status, description, legs.map(([accountId, quantity]) => [accountId, assetId, BigInt(quantity)]));
+  recordJournalEntry(date: string, legs: Array<[string, bigint | number]>, description: string, assetId: string, status: TxStatus | string = "pending", options: PostTxOptions = {}): Journal & { entries: JournalLine[] } {
+    const txId = this.postTx(date, status, description, legs.map(([accountId, quantity]) => [accountId, assetId, BigInt(quantity)]), options);
     return this.txWithEntries(txId);
   }
 
-  recordMultiAssetJournalEntry(date: string, legs: Array<[string, string, bigint | number]>, description: string, status: TxStatus | string = "pending"): Journal & { entries: JournalLine[] } {
-    const txId = this.postTx(date, status, description, legs.map(([accountId, assetId, quantity]) => [accountId, assetId, BigInt(quantity)]));
+  recordMultiAssetJournalEntry(date: string, legs: Array<[string, string, bigint | number]>, description: string, status: TxStatus | string = "pending", options: PostTxOptions = {}): Journal & { entries: JournalLine[] } {
+    const txId = this.postTx(date, status, description, legs.map(([accountId, assetId, quantity]) => [accountId, assetId, BigInt(quantity)]), options);
     return this.txWithEntries(txId);
   }
 
@@ -995,10 +1246,60 @@ export class Ledger {
     return this.listAccounts().find((account) => account.name.toLowerCase() === name.toLowerCase())?.id ?? this.createAccount(name, type);
   }
 
+  recordSecurityPurchase(options: {
+    symbol: string;
+    shares: bigint | number;
+    totalCost: bigint | number;
+    cashAssetId: string;
+    investmentAccountId: string;
+    date: string;
+    status?: TxStatus | string | null;
+  }): Journal & { entries: JournalLine[] } {
+    const txDate = dateOnly(options.date);
+    const statusValue = txStatus(String(options.status ?? "posted"));
+    const symbol = String(options.symbol).trim().toUpperCase();
+    if (!symbol) throw new Error("Security symbol is required");
+    const shares = BigInt(options.shares);
+    const totalCost = BigInt(options.totalCost);
+    if (shares <= 0n) throw new Error("Security shares must be positive");
+    if (totalCost <= 0n) throw new Error("Security cost must be positive");
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.assertPeriodOpen(txDate);
+      const securityId = this.createAsset(symbol, "security", 8, symbol);
+      const holdingAccountId = this.getOrCreateAccount(`${symbol} Holdings`, "asset");
+      const costAccountId = this.getOrCreateAccount("Investment Cost", "expense");
+      const lines: Array<[string, string, bigint]> = [
+        [options.investmentAccountId, options.cashAssetId, -totalCost],
+        [costAccountId, options.cashAssetId, totalCost],
+        [costAccountId, securityId, -shares],
+        [holdingAccountId, securityId, shares]
+      ];
+      validateLines(lines);
+      this.validateLineRefs(lines);
+      const txId = this.insertTx(txDate, statusValue, `Buy ${symbol}`, lines);
+      this.db.prepare("INSERT INTO lots(id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        id("lot"),
+        holdingAccountId,
+        securityId,
+        shares,
+        options.cashAssetId,
+        totalCost,
+        txDate
+      );
+      this.db.exec("COMMIT");
+      return this.txWithEntries(txId);
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   backupNow(outputPath?: string | null) {
     const target = outputPath || join(dirname(this.path), "backups", `${now().replaceAll(":", "-")}.db`);
     mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(this.path, target);
+    this.db.prepare("VACUUM INTO ?").run(target);
     return { path: target };
   }
 
@@ -1020,6 +1321,7 @@ export class Ledger {
       format: "clovis-ledger-v1",
       assets: this.listAssets(),
       accounts: this.listAccounts(),
+      sources: this.listSources(null, null),
       transactions,
       account_tags: (this.db.prepare("SELECT id, entity_type, entity_id, key, value AS val, value FROM annotations WHERE entity_type = 'account'").all() as Row[]),
       prices: this.listPrices(),
@@ -1027,6 +1329,7 @@ export class Ledger {
       goals: (this.db.prepare("SELECT * FROM targets WHERE type = 'goal'").all() as Row[]).map((row) => ({ ...row, target_quantity: row.quantity, target_cents: row.quantity })),
       branches: this.db.prepare("SELECT name, created_at, closed_at AS discarded_at FROM books WHERE type = 'scenario' ORDER BY name").all() as Row[],
       checkpoints: this.listCheckpoints(),
+      lots: this.listLots(),
       scheduled_transactions: this.db.prepare("SELECT * FROM recurrences ORDER BY next_date, id").all() as Row[]
     };
   }
@@ -1037,9 +1340,11 @@ export class Ledger {
     }
     const assetMap = new Map<string, string>();
     const accountMap = new Map<string, string>();
+    const sourceMap = new Map<string, string>();
     const txMap = new Map<string, string>();
     for (const asset of doc.assets ?? []) assetMap.set(asset.id, preserveIds ? asset.id : (this.getAssetBySymbol(asset.symbol)?.id ?? id("asset")));
     for (const account of doc.accounts ?? []) accountMap.set(account.id, preserveIds ? account.id : id("acct"));
+    for (const source of doc.sources ?? []) sourceMap.set(source.id, preserveIds ? source.id : id(source.type === "import" ? "batch" : "source"));
     for (const tx of doc.transactions ?? []) {
       txMap.set(tx.id, preserveIds ? tx.id : id("tx"));
       const lines = (tx.entries ?? []).map((entry: any) => [
@@ -1054,12 +1359,14 @@ export class Ledger {
       valid: true,
       assets: (doc.assets ?? []).length,
       accounts: (doc.accounts ?? []).length,
+      sources: (doc.sources ?? []).length,
       transactions: (doc.transactions ?? []).length,
       prices: (doc.prices ?? []).length,
       budgets: (doc.budgets ?? []).length,
       goals: (doc.goals ?? []).length,
       branches: (doc.branches ?? []).length,
       checkpoints: (doc.checkpoints ?? []).length,
+      lots: (doc.lots ?? []).length,
       scheduled_transactions: (doc.scheduled_transactions ?? []).length,
       dry_run: dryRun
     };
@@ -1088,15 +1395,27 @@ export class Ledger {
       for (const account of doc.accounts ?? []) {
         if (account.parent_id) this.db.prepare("UPDATE accounts SET parent_id = ? WHERE id = ?").run(accountMap.get(account.parent_id)!, accountMap.get(account.id)!);
       }
+      for (const source of doc.sources ?? []) {
+        this.db.prepare("INSERT OR IGNORE INTO sources(id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(
+          sourceMap.get(source.id)!,
+          source.type,
+          source.label ?? "",
+          source.status ?? "open",
+          source.created_at ?? now(),
+          source.metadata_json ?? "{}"
+        );
+      }
       for (const tx of doc.transactions ?? []) {
         const txId = txMap.get(tx.id)!;
-        this.db.prepare("INSERT OR IGNORE INTO journals(id, book_id, date, posted_at, status, description) VALUES (?, ?, ?, ?, ?, ?)").run(
+        this.db.prepare("INSERT OR IGNORE INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
           txId,
           DEFAULT_BOOK_ID,
+          tx.source_id ? sourceMap.get(tx.source_id) ?? tx.source_id : null,
           tx.date,
           tx.posted_at ?? now(),
           tx.status,
-          tx.description ?? ""
+          tx.description ?? "",
+          tx.external_id ?? null
         );
         (tx.entries ?? []).forEach((entry: any, index: number) => {
           this.db.prepare("INSERT OR IGNORE INTO journal_lines(id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?)").run(
@@ -1166,6 +1485,19 @@ export class Ledger {
           checkpoint.description ?? null,
           checkpoint.created_at ?? now(),
           checkpoint.reopened_at ?? null
+        );
+      }
+      for (const lot of doc.lots ?? []) {
+        this.db.prepare("INSERT OR IGNORE INTO lots(id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_at, closed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+          preserveIds ? lot.id : id("lot"),
+          accountMap.get(lot.account_id)!,
+          assetMap.get(lot.asset_id)!,
+          BigInt(lot.quantity ?? 0),
+          assetMap.get(lot.cost_asset_id)!,
+          BigInt(lot.cost_quantity ?? 0),
+          lot.opened_at,
+          lot.closed_at ?? null,
+          lot.metadata_json ?? "{}"
         );
       }
       for (const scheduled of doc.scheduled_transactions ?? []) {
