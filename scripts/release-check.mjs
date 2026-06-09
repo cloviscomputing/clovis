@@ -40,11 +40,15 @@ function scanPackedPackage() {
   if (unexpected.length) fail(`Unexpected files in packed package:\n${unexpected.join("\n")}`);
 
   const textExts = new Set([".ts", ".js", ".mjs", ".json", ".md", ".map"]);
-  const workspaceName = basename(dirname(root));
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const repositoryName = String(pkg.repository?.url ?? "").match(/\/([^/]+?)(?:\.git)?$/)?.[1] ?? "";
+  const allowedNames = new Set([pkg.name, repositoryName].filter(Boolean).map((value) => String(value).toLowerCase()));
+  const localNames = [basename(dirname(root)), basename(root)]
+    .filter((value) => value && !allowedNames.has(value.toLowerCase()));
   const blockedText = [
-    { label: "workspace name", pattern: new RegExp(escapeRegExp(workspaceName), "i") },
     { label: "checkout path", pattern: new RegExp(escapeRegExp(root)) },
-    { label: "absolute user path", pattern: /\/Users/ }
+    { label: "absolute user path", pattern: /\/Users/ },
+    ...localNames.map((value) => ({ label: "local workspace name", pattern: new RegExp(escapeRegExp(value), "i") }))
   ];
   const leaks = [];
   for (const file of files) {
