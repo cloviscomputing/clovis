@@ -1,7 +1,7 @@
 # Clovis
 
 [![npm version](https://img.shields.io/npm/v/clovis?label=npm)](https://www.npmjs.com/package/clovis)
-[![latest release](https://img.shields.io/github/v/release/cloviscomputing/clovis?label=release)](https://github.com/cloviscomputing/clovis/releases/latest)
+[![latest](https://img.shields.io/npm/v/clovis/latest?label=latest)](https://www.npmjs.com/package/clovis)
 [![CI](https://github.com/cloviscomputing/clovis/actions/workflows/ci.yml/badge.svg)](https://github.com/cloviscomputing/clovis/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/clovis)](LICENSE)
 [![node](https://img.shields.io/node/v/clovis)](package.json)
