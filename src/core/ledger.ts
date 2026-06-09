@@ -349,6 +349,11 @@ export class Ledger {
     return Number(this.db.prepare("UPDATE sources SET status = ? WHERE id = ?").run(status, sourceId).changes);
   }
 
+  updateTransactionSource(txId: string, sourceId: string | null): number {
+    if (sourceId != null && !this.db.prepare("SELECT id FROM sources WHERE id = ?").get(sourceId)) throw new Error(`Source ${sourceId} not found`);
+    return Number(this.db.prepare("UPDATE journals SET source_id = ? WHERE id = ?").run(sourceId, txId).changes);
+  }
+
   listTransactionIdsForSource(sourceId: string): string[] {
     const ids = new Set<string>();
     for (const row of this.db.prepare("SELECT id FROM journals WHERE source_id = ? ORDER BY date, id").all(sourceId) as Row[]) {
@@ -1338,52 +1343,338 @@ export class Ledger {
     if (!/^clovis(?:-[a-z]+)?-ledger-v[12]$/.test(String(doc.format))) {
       throw new Error("Unsupported ledger export format");
     }
+
+    const errors: string[] = [];
+    const array = (name: string): any[] => {
+      const value = doc[name];
+      if (value == null) return [];
+      if (!Array.isArray(value)) {
+        errors.push(`${name} must be an array`);
+        return [];
+      }
+      return value;
+    };
+    const assets = array("assets");
+    const accounts = array("accounts");
+    const sources = array("sources");
+    const transactions = array("transactions");
+    const prices = array("prices");
+    const budgets = array("budgets");
+    const goals = array("goals");
+    const branches = array("branches");
+    const checkpoints = array("checkpoints");
+    const lots = array("lots");
+    const scheduledTransactions = array("scheduled_transactions");
+
+    const result = {
+      valid: true,
+      assets: assets.length,
+      accounts: accounts.length,
+      sources: sources.length,
+      transactions: transactions.length,
+      prices: prices.length,
+      budgets: budgets.length,
+      goals: goals.length,
+      branches: branches.length,
+      checkpoints: checkpoints.length,
+      lots: lots.length,
+      scheduled_transactions: scheduledTransactions.length,
+      inserted: {
+        assets: 0,
+        accounts: 0,
+        sources: 0,
+        transactions: 0,
+        prices: 0,
+        budgets: 0,
+        goals: 0,
+        branches: 0,
+        checkpoints: 0,
+        lots: 0,
+        scheduled_transactions: 0
+      },
+      skipped: 0,
+      errors: [] as string[],
+      dry_run: dryRun
+    };
+
+    const requireId = (section: string, row: any, index: number): string | null => {
+      const value = row?.id;
+      if (typeof value !== "string" || value.trim() === "") {
+        errors.push(`${section}[${index}].id is required`);
+        return null;
+      }
+      return value;
+    };
+    const seen = new Map<string, Set<string>>();
+    const trackId = (section: string, value: string, index: number): void => {
+      const sectionSeen = seen.get(section) ?? new Set<string>();
+      if (sectionSeen.has(value)) errors.push(`${section}[${index}].id duplicates ${value}`);
+      sectionSeen.add(value);
+      seen.set(section, sectionSeen);
+    };
+    const parseQuantity = (value: unknown, label: string): bigint => {
+      try {
+        const quantity = BigInt(value as bigint | number | string);
+        if (quantity < -(2n ** 63n) || quantity > 2n ** 63n - 1n) throw new Error("outside SQLite integer range");
+        return quantity;
+      } catch (error) {
+        errors.push(`${label} must be an integer quantity${error instanceof Error ? `: ${error.message}` : ""}`);
+        return 0n;
+      }
+    };
+    const parseScale = (value: unknown, label: string): number => {
+      const scale = Number(value);
+      if (!Number.isInteger(scale) || scale < 0) {
+        errors.push(`${label} must be a non-negative integer`);
+        return 0;
+      }
+      return scale;
+    };
+    const existingSource = (sourceId: string): boolean => Boolean(this.db.prepare("SELECT id FROM sources WHERE id = ?").get(sourceId));
     const assetMap = new Map<string, string>();
     const accountMap = new Map<string, string>();
     const sourceMap = new Map<string, string>();
     const txMap = new Map<string, string>();
-    for (const asset of doc.assets ?? []) assetMap.set(asset.id, preserveIds ? asset.id : (this.getAssetBySymbol(asset.symbol)?.id ?? id("asset")));
-    for (const account of doc.accounts ?? []) accountMap.set(account.id, preserveIds ? account.id : id("acct"));
-    for (const source of doc.sources ?? []) sourceMap.set(source.id, preserveIds ? source.id : id(source.type === "import" ? "batch" : "source"));
-    for (const tx of doc.transactions ?? []) {
-      txMap.set(tx.id, preserveIds ? tx.id : id("tx"));
-      const lines = (tx.entries ?? []).map((entry: any) => [
-        accountMap.get(entry.account_id)!,
-        assetMap.get(entry.asset_id)!,
-        BigInt(entry.quantity ?? entry.qty_cents ?? 0)
-      ] as [string, string, bigint]);
-      validateLines(lines);
-      this.assertPeriodOpen(dateOnly(tx.date));
-    }
-    const result = {
-      valid: true,
-      assets: (doc.assets ?? []).length,
-      accounts: (doc.accounts ?? []).length,
-      sources: (doc.sources ?? []).length,
-      transactions: (doc.transactions ?? []).length,
-      prices: (doc.prices ?? []).length,
-      budgets: (doc.budgets ?? []).length,
-      goals: (doc.goals ?? []).length,
-      branches: (doc.branches ?? []).length,
-      checkpoints: (doc.checkpoints ?? []).length,
-      lots: (doc.lots ?? []).length,
-      scheduled_transactions: (doc.scheduled_transactions ?? []).length,
-      dry_run: dryRun
+    const mappedAsset = (ref: unknown, label: string): string => {
+      const value = String(ref ?? "");
+      const mapped = assetMap.get(value);
+      if (mapped) return mapped;
+      if (this.getAsset(value)) return value;
+      errors.push(`${label} references unknown asset ${value}`);
+      return "";
     };
+    const mappedAccount = (ref: unknown, label: string): string => {
+      const value = String(ref ?? "");
+      const mapped = accountMap.get(value);
+      if (mapped) return mapped;
+      if (this.getAccount(value)) return value;
+      errors.push(`${label} references unknown account ${value}`);
+      return "";
+    };
+    const mappedSource = (ref: unknown, label: string): string | null => {
+      if (ref == null || ref === "") return null;
+      const value = String(ref);
+      const mapped = sourceMap.get(value);
+      if (mapped) return mapped;
+      if (existingSource(value)) return value;
+      errors.push(`${label} references unknown source ${value}`);
+      return null;
+    };
+
+    assets.forEach((asset, index) => {
+      const assetId = requireId("assets", asset, index);
+      if (!assetId) return;
+      trackId("assets", assetId, index);
+      const symbol = String(asset.symbol ?? "").trim().toUpperCase();
+      if (!symbol) errors.push(`assets[${index}].symbol is required`);
+      try {
+        assetType(String(asset.type ?? asset.asset_type));
+      } catch (error) {
+        errors.push(`assets[${index}].type is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      parseScale(asset.scale ?? asset.decimals ?? 2, `assets[${index}].scale`);
+      if (preserveIds && this.getAsset(assetId)) errors.push(`assets[${index}].id already exists: ${assetId}`);
+      assetMap.set(assetId, preserveIds ? assetId : (symbol ? this.getAssetBySymbol(symbol)?.id ?? id("asset") : id("asset")));
+    });
+
+    accounts.forEach((account) => {
+      if (typeof account?.id === "string" && account.id.trim() !== "" && !accountMap.has(account.id)) {
+        accountMap.set(account.id, preserveIds ? account.id : id("acct"));
+      }
+    });
+    accounts.forEach((account, index) => {
+      const accountId = requireId("accounts", account, index);
+      if (!accountId) return;
+      trackId("accounts", accountId, index);
+      if (!accountMap.has(accountId)) accountMap.set(accountId, preserveIds ? accountId : id("acct"));
+      if (!String(account.name ?? "").trim()) errors.push(`accounts[${index}].name is required`);
+      try {
+        accountType(String(account.type ?? account.account_type));
+      } catch (error) {
+        errors.push(`accounts[${index}].type is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (account.parent_id && !accountMap.has(String(account.parent_id)) && !this.getAccount(String(account.parent_id))) {
+        errors.push(`accounts[${index}].parent_id references unknown account ${String(account.parent_id)}`);
+      }
+      if (preserveIds && this.getAccount(accountId)) errors.push(`accounts[${index}].id already exists: ${accountId}`);
+    });
+
+    sources.forEach((source, index) => {
+      const sourceId = requireId("sources", source, index);
+      if (!sourceId) return;
+      trackId("sources", sourceId, index);
+      if (!String(source.type ?? "").trim()) errors.push(`sources[${index}].type is required`);
+      if (source.metadata_json != null) {
+        try {
+          JSON.parse(String(source.metadata_json));
+        } catch {
+          errors.push(`sources[${index}].metadata_json must be valid JSON`);
+        }
+      }
+      if (preserveIds && existingSource(sourceId)) errors.push(`sources[${index}].id already exists: ${sourceId}`);
+      sourceMap.set(sourceId, preserveIds ? sourceId : id(source.type === "import" ? "batch" : "source"));
+    });
+
+    transactions.forEach((tx, index) => {
+      const txId = requireId("transactions", tx, index);
+      if (!txId) return;
+      trackId("transactions", txId, index);
+      txMap.set(txId, preserveIds ? txId : id("tx"));
+      if (preserveIds && this.getTx(txId)) errors.push(`transactions[${index}].id already exists: ${txId}`);
+      try {
+        this.assertPeriodOpen(dateOnly(String(tx.date)));
+      } catch (error) {
+        errors.push(`transactions[${index}].date is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      try {
+        txStatus(String(tx.status));
+      } catch (error) {
+        errors.push(`transactions[${index}].status is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      mappedSource(tx.source_id, `transactions[${index}].source_id`);
+      if (!Array.isArray(tx.entries)) {
+        errors.push(`transactions[${index}].entries must be an array`);
+        return;
+      }
+      const lines = tx.entries.map((entry: any, entryIndex: number) => [
+          mappedAccount(entry.account_id, `transactions[${index}].entries[${entryIndex}].account_id`),
+          mappedAsset(entry.asset_id, `transactions[${index}].entries[${entryIndex}].asset_id`),
+          parseQuantity(entry.quantity ?? entry.qty_cents ?? 0, `transactions[${index}].entries[${entryIndex}].quantity`)
+        ] as [string, string, bigint]);
+      tx.entries.forEach((entry: any, entryIndex: number) => {
+        if (!preserveIds) return;
+        if (typeof entry.id !== "string" || entry.id.trim() === "") errors.push(`transactions[${index}].entries[${entryIndex}].id is required`);
+        else trackId("journal_lines", entry.id, entryIndex);
+      });
+      try {
+        validateLines(lines);
+      } catch (error) {
+        errors.push(`transactions[${index}].entries are invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+
+    prices.forEach((price, index) => {
+      const priceId = requireId("prices", price, index);
+      if (priceId) trackId("prices", priceId, index);
+      mappedAsset(price.asset_id, `prices[${index}].asset_id`);
+      mappedAsset(price.quote_asset_id ?? price.quote_id, `prices[${index}].quote_asset_id`);
+      parseQuantity(price.rate_value ?? price.rate_cents ?? 0, `prices[${index}].rate_value`);
+      parseScale(price.rate_scale ?? 2, `prices[${index}].rate_scale`);
+      if (!String(price.time ?? "").trim()) errors.push(`prices[${index}].time is required`);
+    });
+
+    let defaultAssetId = assets.find((asset: any) => String(asset.symbol).toUpperCase() === "USD")?.id;
+    defaultAssetId = defaultAssetId ? assetMap.get(defaultAssetId) : (this.getAssetBySymbol("USD")?.id ?? null);
+    budgets.forEach((budget, index) => {
+      const budgetId = requireId("budgets", budget, index);
+      if (budgetId) trackId("budgets", budgetId, index);
+      mappedAccount(budget.account_id, `budgets[${index}].account_id`);
+      if (budget.asset_id) mappedAsset(budget.asset_id, `budgets[${index}].asset_id`);
+      else if (!defaultAssetId) errors.push(`budgets[${index}].asset_id is required when USD is not present`);
+      parseQuantity(budget.quantity ?? budget.amount_cents ?? 0, `budgets[${index}].quantity`);
+      if (budget.month != null && (!Number.isInteger(Number(budget.month)) || Number(budget.month) < 1 || Number(budget.month) > 12)) errors.push(`budgets[${index}].month must be 1-12`);
+    });
+
+    goals.forEach((goal, index) => {
+      const goalId = requireId("goals", goal, index);
+      if (goalId) trackId("goals", goalId, index);
+      mappedAccount(goal.account_id, `goals[${index}].account_id`);
+      if (goal.asset_id) mappedAsset(goal.asset_id, `goals[${index}].asset_id`);
+      else if (!defaultAssetId) errors.push(`goals[${index}].asset_id is required when USD is not present`);
+      parseQuantity(goal.quantity ?? goal.target_quantity ?? goal.target_cents ?? 0, `goals[${index}].quantity`);
+      if (goal.target_date != null) {
+        try {
+          dateOnly(String(goal.target_date));
+        } catch (error) {
+          errors.push(`goals[${index}].target_date is invalid: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    });
+
+    branches.forEach((branch, index) => {
+      if (!String(branch.name ?? "").trim()) errors.push(`branches[${index}].name is required`);
+    });
+
+    checkpoints.forEach((checkpoint, index) => {
+      const checkpointId = requireId("checkpoints", checkpoint, index);
+      if (checkpointId) trackId("checkpoints", checkpointId, index);
+      try {
+        dateOnly(String(checkpoint.as_of));
+      } catch (error) {
+        errors.push(`checkpoints[${index}].as_of is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+
+    lots.forEach((lot, index) => {
+      const lotId = requireId("lots", lot, index);
+      if (lotId) trackId("lots", lotId, index);
+      mappedAccount(lot.account_id, `lots[${index}].account_id`);
+      mappedAsset(lot.asset_id, `lots[${index}].asset_id`);
+      mappedAsset(lot.cost_asset_id, `lots[${index}].cost_asset_id`);
+      parseQuantity(lot.quantity ?? 0, `lots[${index}].quantity`);
+      parseQuantity(lot.cost_quantity ?? 0, `lots[${index}].cost_quantity`);
+      try {
+        dateOnly(String(lot.opened_at));
+      } catch (error) {
+        errors.push(`lots[${index}].opened_at is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (lot.closed_at != null) {
+        try {
+          dateOnly(String(lot.closed_at));
+        } catch (error) {
+          errors.push(`lots[${index}].closed_at is invalid: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    });
+
+    scheduledTransactions.forEach((scheduled, index) => {
+      const scheduledId = requireId("scheduled_transactions", scheduled, index);
+      if (scheduledId) trackId("scheduled_transactions", scheduledId, index);
+      mappedAccount(scheduled.from_account_id, `scheduled_transactions[${index}].from_account_id`);
+      mappedAccount(scheduled.to_account_id, `scheduled_transactions[${index}].to_account_id`);
+      if (scheduled.asset_id) mappedAsset(scheduled.asset_id, `scheduled_transactions[${index}].asset_id`);
+      else if (!defaultAssetId) errors.push(`scheduled_transactions[${index}].asset_id is required when USD is not present`);
+      parseQuantity(scheduled.quantity ?? scheduled.amount_cents ?? 0, `scheduled_transactions[${index}].quantity`);
+      try {
+        dateOnly(String(scheduled.next_date));
+      } catch (error) {
+        errors.push(`scheduled_transactions[${index}].next_date is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (scheduled.end_date != null) {
+        try {
+          dateOnly(String(scheduled.end_date));
+        } catch (error) {
+          errors.push(`scheduled_transactions[${index}].end_date is invalid: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (!["daily", "weekly", "monthly", "yearly"].includes(String(scheduled.frequency))) errors.push(`scheduled_transactions[${index}].frequency is invalid`);
+    });
+
+    if (errors.length) {
+      const failure = { ...result, valid: false, imported: false, errors };
+      if (dryRun) return failure;
+      throw new Error(`Ledger import validation failed:\n${errors.join("\n")}`);
+    }
     if (dryRun) return result;
+
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      for (const asset of doc.assets ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO assets(id, symbol, type, scale, name) VALUES (?, ?, ?, ?, ?)").run(
+      for (const asset of assets) {
+        if (!preserveIds && this.getAsset(assetMap.get(asset.id)!)) {
+          result.skipped += 1;
+          continue;
+        }
+        this.db.prepare("INSERT INTO assets(id, symbol, type, scale, name) VALUES (?, ?, ?, ?, ?)").run(
           assetMap.get(asset.id)!,
           asset.symbol,
           asset.type ?? asset.asset_type,
           Number(asset.scale ?? asset.decimals ?? 2),
           asset.name ?? ""
         );
+        result.inserted.assets += 1;
       }
-      for (const account of doc.accounts ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO accounts(id, book_id, name, type, parent_id, code, color_hex) VALUES (?, ?, ?, ?, NULL, ?, ?)").run(
+      for (const account of accounts) {
+        this.db.prepare("INSERT INTO accounts(id, book_id, name, type, parent_id, code, color_hex) VALUES (?, ?, ?, ?, NULL, ?, ?)").run(
           accountMap.get(account.id)!,
           DEFAULT_BOOK_ID,
           account.name,
@@ -1391,12 +1682,13 @@ export class Ledger {
           account.code ?? "",
           account.color_hex ?? "#888888"
         );
+        result.inserted.accounts += 1;
       }
-      for (const account of doc.accounts ?? []) {
+      for (const account of accounts) {
         if (account.parent_id) this.db.prepare("UPDATE accounts SET parent_id = ? WHERE id = ?").run(accountMap.get(account.parent_id)!, accountMap.get(account.id)!);
       }
-      for (const source of doc.sources ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO sources(id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(
+      for (const source of sources) {
+        this.db.prepare("INSERT INTO sources(id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(
           sourceMap.get(source.id)!,
           source.type,
           source.label ?? "",
@@ -1404,13 +1696,14 @@ export class Ledger {
           source.created_at ?? now(),
           source.metadata_json ?? "{}"
         );
+        result.inserted.sources += 1;
       }
-      for (const tx of doc.transactions ?? []) {
+      for (const tx of transactions) {
         const txId = txMap.get(tx.id)!;
-        this.db.prepare("INSERT OR IGNORE INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+        this.db.prepare("INSERT INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
           txId,
           DEFAULT_BOOK_ID,
-          tx.source_id ? sourceMap.get(tx.source_id) ?? tx.source_id : null,
+          mappedSource(tx.source_id, "transaction.source_id"),
           tx.date,
           tx.posted_at ?? now(),
           tx.status,
@@ -1418,66 +1711,70 @@ export class Ledger {
           tx.external_id ?? null
         );
         (tx.entries ?? []).forEach((entry: any, index: number) => {
-          this.db.prepare("INSERT OR IGNORE INTO journal_lines(id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?)").run(
+          this.db.prepare("INSERT INTO journal_lines(id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?)").run(
             preserveIds ? entry.id : id("line"),
             txId,
             index + 1,
-            accountMap.get(entry.account_id)!,
-            assetMap.get(entry.asset_id)!,
+            mappedAccount(entry.account_id, "journal_line.account_id"),
+            mappedAsset(entry.asset_id, "journal_line.asset_id"),
             BigInt(entry.quantity ?? entry.qty_cents ?? 0)
           );
         });
         for (const tag of tx.tags ?? []) {
           this.createAnnotation(tag.entity_type ?? "tx", txId, tag.key, tag.val ?? tag.value ?? "");
         }
+        result.inserted.transactions += 1;
       }
-      for (const price of doc.prices ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO prices(id, book_id, asset_id, quote_asset_id, rate_value, rate_scale, time) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      for (const price of prices) {
+        this.db.prepare("INSERT INTO prices(id, book_id, asset_id, quote_asset_id, rate_value, rate_scale, time) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? price.id : id("price"),
           DEFAULT_BOOK_ID,
-          assetMap.get(price.asset_id)!,
-          assetMap.get(price.quote_asset_id ?? price.quote_id)!,
+          mappedAsset(price.asset_id, "price.asset_id"),
+          mappedAsset(price.quote_asset_id ?? price.quote_id, "price.quote_asset_id"),
           BigInt(price.rate_value ?? price.rate_cents ?? 0),
           Number(price.rate_scale ?? 2),
           price.time
         );
+        result.inserted.prices += 1;
       }
-      let defaultAssetId = [...(doc.assets ?? [])].find((asset: any) => String(asset.symbol).toUpperCase() === "USD")?.id;
-      defaultAssetId = defaultAssetId ? assetMap.get(defaultAssetId) : (this.getAssetBySymbol("USD")?.id ?? this.createAsset("USD", "currency", 2, "US Dollar"));
-      for (const budget of doc.budgets ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO targets(id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
+      defaultAssetId = defaultAssetId ?? this.createAsset("USD", "currency", 2, "US Dollar");
+      for (const budget of budgets) {
+        this.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? budget.id : id("target"),
-          accountMap.get(budget.account_id)!,
-          budget.asset_id ? assetMap.get(budget.asset_id)! : defaultAssetId!,
+          mappedAccount(budget.account_id, "budget.account_id"),
+          budget.asset_id ? mappedAsset(budget.asset_id, "budget.asset_id") : defaultAssetId!,
           BigInt(budget.quantity ?? budget.amount_cents ?? 0),
           budget.period ?? "monthly",
           budget.year ?? null,
           budget.month ?? null,
           budget.rollover_rule ?? ""
         );
+        result.inserted.budgets += 1;
       }
-      for (const goal of doc.goals ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO targets(id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, 'goal', ?, ?, ?, ?, ?, ?)").run(
+      for (const goal of goals) {
+        this.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, 'goal', ?, ?, ?, ?, ?, ?)").run(
           preserveIds && goal.id ? goal.id : id("target"),
-          accountMap.get(goal.account_id)!,
-          goal.asset_id ? assetMap.get(goal.asset_id)! : defaultAssetId!,
+          mappedAccount(goal.account_id, "goal.account_id"),
+          goal.asset_id ? mappedAsset(goal.asset_id, "goal.asset_id") : defaultAssetId!,
           BigInt(goal.quantity ?? goal.target_quantity ?? goal.target_cents ?? 0),
           goal.name,
           goal.target_date ?? null,
           Number(goal.priority ?? 1)
         );
+        result.inserted.goals += 1;
       }
-      for (const branch of doc.branches ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at, closed_at) VALUES (?, ?, 'scenario', ?, ?, ?)").run(
+      for (const branch of branches) {
+        this.db.prepare("INSERT INTO books(id, name, type, parent_id, created_at, closed_at) VALUES (?, ?, 'scenario', ?, ?, ?)").run(
           branch.name,
           branch.name,
           DEFAULT_BOOK_ID,
           branch.created_at ?? now(),
           branch.discarded_at ?? branch.closed_at ?? null
         );
+        result.inserted.branches += 1;
       }
-      for (const checkpoint of doc.checkpoints ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO period_closes(id, book_id, name, as_of, description, created_at, reopened_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+      for (const checkpoint of checkpoints) {
+        this.db.prepare("INSERT INTO period_closes(id, book_id, name, as_of, description, created_at, reopened_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? checkpoint.id : id("period"),
           DEFAULT_BOOK_ID,
           checkpoint.name,
@@ -1486,33 +1783,36 @@ export class Ledger {
           checkpoint.created_at ?? now(),
           checkpoint.reopened_at ?? null
         );
+        result.inserted.checkpoints += 1;
       }
-      for (const lot of doc.lots ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO lots(id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_at, closed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      for (const lot of lots) {
+        this.db.prepare("INSERT INTO lots(id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_at, closed_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? lot.id : id("lot"),
-          accountMap.get(lot.account_id)!,
-          assetMap.get(lot.asset_id)!,
+          mappedAccount(lot.account_id, "lot.account_id"),
+          mappedAsset(lot.asset_id, "lot.asset_id"),
           BigInt(lot.quantity ?? 0),
-          assetMap.get(lot.cost_asset_id)!,
+          mappedAsset(lot.cost_asset_id, "lot.cost_asset_id"),
           BigInt(lot.cost_quantity ?? 0),
           lot.opened_at,
           lot.closed_at ?? null,
           lot.metadata_json ?? "{}"
         );
+        result.inserted.lots += 1;
       }
-      for (const scheduled of doc.scheduled_transactions ?? []) {
-        this.db.prepare("INSERT OR IGNORE INTO recurrences(id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      for (const scheduled of scheduledTransactions) {
+        this.db.prepare("INSERT INTO recurrences(id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? scheduled.id : id("sched"),
           scheduled.next_date,
           BigInt(scheduled.quantity ?? scheduled.amount_cents ?? 0),
-          accountMap.get(scheduled.from_account_id)!,
-          accountMap.get(scheduled.to_account_id)!,
+          mappedAccount(scheduled.from_account_id, "scheduled_transaction.from_account_id"),
+          mappedAccount(scheduled.to_account_id, "scheduled_transaction.to_account_id"),
           scheduled.description ?? "",
           scheduled.frequency,
           scheduled.end_date ?? null,
-          scheduled.asset_id ? assetMap.get(scheduled.asset_id)! : defaultAssetId!,
+          scheduled.asset_id ? mappedAsset(scheduled.asset_id, "scheduled_transaction.asset_id") : defaultAssetId!,
           scheduled.status ?? "active"
         );
+        result.inserted.scheduled_transactions += 1;
       }
       this.db.exec("COMMIT");
       return { ...result, imported: true };

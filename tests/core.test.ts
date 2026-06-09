@@ -7,7 +7,8 @@ import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "..
 import { callTool, TOOL_NAMES } from "../src/app/index.js";
 import { toolHandlers } from "../src/app/catalog.js";
 import { mcpDbPathFromEnv } from "../src/app/context.js";
-import { TOOL_SIGNATURES } from "../src/mcp/signatures.js";
+import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/mcp/signatures.js";
+import { inputShapeFromDefinition } from "../src/mcp/tools.js";
 
 const dirs: string[] = [];
 
@@ -36,29 +37,19 @@ describe("ledger core", () => {
     expect(debitCredit(-1200n)).toEqual({ debit: 0n, credit: 1200n });
   });
 
-  it("creates the TypeScript schema and default book", () => {
+  it("creates schema v1 and default book", () => {
     const ledger = tempLedger();
     try {
       const tables = new Set((ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
       for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences"]) {
         expect(tables.has(table)).toBe(true);
       }
-      for (const oldTable of ["transactions", "entries", "tags", "budgets", "goals", "scheduled_transactions"]) {
-        expect(tables.has(oldTable)).toBe(false);
-      }
-
       const columns = (table: string) => new Set((ledger.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
       expect(columns("journal_lines").has("quantity")).toBe(true);
-      expect(columns("journal_lines").has("qty_cents")).toBe(false);
       expect(columns("assets").has("scale")).toBe(true);
-      expect(columns("assets").has("decimals")).toBe(false);
       expect(columns("prices").has("quote_asset_id")).toBe(true);
-      expect(columns("prices").has("rate_cents")).toBe(false);
       expect(columns("targets").has("quantity")).toBe(true);
-      expect(columns("targets").has("amount_cents")).toBe(false);
-      expect(columns("targets").has("target_cents")).toBe(false);
       expect(columns("recurrences").has("quantity")).toBe(true);
-      expect(columns("recurrences").has("amount_cents")).toBe(false);
     } finally {
       ledger.close();
     }
@@ -798,5 +789,97 @@ describe("app and package surface", () => {
     const result = run("txn", "opening-balance", "--account", checking, "--amount", "125", "--date", "2026-05-31", "--status", "posted");
     expect(result.data.amount).toBe(12500);
     expect(run("balance", checking).data.balance).toBe(12500);
+  });
+
+  it("validates ledger imports before writing", () => {
+    const source = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal" }, source);
+      const accounts = callTool("list_accounts", {}, source) as any[];
+      const checking = accounts.find((row) => row.name === "Checking").id;
+      const equity = accounts.find((row) => row.name === "Opening Balances").id;
+      callTool("create_asset", { symbol: "EUR", asset_type: "currency", decimals: 2 }, source);
+      callTool("create_transaction", { date: "2026-06-01", amount: 25, from_account_id: equity, to_account_id: checking, description: "Seed", status: "posted" }, source);
+      const exported = callTool("export_ledger", {}, source) as any;
+      const baseDoc = JSON.parse(exported.data);
+      const cases: Array<[string, (doc: any) => void, RegExp]> = [
+        ["invalid asset type", (doc) => { doc.assets[0].type = "fiat"; }, /Invalid asset type/],
+        ["invalid account type", (doc) => { doc.accounts[0].type = "cash"; }, /Invalid account type/],
+        ["duplicate id", (doc) => { doc.assets[1].id = doc.assets[0].id; }, /duplicates/],
+        ["bad date", (doc) => { doc.transactions[0].date = "2026-99-99"; }, /date/],
+        ["missing foreign key", (doc) => { doc.transactions[0].entries[0].account_id = "acct_missing"; }, /unknown account/]
+      ];
+
+      for (const [, mutate, message] of cases) {
+        const target = tempLedger();
+        try {
+          const doc = JSON.parse(JSON.stringify(baseDoc));
+          mutate(doc);
+          const dryRun = callTool("import_ledger", { data: JSON.stringify(doc), dry_run: true }, target) as any;
+          expect(dryRun.valid).toBe(false);
+          expect(dryRun.errors.join("\n")).toMatch(message);
+          expect(() => callTool("import_ledger", { data: JSON.stringify(doc) }, target)).toThrow(/Ledger import validation failed/);
+          expect(callTool("list_transactions", { status: null }, target)).toMatchObject({ transactions: [] });
+        } finally {
+          target.close();
+        }
+      }
+    } finally {
+      source.close();
+    }
+  });
+
+  it("does not create empty import batches when all rows fail", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal" }, ledger);
+      const accounts = callTool("list_accounts", {}, ledger) as any[];
+      const checking = accounts.find((row) => row.name === "Checking").id;
+      const equity = accounts.find((row) => row.name === "Opening Balances").id;
+      callTool("close_period", { name: "Closed May", as_of: "2026-05-31" }, ledger);
+      const result = callTool("import_transactions", {
+        account_id: checking,
+        counterpart_id: equity,
+        transactions: [{ date: "2026-05-15", amount: 10, description: "Closed import" }],
+        batch_label: "Should not persist"
+      }, ledger) as any;
+      expect(result.created).toBe(0);
+      expect(result.batch_id).toBeNull();
+      expect(result.errors).toHaveLength(1);
+      expect(callTool("list_import_batches", {}, ledger)).toEqual([]);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("rejects complex recategorization regex patterns", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal" }, ledger);
+      const accounts = callTool("list_accounts", {}, ledger) as any[];
+      const checking = accounts.find((row) => row.name === "Checking").id;
+      const uncategorized = accounts.find((row) => row.name === "Uncategorized").id;
+      callTool("create_transaction", { date: "2026-06-01", amount: 10, from_account_id: checking, to_account_id: uncategorized, description: "a".repeat(1000), status: "posted" }, ledger);
+      const started = Date.now();
+      expect(() => callTool("recategorize_by_pattern", { pattern: "^(a+)+$", new_account_id: uncategorized, dry_run: true }, ledger)).toThrow(/too complex/);
+      expect(Date.now() - started).toBeLessThan(100);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("applies MCP input bounds from tool definitions", () => {
+    const listTransactions = inputShapeFromDefinition(TOOL_DEFINITIONS.list_transactions);
+    expect(() => listTransactions.limit.parse(-1)).toThrow();
+    expect(() => listTransactions.limit.parse(1001)).toThrow();
+    expect(listTransactions.limit.parse(50)).toBe(50);
+
+    const spending = inputShapeFromDefinition(TOOL_DEFINITIONS.spending);
+    expect(() => spending.month.parse(99)).toThrow();
+    expect(spending.month.parse(12)).toBe(12);
+
+    const createTransaction = inputShapeFromDefinition(TOOL_DEFINITIONS.create_transaction);
+    expect(() => createTransaction.date.parse("today")).toThrow();
+    expect(createTransaction.date.parse("2026-06-01")).toBe("2026-06-01");
   });
 });

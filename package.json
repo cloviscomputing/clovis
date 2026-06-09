@@ -1,7 +1,7 @@
 {
   "name": "clovis",
   "version": "0.1.0",
-  "description": "Local-first bookkeeping CLI, MCP server, and TypeScript ledger engine",
+  "description": "Local-first bookkeeping CLI, MCP server, and SQLite ledger engine",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "engines": {

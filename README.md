@@ -21,6 +21,10 @@ The database format is versioned. The current schema is `SCHEMA_VERSION = 1`.
 Fresh databases are created directly with this schema. Ledger JSON snapshots can
 be exported and imported with `export_ledger` and `import_ledger`.
 
+`0.1.0` is the first public release. Clovis is designed for long-running local
+bookkeeping workflows while the public API and database format settle during the
+`0.x` line.
+
 The schema is a versioned local data format, but the package is still pre-1.0.
 Patch releases should continue to read schema v1 databases. Minor releases may
 revise the format and should document the upgrade path.

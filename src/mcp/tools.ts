@@ -5,17 +5,34 @@ import { TOOL_DEFINITIONS, type ToolDefinition, type ToolParameterDefinition } f
 
 type Shape = Record<string, ZodTypeAny>;
 
+const MAX_STRING_LENGTH = 4096;
+const MAX_ARRAY_LENGTH = 1000;
+
+function isMonthParameter(name: string): boolean {
+  return name === "month" || name.endsWith("_month");
+}
+
+function isDateParameter(name: string): boolean {
+  return name === "date" || name === "as_of" || name === "through" || name === "date_from" || name === "date_to" || name.endsWith("_date");
+}
+
 function schemaForParameter(parameter: ToolParameterDefinition): ZodTypeAny {
   let schema: ZodTypeAny;
+  const name = parameter[0];
   switch (parameter[1]) {
     case "string":
-      schema = z.string();
+      schema = isDateParameter(name)
+        ? z.string().regex(/^\d{4}-\d{2}-\d{2}$/, `${name} must be YYYY-MM-DD`)
+        : z.string().max(MAX_STRING_LENGTH);
       break;
     case "number":
       schema = z.number();
       break;
     case "integer":
-      schema = z.number().int();
+      if (name === "limit") schema = z.number().int().min(1).max(1000);
+      else if (name === "offset" || name === "skip_rows" || name === "preview_rows" || name === "sample_limit" || name === "days" || name === "months") schema = z.number().int().min(0).max(10000);
+      else if (isMonthParameter(name)) schema = z.number().int().min(1).max(12);
+      else schema = z.number().int();
       break;
     case "boolean":
       schema = z.boolean();
@@ -24,16 +41,16 @@ function schemaForParameter(parameter: ToolParameterDefinition): ZodTypeAny {
       schema = z.record(z.string(), z.any());
       break;
     case "array":
-      schema = z.array(z.any());
+      schema = z.array(z.any()).max(MAX_ARRAY_LENGTH);
       break;
     case "string[]":
-      schema = z.array(z.string());
+      schema = z.array(z.string().max(MAX_STRING_LENGTH)).max(MAX_ARRAY_LENGTH);
       break;
     case "integer[]":
-      schema = z.array(z.number().int());
+      schema = z.array(z.number().int()).max(MAX_ARRAY_LENGTH);
       break;
     case "object[]":
-      schema = z.array(z.record(z.string(), z.any()));
+      schema = z.array(z.record(z.string(), z.any())).max(MAX_ARRAY_LENGTH);
       break;
   }
   if (parameter[2]?.nullable) schema = schema.nullable();

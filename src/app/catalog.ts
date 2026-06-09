@@ -354,6 +354,22 @@ function unsupportedArguments(values: Args): void {
   if (names.length) throw new Error(`Unsupported MCP parameter(s): ${names.join(", ")}`);
 }
 
+const MAX_MATCH_PATTERN_LENGTH = 200;
+const MAX_MATCH_INPUT_LENGTH = 2048;
+const NESTED_QUANTIFIER_PATTERN = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/;
+
+function safeMatchRegex(pattern: unknown): RegExp {
+  const value = String(pattern ?? "");
+  if (!value) throw new Error("pattern is required");
+  if (value.length > MAX_MATCH_PATTERN_LENGTH) throw new Error(`pattern must be ${MAX_MATCH_PATTERN_LENGTH} characters or fewer`);
+  if (NESTED_QUANTIFIER_PATTERN.test(value)) throw new Error("pattern is too complex");
+  try {
+    return new RegExp(value, "i");
+  } catch (error) {
+    throw new Error(`Invalid pattern: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 const MCP_FILESYSTEM_TOOLS = new Set([
   "apply_reconciliation_plan",
   "backup_now",
@@ -801,11 +817,15 @@ const handlers: Record<ToolName, Handler> = {
 
   import_transactions: (ledger, args) => {
     if (args.date_tolerance_days != null && args.date_tolerance_days !== 1) unsupportedArguments({ date_tolerance_days: args.date_tolerance_days });
-    const batchId = args.dry_run ? null : batch(ledger, args.batch_label, { statement_type: args.statement_type });
     if (args.dry_run) return { created: 0, transactions: [], errors: [], dry_run: true, batch_id: null, imported: 0, skipped: 0, transfer_stats: { matched: 0, unmatched: 0 } };
-    const result = importTransactionRows(ledger, account(ledger, args.account_id), account(ledger, args.counterpart_id), args.transactions ?? [], { ...args, source_id: batchId });
+    const result = importTransactionRows(ledger, account(ledger, args.account_id), account(ledger, args.counterpart_id), args.transactions ?? [], { ...args, source_id: null });
+    const batchId = result.created > 0 ? batch(ledger, args.batch_label, { statement_type: args.statement_type }) : null;
     for (const tx of result.transactions) {
-      if (batchId) tagTx(ledger, String(tx.id), "import_batch", batchId);
+      if (batchId) {
+        ledger.updateTransactionSource(String(tx.id), batchId);
+        tx.source_id = batchId;
+        tagTx(ledger, String(tx.id), "import_batch", batchId);
+      }
       for (const [key, value] of Object.entries(args.tags ?? {})) tagTx(ledger, String(tx.id), key, String(value));
     }
     return { ...result, batch_id: batchId, imported: result.created, skipped: 0, transfer_stats: { matched: 0, unmatched: 0 } };
@@ -898,9 +918,9 @@ const handlers: Record<ToolName, Handler> = {
     const oldAccount = args.old_account_id ? account(ledger, args.old_account_id) : null;
     const dryRun = args.dry_run !== false;
     const matches: Row[] = [];
-    const regex = new RegExp(args.pattern, "i");
+    const regex = safeMatchRegex(args.pattern);
     for (const tx of iterTransactions(ledger, { status: args.status ?? "posted", date_from: args.date_from, date_to: args.date_to })) {
-      if (!regex.test(tx.description)) continue;
+      if (!regex.test(tx.description.slice(0, MAX_MATCH_INPUT_LENGTH))) continue;
       const entries = ledger.getEntries(tx.id);
       const magnitudes = entries.map((entry) => entry.quantity < 0n ? -entry.quantity : entry.quantity);
       if (args.amount_min != null && (magnitudes.length === 0 || magnitudes.every((amount) => amount < BigInt(args.amount_min as string | number | bigint | boolean)))) continue;

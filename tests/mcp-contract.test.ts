@@ -239,7 +239,15 @@ const CASES = {
   goal_progress: { mutation: "read", setup: ensureGoal, args: (ctx) => ({ account: ctx.accounts.Savings }), assert: expectObject },
   holdings: { mutation: "read", setup: (ctx) => { callTool("buy_security", { account_id: ctx.accounts.Brokerage, symbol: "MSFT", shares: 2, total_cost_cents: 20000, date: "2026-06-10" }, ctx.ledger); }, args: () => ({ asset_type: "security" }), assert: expectArray },
   import_file: { mutation: "write", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], status: "pending", counterpart_col: "counterpart", tag_cols: { kind: "kind" } }), assert: expectObject },
-  import_ledger: { mutation: "write", args: (ctx) => ({ data: (callTool("export_ledger", {}, ctx.ledger) as any).data }), assert: expectObject },
+  import_ledger: {
+    mutation: "write",
+    args: (ctx) => {
+      const doc = JSON.parse((callTool("export_ledger", {}, ctx.ledger) as any).data);
+      doc.accounts = doc.accounts.map((account: any) => ({ ...account, name: `Imported ${account.name}` }));
+      return { data: JSON.stringify(doc), preserve_ids: false };
+    },
+    assert: expectObject
+  },
   import_transactions: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Checking, counterpart_id: ctx.accounts["Opening Balances"], transactions: [{ date: "2026-06-22", amount: 5, description: "Inline import" }], status: "pending" }), assert: expectObject },
   income_statement: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   init_defaults: { mutation: "write", args: () => ({ template: "personal" }), assert: expectObject },
