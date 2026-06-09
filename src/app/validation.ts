@@ -45,11 +45,7 @@ export function parseTxStatus(value?: string | null): TxStatus | null {
   return value as TxStatus;
 }
 
-export function getOrCreateDefaultAsset(ledger: Ledger): string {
-  return ledger.getAssetBySymbol("USD")?.id ?? ledger.createAsset("USD", "currency", 2, "US Dollar");
-}
-
-export function resolveAsset(ledger: Ledger, ref?: string | null, symbol = "USD"): string {
+export function resolveAsset(ledger: Ledger, ref?: string | null, symbol?: string | null): string {
   if (ref) {
     const byId = ledger.getAsset(ref);
     if (byId) return byId.id;
@@ -57,7 +53,11 @@ export function resolveAsset(ledger: Ledger, ref?: string | null, symbol = "USD"
     if (bySymbol) return bySymbol.id;
     throw new Error(`Asset '${ref}' not found`);
   }
-  return ledger.getAssetBySymbol(symbol)?.id ?? ledger.createAsset(symbol, "currency", symbol.toUpperCase() === "JPY" ? 0 : 2, symbol.toUpperCase());
+  if (symbol) {
+    const normalized = symbol.toUpperCase();
+    return ledger.getAssetBySymbol(normalized)?.id ?? ledger.createAsset(normalized, "currency", normalized === "JPY" ? 0 : 2, normalized);
+  }
+  throw new Error("asset_id is required; Clovis does not infer a default currency");
 }
 
 export function amountToQuantity(ledger: Ledger, assetId: string, amount: number | string | bigint): bigint {
@@ -72,4 +72,3 @@ export function resolveAccount(ledger: Ledger, ref?: string | null): string {
   if (!account) throw new Error(`Account '${ref}' not found`);
   return account.id;
 }
-

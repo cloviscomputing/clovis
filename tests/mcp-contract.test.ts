@@ -50,7 +50,7 @@ function createContext(): TestContext {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  ledger.initDefaults("personal");
+  ledger.initDefaults("personal", ledger.createAsset("USD", "currency", 2, "US Dollar"));
   const accounts = Object.fromEntries(ledger.listAccounts().map((row) => [row.name, row.id]));
   accounts["Transfer Clearing"] = ledger.createAccount("Transfer Clearing", "equity");
   accounts.Brokerage = ledger.createAccount("Brokerage", "asset");
@@ -63,6 +63,7 @@ function createContext(): TestContext {
   const eur = ledger.createAsset("EUR", "currency", 2, "Euro");
   const jpy = ledger.createAsset("JPY", "currency", 0, "Yen");
   const unused = ledger.createAsset("CAD", "currency", 2, "Canadian Dollar");
+  for (const accountId of Object.values(accounts)) ledger.createAnnotation("account", accountId, "default_asset", usd);
   ledger.createPrice(eur, usd, "1.10", "2026-06-01");
   ledger.createPrice(jpy, usd, "0.01", "2026-06-01");
 
@@ -178,20 +179,20 @@ const CASES = {
   account_register: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking }), assert: expectObject },
   add_match_rule: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Groceries, pattern: "Market" }), assert: expectObject },
   add_match_rules: { mutation: "write", args: (ctx) => ({ rules: [{ account_id: ctx.accounts.Groceries, pattern: "Market" }] }), assert: (result) => expect(result.created).toBe(1) },
-  age_of_money: { mutation: "read", args: () => ({ days: 30 }), assert: expectObject },
+  age_of_money: { mutation: "read", args: (ctx) => ({ days: 30, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   apply_match_rules: { mutation: "dry-run", setup: ensureRule, args: (ctx) => ({ catch_all_account_id: ctx.accounts.Uncategorized }), assert: expectObject },
   apply_pattern: { mutation: "dry-run", args: (ctx) => ({ pattern: "Market", target_account: ctx.accounts["Dining Out"], source_account: ctx.accounts.Groceries }), assert: expectObject },
   apply_reconciliation_plan: { mutation: "dry-run", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"] }), assert: expectObject },
-  apply_rollover: { mutation: "write", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectObject },
+  apply_rollover: { mutation: "write", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   assert_balance: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, expected: 913.02, date: "2026-06-30" }), assert: (result) => expect(result).toHaveProperty("matches") },
   assert_balances: { mutation: "read", args: (ctx) => ({ assertions: [{ account_id: ctx.accounts.Checking, expected: 913.02, date: "2026-06-30" }] }), assert: expectObject },
   audit_categorization: { mutation: "read", args: () => ({ status: "pending" }), assert: expectObject },
   backup_now: { mutation: "write", args: () => ({}), assert: (result) => expect(result.path).toContain("backups") },
   backup_status: { mutation: "read", setup: (ctx) => { callTool("backup_now", {}, ctx.ledger); }, args: () => ({}), assert: expectObject },
   balance_sheet: { mutation: "read", args: (ctx) => ({ date: "2026-06-30", quote_asset_id: ctx.assets.usd }), assert: expectObject },
-  budget_rollover_preview: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectObject },
-  budget_status: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ account: ctx.accounts.Groceries, year: 2026, month: 6 }), assert: expectObject },
-  budget_summary: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectObject },
+  budget_rollover_preview: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  budget_status: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ account: ctx.accounts.Groceries, year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  budget_summary: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   buy_security: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Brokerage, symbol: "AAPL", shares: 1.25, total_cost_cents: 12345, commission_cents: 55, date: "2026-06-10" }), assert: expectObject },
   cash_flow: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   cash_projection: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
@@ -223,12 +224,12 @@ const CASES = {
   discard_branch: { mutation: "write", setup: (ctx) => { callTool("create_branch", { name: "scenario" }, ctx.ledger); }, args: () => ({ name: "scenario" }), assert: expectObject },
   export_ledger: { mutation: "read", args: () => ({}), assert: (result) => expect(String(result.data)).toContain("accounts") },
   export_transactions: { mutation: "read", args: () => ({}), assert: (result) => expect(String(result.csv)).toContain("date,description") },
-  financial_overview: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectObject },
-  financial_picture: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectObject },
+  financial_overview: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  financial_picture: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   find_pending_duplicates: { mutation: "read", args: () => ({}), assert: (result) => expect(result.count).toBeGreaterThan(0) },
   flip_entries: { mutation: "write", args: (ctx) => ({ tx_ids: [ctx.tx.groceries] }), assert: expectObject },
   forecast: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, as_of: "2026-06-30" }), assert: expectObject },
-  forecast_month_end: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectObject },
+  forecast_month_end: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   fx_transfer: { mutation: "write", args: (ctx) => ({ from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Savings, from_amount: 10, to_amount: 9, from_asset_id: ctx.assets.usd, to_asset_id: ctx.assets.eur, fx_account_id: ctx.accounts["FX Clearing"], date: "2026-06-12", description: "FX move" }), assert: expectObject },
   get_account: { mutation: "read", args: (ctx) => ({ id: ctx.accounts.Checking }), assert: expectObject },
   get_account_by_name: { mutation: "read", args: () => ({ name: "Checking" }), assert: expectObject },
@@ -250,7 +251,7 @@ const CASES = {
   },
   import_transactions: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Checking, counterpart_id: ctx.accounts["Opening Balances"], transactions: [{ date: "2026-06-22", amount: 5, description: "Inline import" }], status: "pending" }), assert: expectObject },
   income_statement: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
-  init_defaults: { mutation: "write", args: () => ({ template: "personal" }), assert: expectObject },
+  init_defaults: { mutation: "write", args: () => ({ template: "personal", currency: "USD" }), assert: expectObject },
   inspect_transaction: { mutation: "read", args: (ctx) => ({ tx_id: ctx.tx.pay }), assert: expectObject },
   integrity_check: { mutation: "read", args: () => ({}), assert: (result) => expect(result.ok).toBe(true) },
   invert_import: { mutation: "write", setup: ensureImportBatch, args: (ctx) => ({ batch_id: ctx.batches.import }), assert: expectObject },
@@ -289,7 +290,7 @@ const CASES = {
   recategorize_by_pattern: { mutation: "dry-run", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
   recategorize_by_patterns: { mutation: "dry-run", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
   recategorize_transaction: { mutation: "write", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"] }), assert: expectObject },
-  recognize_gain_loss: { mutation: "write", args: (ctx) => ({ date: "2026-06-14", amount: 5, investment_account_id: ctx.accounts.Brokerage, description: "Mark gain" }), assert: expectObject },
+  recognize_gain_loss: { mutation: "write", args: (ctx) => ({ date: "2026-06-14", amount: 5, investment_account_id: ctx.accounts.Brokerage, description: "Mark gain", asset_id: ctx.assets.usd }), assert: expectObject },
   reconcile_diff: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, date_from: "2026-06-01", date_to: "2026-06-30" }), assert: expectObject },
   reconcile_statement: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, counterpart_id: ctx.accounts["Opening Balances"], transactions: [{ date: "2026-06-01", amount_cents: 100000, description: "June Pay" }] }), assert: expectObject },
   reconcile_statement_plan: { mutation: "read", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"] }), assert: expectObject },
@@ -307,12 +308,12 @@ const CASES = {
   set_budgets: { mutation: "write", args: (ctx) => ({ budgets: [{ account: ctx.accounts.Groceries, amount: 500 }], year: 2026, month: 6 }), assert: expectObject },
   set_goal: { mutation: "write", args: (ctx) => ({ account: ctx.accounts.Savings, target: 1000, name: "Reserve" }), assert: expectObject },
   spending: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
-  spending_rate: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectArray },
-  suggest_budgets: { mutation: "read", args: () => ({ months: 1, year: 2026, month: 6 }), assert: expectArray },
+  spending_rate: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
+  suggest_budgets: { mutation: "read", args: (ctx) => ({ months: 1, year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
   top_descriptions: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking }), assert: expectArray },
   transfer: { mutation: "write", args: (ctx) => ({ from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Savings, amount: 25, date: "2026-06-16", description: "Move cash" }), assert: expectObject },
-  trial_balance: { mutation: "read", args: () => ({}), assert: expectObject },
-  unbudgeted_spending: { mutation: "read", setup: ensureBudget, args: () => ({ year: 2026, month: 6 }), assert: expectArray },
+  trial_balance: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },
+  unbudgeted_spending: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
   update_account: { mutation: "write", args: (ctx) => ({ id: ctx.accounts["Delete Me"], name: "Delete Me Updated", code: "6999" }), assert: expectObject },
   update_asset: { mutation: "write", args: (ctx) => ({ asset_id: ctx.assets.unused, name: "Canadian Dollar Updated" }), assert: expectObject },
   void_by_filter: { mutation: "dry-run", args: () => ({ status: "pending", dry_run: true }), assert: expectObject }

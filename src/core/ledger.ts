@@ -757,8 +757,12 @@ export class Ledger {
     let sql = "SELECT * FROM journals WHERE 1 = 1";
     const params: SQLInputValue[] = [];
     if (options.status != null) {
-      sql += " AND status = ?";
-      params.push(txStatus(String(options.status)));
+      if (options.status === "active") sql += " AND status IN ('posted', 'pending')";
+      else if (options.status === "combined") sql += " AND status IN ('posted', 'pending', 'planned')";
+      else {
+        sql += " AND status = ?";
+        params.push(txStatus(String(options.status)));
+      }
     }
     if (options.dateFrom) {
       sql += " AND date >= ?";
@@ -860,6 +864,8 @@ export class Ledger {
 
   private statusClause(status: TxStatus | string | null | undefined): { sql: string; params: unknown[] } {
     if (status == null) return { sql: "AND t.status != 'void'", params: [] };
+    if (status === "active") return { sql: "AND t.status IN ('posted', 'pending')", params: [] };
+    if (status === "combined") return { sql: "AND t.status IN ('posted', 'pending', 'planned')", params: [] };
     return { sql: "AND t.status = ?", params: [txStatus(String(status))] };
   }
 
@@ -1013,9 +1019,10 @@ export class Ledger {
     return this.incomeExpenseRows(year, month, quoteAssetId).expense_by_account;
   }
 
-  balanceSheet(asOf: string | null, quoteAssetId: string) {
+  balanceSheet(asOf: string | null, quoteAssetId: string, status: TxStatus | string | null = "posted") {
     const date = asOf || "9999-12-31";
     const accounts = this.listAccounts();
+    const accountById = new Map(accounts.map((account) => [account.id, account]));
     const children = new Map<string | null, Account[]>();
     for (const account of accounts) {
       const key = account.parent_id ?? null;
@@ -1024,8 +1031,47 @@ export class Ledger {
     const quote = this.getAsset(quoteAssetId);
     const scale = quote?.scale ?? 2;
     const missing: Row[] = [];
+    const sameTypeDescendants = (account: Account): Account[] => {
+      const rows: Account[] = [];
+      const visit = (current: Account): void => {
+        if (current.account_type === account.account_type) rows.push(current);
+        for (const child of children.get(current.id) ?? []) visit(child);
+      };
+      visit(account);
+      return rows;
+    };
+    const typedQuotedBalance = (account: Account): { total: bigint; missing: Row[] } => {
+      let total = 0n;
+      const rowMissing: Row[] = [];
+      for (const typedAccount of sameTypeDescendants(account)) {
+        for (const asset of this.listAssets()) {
+          const raw = this.balance(typedAccount.id, asset.id, date, status);
+          if (raw === 0n) continue;
+          const [converted, error] = this.tryConvertQuantity(raw, asset.id, quoteAssetId, date);
+          if (converted == null) rowMissing.push({ account_id: typedAccount.id, asset_id: asset.id, quote_asset_id: quoteAssetId, quantity: raw, error });
+          else total += converted;
+        }
+      }
+      return { total, missing: rowMissing };
+    };
+    const sameTypeChildren = (account: Account): Account[] => {
+      const rows: Account[] = [];
+      const visit = (current: Account): void => {
+        for (const child of children.get(current.id) ?? []) {
+          if (child.account_type === account.account_type) rows.push(child);
+          else visit(child);
+        }
+      };
+      visit(account);
+      return rows;
+    };
+    const sectionRoots = (type: AccountType): Account[] => accounts.filter((account) => {
+      if (account.account_type !== type) return false;
+      const parent = account.parent_id ? accountById.get(account.parent_id) : null;
+      return parent?.account_type !== type;
+    }).sort((a, b) => a.name.localeCompare(b.name));
     const build = (account: Account): Row => {
-      const balance = this.quotedBalanceTree(account.id, quoteAssetId, date);
+      const balance = typedQuotedBalance(account);
       missing.push(...balance.missing);
       const amounts = annotateAmounts(account.account_type, balance.total);
       return {
@@ -1042,20 +1088,22 @@ export class Ledger {
         balance_cents: balance.total,
         balance_display: Number(fromAtomicUnits(balance.total, scale)),
         normal_balance_display: Number(fromAtomicUnits(amounts.normal_balance_cents, scale)),
-        children: (children.get(account.id) ?? []).map(build)
+        children: sameTypeChildren(account).map(build)
       };
     };
     const sections: Record<string, Row[]> = { asset: [], liability: [], equity: [] };
     let currentIncome = 0n;
     let currentExpense = 0n;
-    for (const account of children.get(null) ?? []) {
-      if (account.account_type in sections) sections[account.account_type].push(build(account));
-      else if (account.account_type === "income" || account.account_type === "expense") {
-        const balance = this.quotedBalanceTree(account.id, quoteAssetId, date);
-        missing.push(...balance.missing);
-        if (account.account_type === "income") currentIncome += normalAmount(account.account_type, balance.total);
-        else currentExpense += normalAmount(account.account_type, balance.total);
-      }
+    for (const type of ["asset", "liability", "equity"] as const) sections[type] = sectionRoots(type).map(build);
+    for (const account of sectionRoots("income")) {
+      const balance = typedQuotedBalance(account);
+      missing.push(...balance.missing);
+      currentIncome += normalAmount(account.account_type, balance.total);
+    }
+    for (const account of sectionRoots("expense")) {
+      const balance = typedQuotedBalance(account);
+      missing.push(...balance.missing);
+      currentExpense += normalAmount(account.account_type, balance.total);
     }
     const total = (rows: Row[]) => rows.reduce((sum, row) => sum + BigInt(row.balance as bigint), 0n);
     const normalTotal = (rows: Row[]) => rows.reduce((sum, row) => sum + BigInt(row.normal_balance_cents as bigint), 0n);
@@ -1084,8 +1132,8 @@ export class Ledger {
     };
   }
 
-  netWorthReport(asOf: string, quoteAssetId: string) {
-    const sheet = this.balanceSheet(asOf, quoteAssetId);
+  netWorthReport(asOf: string, quoteAssetId: string, status: TxStatus | string | null = "posted") {
+    const sheet = this.balanceSheet(asOf, quoteAssetId, status);
     const net = BigInt(sheet.total_assets as bigint) + BigInt(sheet.total_liabilities as bigint);
     return {
       as_of: asOf,
@@ -1102,33 +1150,67 @@ export class Ledger {
     };
   }
 
-  cashFlow(year: number, month: number, quoteAssetId: string) {
-    const summary = this.incomeExpenseRows(year, month, quoteAssetId);
+  cashFlow(year: number, month: number, quoteAssetId: string, status: TxStatus | string | null = "posted") {
     const [dateFrom, dateTo] = monthBounds(year, month);
     const accounts = new Map(this.listAccounts().map((a) => [a.id, a]));
-    let netChange = 0n;
-    for (const tx of this.listTransactions({ status: "posted", dateFrom, dateTo })) {
+    const scale = this.getAsset(quoteAssetId)?.scale ?? 2;
+    const totals = {
+      income: new Map<string, bigint>(),
+      expense: new Map<string, bigint>(),
+      liability: new Map<string, bigint>()
+    };
+    for (const tx of this.listTransactions({ status, dateFrom, dateTo })) {
       for (const entry of this.getEntries(tx.id)) {
         const account = accounts.get(entry.account_id);
-        if (account?.account_type === "asset") {
-          const [converted] = this.tryConvertQuantity(entry.quantity, entry.asset_id, quoteAssetId, tx.date);
-          if (converted != null) netChange += converted;
+        if (account?.account_type === "income" || account?.account_type === "expense" || account?.account_type === "liability") {
+          const bucket = totals[account.account_type];
+          bucket.set(account.id, (bucket.get(account.id) ?? 0n) + entry.quantity);
         }
       }
     }
+    const line = (accountId: string, amount: bigint): Row => {
+      const account = accounts.get(accountId);
+      return {
+        account_id: accountId,
+        account_name: account?.name ?? "",
+        account_type: account?.account_type ?? "",
+        amount,
+        amount_cents: amount,
+        quantity: amount,
+        asset_id: quoteAssetId,
+        scale,
+        amount_display: Number(fromAtomicUnits(amount, scale))
+      };
+    };
+    const byName = ([leftId]: [string, bigint], [rightId]: [string, bigint]) => {
+      const left = accounts.get(leftId)?.name ?? leftId;
+      const right = accounts.get(rightId)?.name ?? rightId;
+      return left.localeCompare(right);
+    };
+    const operating = [
+      ...[...totals.income.entries()].filter(([, amount]) => amount !== 0n).sort(byName).map(([accountId, amount]) => line(accountId, amount)),
+      ...[...totals.expense.entries()].filter(([, amount]) => amount !== 0n).sort(byName).map(([accountId, amount]) => line(accountId, amount))
+    ];
+    const equityEquivalent = new Set(["internal transfers", "opening balance", "opening balances", "retained earnings"]);
+    const financing = [...totals.liability.entries()]
+      .filter(([accountId, amount]) => amount !== 0n && !equityEquivalent.has((accounts.get(accountId)?.name ?? "").toLowerCase()))
+      .sort(byName)
+      .map(([accountId, amount]) => line(accountId, amount));
+    const operatingTotal = operating.reduce((sum, row) => sum + BigInt(row.amount as bigint), 0n);
+    const financingTotal = financing.reduce((sum, row) => sum + BigInt(row.amount as bigint), 0n);
     return {
       year,
       month,
-      operating: [...summary.income_by_account, ...summary.expense_by_account.map((row: Row) => ({ ...row, amount: -BigInt(row.amount as bigint), amount_cents: -BigInt(row.amount as bigint) }))],
+      operating,
       investing: [],
-      financing: [],
-      operating_total: BigInt(summary.income) - BigInt(summary.expense),
+      financing,
+      operating_total: operatingTotal,
       investing_total: 0n,
-      financing_total: 0n,
-      net_change: netChange,
+      financing_total: financingTotal,
+      net_change: -operatingTotal - financingTotal,
       quote_asset_id: quoteAssetId,
-      valuation_complete: summary.valuation_complete,
-      missing_conversions: summary.missing_conversions
+      valuation_complete: true,
+      missing_conversions: []
     };
   }
 
@@ -1188,12 +1270,16 @@ export class Ledger {
     return rows.slice(offset, options.limit == null ? undefined : offset + options.limit);
   }
 
-  trialBalance(assetId: string, status: TxStatus | string | null = null) {
+  trialBalance(assetId: string, status: TxStatus | string | null = "posted") {
+    const scale = this.getAsset(assetId)?.scale ?? 2;
     const rows = this.listAccounts().map((account) => {
       const balance = this.balance(account.id, assetId, null, status);
       const parts = debitCredit(balance);
       return {
         ...account,
+        amount: balance,
+        amount_cents: balance,
+        amount_display: Number(fromAtomicUnits(balance, scale)),
         balance,
         balance_cents: balance,
         normal_balance_cents: normalAmount(account.account_type, balance),
@@ -1210,15 +1296,17 @@ export class Ledger {
     };
   }
 
-  initDefaults(template: "personal" | "business" | "empty" = "personal") {
+  initDefaults(template: "personal" | "business" | "empty" = "personal", assetId?: string | null) {
     if (!["personal", "business", "empty"].includes(template)) throw new Error("template must be personal, business, or empty");
-    const usd = this.createAsset("USD", "currency", 2, "US Dollar");
+    if (!assetId) throw new Error("asset_id is required for initDefaults");
+    if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
     const created: string[] = [];
     const ensure = (name: string, type: AccountType, parent?: string) => {
       const existing = this.listAccounts().find((account) => account.name.toLowerCase() === name.toLowerCase());
-      if (existing) return existing.id;
-      const accountId = this.createAccount(name, type, parent);
-      created.push(accountId);
+      const accountId = existing?.id ?? this.createAccount(name, type, parent);
+      if (!existing) created.push(accountId);
+      const hasDefault = this.listAnnotations("account", accountId).some((tag) => tag.key === "default_asset");
+      if (!hasDefault) this.createAnnotation("account", accountId, "default_asset", assetId);
       return accountId;
     };
     if (template === "personal") {
@@ -1244,7 +1332,7 @@ export class Ledger {
       ensure("Payroll", "expense");
       ensure("Software", "expense");
     }
-    return { template, asset_id: usd, accounts_created: created.length, account_ids: created };
+    return { template, asset_id: assetId, accounts_created: created.length, account_ids: created };
   }
 
   getOrCreateAccount(name: string, type: AccountType): string {
@@ -1322,10 +1410,15 @@ export class Ledger {
 
   exportDocument() {
     const transactions = this.listTransactions({ status: null }).map((tx) => ({ ...tx, entries: this.getEntries(tx.id), tags: this.listAnnotations("tx", tx.id) }));
+    const accounts = this.listAccounts().map((account) => {
+      const defaultAssetId = this.listAnnotations("account", account.id).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
+      const defaultAsset = defaultAssetId ? this.getAsset(defaultAssetId) : null;
+      return { ...account, default_asset_id: defaultAssetId, default_asset_symbol: defaultAsset?.symbol ?? null };
+    });
     return {
       format: "clovis-ledger-v1",
       assets: this.listAssets(),
-      accounts: this.listAccounts(),
+      accounts,
       sources: this.listSources(null, null),
       transactions,
       account_tags: (this.db.prepare("SELECT id, entity_type, entity_id, key, value AS val, value FROM annotations WHERE entity_type = 'account'").all() as Row[]),
@@ -1356,6 +1449,7 @@ export class Ledger {
     };
     const assets = array("assets");
     const accounts = array("accounts");
+    const accountTags = array("account_tags");
     const sources = array("sources");
     const transactions = array("transactions");
     const prices = array("prices");
@@ -1370,6 +1464,7 @@ export class Ledger {
       valid: true,
       assets: assets.length,
       accounts: accounts.length,
+      account_tags: accountTags.length,
       sources: sources.length,
       transactions: transactions.length,
       prices: prices.length,
@@ -1382,6 +1477,7 @@ export class Ledger {
       inserted: {
         assets: 0,
         accounts: 0,
+        account_tags: 0,
         sources: 0,
         transactions: 0,
         prices: 0,
@@ -1460,6 +1556,7 @@ export class Ledger {
       errors.push(`${label} references unknown source ${value}`);
       return null;
     };
+    const tagValue = (tag: any): string => String(tag?.value ?? tag?.val ?? "");
 
     assets.forEach((asset, index) => {
       const assetId = requireId("assets", asset, index);
@@ -1498,6 +1595,51 @@ export class Ledger {
       }
       if (preserveIds && this.getAccount(accountId)) errors.push(`accounts[${index}].id already exists: ${accountId}`);
     });
+
+    const accountDefaultAssets = new Map<string, string>();
+    const noteAccountDefaultAsset = (accountRef: unknown, assetRef: unknown, label: string): void => {
+      const accountId = mappedAccount(accountRef, `${label}.account_id`);
+      const assetId = mappedAsset(assetRef, `${label}.default_asset`);
+      if (accountId && assetId) accountDefaultAssets.set(accountId, assetId);
+    };
+    accounts.forEach((account, index) => {
+      const assetRef = account.default_asset_id ?? account.asset_id;
+      if (assetRef != null && assetRef !== "") noteAccountDefaultAsset(account.id, assetRef, `accounts[${index}]`);
+    });
+    accountTags.forEach((tag, index) => {
+      const key = String(tag?.key ?? "");
+      const value = tagValue(tag);
+      if (!key) errors.push(`account_tags[${index}].key is required`);
+      mappedAccount(tag?.entity_id, `account_tags[${index}].entity_id`);
+      if (preserveIds && typeof tag?.id === "string" && tag.id.trim() !== "") trackId("annotations", tag.id, index);
+      if (key === "default_asset") noteAccountDefaultAsset(tag.entity_id, value, `account_tags[${index}]`);
+    });
+    const defaultAssetForAccount = (accountRef: unknown, label: string): string | null => {
+      const accountId = mappedAccount(accountRef, `${label}.account_id`);
+      if (!accountId) return null;
+      const tagged = accountDefaultAssets.get(accountId);
+      if (tagged) return tagged;
+      const existing = this.listAnnotations("account", accountId).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
+      return existing && this.getAsset(existing) ? existing : null;
+    };
+    const requiredAccountDefaultAsset = (accountRef: unknown, label: string): string | null => {
+      const assetId = defaultAssetForAccount(accountRef, label);
+      if (!assetId) errors.push(`${label}.asset_id is required because the referenced account has no default_asset`);
+      return assetId;
+    };
+    const scheduledDefaultAsset = (scheduled: any, label: string): string | null => {
+      const fromAsset = defaultAssetForAccount(scheduled.from_account_id, `${label}.from_account`);
+      const toAsset = defaultAssetForAccount(scheduled.to_account_id, `${label}.to_account`);
+      if (!fromAsset || !toAsset) {
+        errors.push(`${label}.asset_id is required unless both accounts have default_asset set`);
+        return null;
+      }
+      if (fromAsset !== toAsset) {
+        errors.push(`${label}.asset_id is required for accounts with different default_asset values`);
+        return null;
+      }
+      return fromAsset;
+    };
 
     sources.forEach((source, index) => {
       const sourceId = requireId("sources", source, index);
@@ -1563,14 +1705,12 @@ export class Ledger {
       if (!String(price.time ?? "").trim()) errors.push(`prices[${index}].time is required`);
     });
 
-    let defaultAssetId = assets.find((asset: any) => String(asset.symbol).toUpperCase() === "USD")?.id;
-    defaultAssetId = defaultAssetId ? assetMap.get(defaultAssetId) : (this.getAssetBySymbol("USD")?.id ?? null);
     budgets.forEach((budget, index) => {
       const budgetId = requireId("budgets", budget, index);
       if (budgetId) trackId("budgets", budgetId, index);
       mappedAccount(budget.account_id, `budgets[${index}].account_id`);
       if (budget.asset_id) mappedAsset(budget.asset_id, `budgets[${index}].asset_id`);
-      else if (!defaultAssetId) errors.push(`budgets[${index}].asset_id is required when USD is not present`);
+      else requiredAccountDefaultAsset(budget.account_id, `budgets[${index}]`);
       parseQuantity(budget.quantity ?? budget.amount_cents ?? 0, `budgets[${index}].quantity`);
       if (budget.month != null && (!Number.isInteger(Number(budget.month)) || Number(budget.month) < 1 || Number(budget.month) > 12)) errors.push(`budgets[${index}].month must be 1-12`);
     });
@@ -1580,7 +1720,7 @@ export class Ledger {
       if (goalId) trackId("goals", goalId, index);
       mappedAccount(goal.account_id, `goals[${index}].account_id`);
       if (goal.asset_id) mappedAsset(goal.asset_id, `goals[${index}].asset_id`);
-      else if (!defaultAssetId) errors.push(`goals[${index}].asset_id is required when USD is not present`);
+      else requiredAccountDefaultAsset(goal.account_id, `goals[${index}]`);
       parseQuantity(goal.quantity ?? goal.target_quantity ?? goal.target_cents ?? 0, `goals[${index}].quantity`);
       if (goal.target_date != null) {
         try {
@@ -1633,7 +1773,7 @@ export class Ledger {
       mappedAccount(scheduled.from_account_id, `scheduled_transactions[${index}].from_account_id`);
       mappedAccount(scheduled.to_account_id, `scheduled_transactions[${index}].to_account_id`);
       if (scheduled.asset_id) mappedAsset(scheduled.asset_id, `scheduled_transactions[${index}].asset_id`);
-      else if (!defaultAssetId) errors.push(`scheduled_transactions[${index}].asset_id is required when USD is not present`);
+      else scheduledDefaultAsset(scheduled, `scheduled_transactions[${index}]`);
       parseQuantity(scheduled.quantity ?? scheduled.amount_cents ?? 0, `scheduled_transactions[${index}].quantity`);
       try {
         dateOnly(String(scheduled.next_date));
@@ -1687,6 +1827,28 @@ export class Ledger {
       for (const account of accounts) {
         if (account.parent_id) this.db.prepare("UPDATE accounts SET parent_id = ? WHERE id = ?").run(accountMap.get(account.parent_id)!, accountMap.get(account.id)!);
       }
+      const insertedAccountDefaultTags = new Set<string>();
+      for (const tag of accountTags) {
+        const annotationId = preserveIds && typeof tag.id === "string" && tag.id.trim() !== "" ? tag.id : id("ann");
+        const entityId = mappedAccount(tag.entity_id, "account_tag.entity_id");
+        const key = String(tag.key ?? "");
+        const value = tagValue(tag);
+        this.db.prepare("INSERT INTO annotations(id, entity_type, entity_id, key, value) VALUES (?, 'account', ?, ?, ?)").run(
+          annotationId,
+          entityId,
+          key,
+          value
+        );
+        if (key === "default_asset") insertedAccountDefaultTags.add(entityId);
+        result.inserted.account_tags += 1;
+      }
+      for (const account of accounts) {
+        const entityId = accountMap.get(account.id)!;
+        const assetRef = account.default_asset_id ?? account.asset_id;
+        if (assetRef == null || assetRef === "" || insertedAccountDefaultTags.has(entityId)) continue;
+        this.createAnnotation("account", entityId, "default_asset", mappedAsset(assetRef, "account.default_asset"));
+        result.inserted.account_tags += 1;
+      }
       for (const source of sources) {
         this.db.prepare("INSERT INTO sources(id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)").run(
           sourceMap.get(source.id)!,
@@ -1737,12 +1899,12 @@ export class Ledger {
         );
         result.inserted.prices += 1;
       }
-      defaultAssetId = defaultAssetId ?? this.createAsset("USD", "currency", 2, "US Dollar");
       for (const budget of budgets) {
+        const budgetAssetId = budget.asset_id ? mappedAsset(budget.asset_id, "budget.asset_id") : requiredAccountDefaultAsset(budget.account_id, "budget");
         this.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? budget.id : id("target"),
           mappedAccount(budget.account_id, "budget.account_id"),
-          budget.asset_id ? mappedAsset(budget.asset_id, "budget.asset_id") : defaultAssetId!,
+          budgetAssetId,
           BigInt(budget.quantity ?? budget.amount_cents ?? 0),
           budget.period ?? "monthly",
           budget.year ?? null,
@@ -1752,10 +1914,11 @@ export class Ledger {
         result.inserted.budgets += 1;
       }
       for (const goal of goals) {
+        const goalAssetId = goal.asset_id ? mappedAsset(goal.asset_id, "goal.asset_id") : requiredAccountDefaultAsset(goal.account_id, "goal");
         this.db.prepare("INSERT INTO targets(id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, 'goal', ?, ?, ?, ?, ?, ?)").run(
           preserveIds && goal.id ? goal.id : id("target"),
           mappedAccount(goal.account_id, "goal.account_id"),
-          goal.asset_id ? mappedAsset(goal.asset_id, "goal.asset_id") : defaultAssetId!,
+          goalAssetId,
           BigInt(goal.quantity ?? goal.target_quantity ?? goal.target_cents ?? 0),
           goal.name,
           goal.target_date ?? null,
@@ -1800,6 +1963,7 @@ export class Ledger {
         result.inserted.lots += 1;
       }
       for (const scheduled of scheduledTransactions) {
+        const scheduledAssetId = scheduled.asset_id ? mappedAsset(scheduled.asset_id, "scheduled_transaction.asset_id") : scheduledDefaultAsset(scheduled, "scheduled_transaction");
         this.db.prepare("INSERT INTO recurrences(id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? scheduled.id : id("sched"),
           scheduled.next_date,
@@ -1809,7 +1973,7 @@ export class Ledger {
           scheduled.description ?? "",
           scheduled.frequency,
           scheduled.end_date ?? null,
-          scheduled.asset_id ? mappedAsset(scheduled.asset_id, "scheduled_transaction.asset_id") : defaultAssetId!,
+          scheduledAssetId,
           scheduled.status ?? "active"
         );
         result.inserted.scheduled_transactions += 1;

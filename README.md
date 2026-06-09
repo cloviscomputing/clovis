@@ -44,6 +44,17 @@ as integers using each asset's scale, uses SQLite foreign keys, supports period
 closes, and ships with a contract test row for every MCP tool. It is not a bank,
 custody system, tax filing product, or substitute for professional review.
 
+## Currency Model
+
+Clovis does not infer a default currency. Setup requires an explicit currency,
+and accounts created by `init_defaults` are tagged with a `default_asset`.
+Account APIs expose `default_asset_id` and `default_asset_symbol`.
+
+Transactions may omit `asset_id` only when both accounts have the same
+`default_asset`. Cross-currency movement should use `fx_transfer`. Reports that
+present converted totals require an explicit `quote_asset_id` or CLI `--quote`
+value, and report missing conversions when prices are unavailable.
+
 ## Install
 
 ```sh
@@ -60,11 +71,12 @@ By default, the CLI stores its ledger at `~/.cloviscomputing/clovis.db`. Use
 `--db` or `CLOVIS_DB` to choose another database path.
 
 ```sh
-clovis --db ./ledger.db init
+clovis --db ./ledger.db init --currency CAD
 clovis --db ./ledger.db --format json account list
 clovis --db ./ledger.db txn add --date 2026-06-01 --amount 100 \
   --desc "Owner contribution" --from "<equity-account-id>" --to "<checking-id>" \
   --status posted
+clovis --db ./ledger.db report balance-sheet --quote CAD
 ```
 
 ## MCP
@@ -98,7 +110,8 @@ an explicit public entrypoint:
 import { Ledger } from "clovis/core";
 
 const ledger = new Ledger("./ledger.db");
-ledger.initDefaults("personal");
+const cad = ledger.createAsset("CAD", "currency", 2, "Canadian Dollar");
+ledger.initDefaults("personal", cad);
 ledger.close();
 ```
 
@@ -134,6 +147,8 @@ prices
 `journals` stores transaction headers. `journal_lines` stores the balanced
 legs. Every journal must sum to zero for each `asset_id`; `quantity` is stored
 in atomic units using the related asset `scale`.
+Account default currencies are stored as account `default_asset` annotations and
+exported in ledger snapshots.
 
 ```text
 books

@@ -95,7 +95,7 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string"],
       ["counterpart_account_id", "string"],
       ["expected_balance", "number", { nullable: true, optional: true, defaultValue: null }],
-      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["currency", "string", { nullable: true, optional: true, defaultValue: null }],
       ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
       ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
@@ -170,7 +170,7 @@ export const TOOL_DEFINITIONS = {
       ["compact", "boolean", { optional: true, defaultValue: false }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
       ["hide_zero", "boolean", { optional: true, defaultValue: false }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string"],
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
       ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
@@ -190,7 +190,7 @@ export const TOOL_DEFINITIONS = {
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["rollup", "boolean", { optional: true, defaultValue: false }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -199,7 +199,7 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -211,7 +211,8 @@ export const TOOL_DEFINITIONS = {
       ["total_cost_cents", "integer"],
       ["date", "string"],
       ["commission_cents", "integer", { optional: true, defaultValue: 0 }],
-      ["status", "string", { optional: true, defaultValue: "posted" }]
+      ["status", "string", { optional: true, defaultValue: "posted" }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -222,7 +223,7 @@ export const TOOL_DEFINITIONS = {
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
       ["compact", "boolean", { optional: true, defaultValue: false }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -236,7 +237,7 @@ export const TOOL_DEFINITIONS = {
       ["earmarks", "object[]", { nullable: true, optional: true, defaultValue: null }],
       ["include_pending", "boolean", { optional: true, defaultValue: true }],
       ["include_planned", "boolean", { optional: true, defaultValue: true }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -303,7 +304,8 @@ export const TOOL_DEFINITIONS = {
       ["type", "string"],
       ["code", "string", { optional: true, defaultValue: "" }],
       ["parent_id", "string", { optional: true, defaultValue: "" }],
-      ["color_hex", "string", { optional: true, defaultValue: "#888888" }]
+      ["color_hex", "string", { optional: true, defaultValue: "#888888" }],
+      ["default_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -345,7 +347,8 @@ export const TOOL_DEFINITIONS = {
       ["to_account_id", "string"],
       ["description", "string", { optional: true, defaultValue: "" }],
       ["frequency", "string", { optional: true, defaultValue: "monthly" }],
-      ["end_date", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["end_date", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -487,7 +490,7 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["status", "string", { optional: true, defaultValue: "active" }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -495,7 +498,7 @@ export const TOOL_DEFINITIONS = {
     parameters: [
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string"],
       ["status", "string", { optional: true, defaultValue: "combined" }],
       ["include_pending", "boolean", { optional: true, defaultValue: true }]
     ],
@@ -519,7 +522,8 @@ export const TOOL_DEFINITIONS = {
   "forecast": {
     parameters: [
       ["account_id", "string"],
-      ["as_of", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["as_of", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -528,7 +532,7 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -604,7 +608,7 @@ export const TOOL_DEFINITIONS = {
       ["file_path", "string"],
       ["account_id", "string"],
       ["counterpart_account_id", "string"],
-      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["currency", "string", { nullable: true, optional: true, defaultValue: null }],
       ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
       ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
@@ -656,14 +660,15 @@ export const TOOL_DEFINITIONS = {
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
       ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["quote_asset_id", "string"],
       ["status", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
   "init_defaults": {
     parameters: [
-      ["template", "string", { optional: true, defaultValue: "personal" }]
+      ["template", "string", { optional: true, defaultValue: "personal" }],
+      ["currency", "string"]
     ],
     returns: { type: "object" }
   },
@@ -861,7 +866,7 @@ export const TOOL_DEFINITIONS = {
       ["date", "string", { nullable: true, optional: true, defaultValue: null }],
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -904,7 +909,7 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string"],
       ["counterpart_account_id", "string"],
       ["rows", "integer", { optional: true, defaultValue: 3 }],
-      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["currency", "string", { nullable: true, optional: true, defaultValue: null }],
       ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
       ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
@@ -929,7 +934,7 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string"],
       ["counterpart_account_id", "string"],
       ["expected_balance", "number", { nullable: true, optional: true, defaultValue: null }],
-      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["currency", "string", { nullable: true, optional: true, defaultValue: null }],
       ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
       ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
@@ -955,7 +960,7 @@ export const TOOL_DEFINITIONS = {
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
       ["include_goals", "boolean", { optional: true, defaultValue: false }],
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -968,7 +973,7 @@ export const TOOL_DEFINITIONS = {
       ["expected_paychecks", "object[]", { nullable: true, optional: true, defaultValue: null }],
       ["include_pending", "boolean", { optional: true, defaultValue: true }],
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -1048,7 +1053,7 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string"],
       ["counterpart_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["expected_balance", "number", { nullable: true, optional: true, defaultValue: null }],
-      ["currency", "string", { optional: true, defaultValue: "USD" }],
+      ["currency", "string", { nullable: true, optional: true, defaultValue: null }],
       ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_col", "string", { nullable: true, optional: true, defaultValue: null }],
       ["amount_col", "string", { nullable: true, optional: true, defaultValue: null }],
@@ -1170,7 +1175,8 @@ export const TOOL_DEFINITIONS = {
       ["period", "string", { optional: true, defaultValue: "monthly" }],
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
-      ["rollover", "boolean", { optional: true, defaultValue: false }]
+      ["rollover", "boolean", { optional: true, defaultValue: false }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -1188,7 +1194,8 @@ export const TOOL_DEFINITIONS = {
       ["target", "number"],
       ["name", "string"],
       ["target_date", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["priority", "integer", { optional: true, defaultValue: 1 }]
+      ["priority", "integer", { optional: true, defaultValue: 1 }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -1201,7 +1208,7 @@ export const TOOL_DEFINITIONS = {
       ["status", "string", { nullable: true, optional: true, defaultValue: null }],
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
       ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -1211,7 +1218,7 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object[]" }
   },
@@ -1220,7 +1227,8 @@ export const TOOL_DEFINITIONS = {
       ["months", "integer", { optional: true, defaultValue: 3 }],
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
-      ["skip_budgeted", "boolean", { optional: true, defaultValue: true }]
+      ["skip_budgeted", "boolean", { optional: true, defaultValue: true }],
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object[]" }
   },
@@ -1247,7 +1255,8 @@ export const TOOL_DEFINITIONS = {
   "trial_balance": {
     parameters: [
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["status", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -1256,7 +1265,7 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
-      ["quote_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object[]" }
   },
@@ -1267,7 +1276,8 @@ export const TOOL_DEFINITIONS = {
       ["type", "string", { nullable: true, optional: true, defaultValue: null }],
       ["code", "string", { nullable: true, optional: true, defaultValue: null }],
       ["parent_id", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["color_hex", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["color_hex", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["default_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },

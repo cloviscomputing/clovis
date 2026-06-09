@@ -127,7 +127,8 @@ program.command("balance").argument("<account_id>").action((accountId) => withLe
 
 program.command("init")
   .option("--template <template>", "", "personal")
-  .action((opts) => withLedger(program, (ledger) => callTool("init_defaults", { template: opts.template }, ledger)));
+  .requiredOption("--currency <symbol>")
+  .action((opts) => withLedger(program, (ledger) => callTool("init_defaults", { template: opts.template, currency: opts.currency }, ledger)));
 
 program.command("export")
   .option("--account <id>")
@@ -140,17 +141,17 @@ program.command("import")
   .requiredOption("--file <path>")
   .requiredOption("--account <id>")
   .requiredOption("--counterpart <id>")
-  .option("--currency <symbol>", "", "USD")
+  .option("--currency <symbol>")
   .option("--status <status>", "", "posted")
   .action((opts) => withLedger(program, (ledger) => callTool("import_file", { file_path: opts.file, account_id: opts.account, counterpart_account_id: opts.counterpart, currency: opts.currency, status: opts.status }, ledger)));
 
 const report = program.command("report").description("Reports");
-report.command("income-statement").requiredOption("--year <year>").option("--month <month>").option("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("income_statement", { year: Number(opts.year), month: opts.month ? Number(opts.month) : undefined, quote_asset_id: opts.quote }, ledger)));
-report.command("balance-sheet").option("--date <date>").option("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("balance_sheet", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
-report.command("net-worth").option("--date <date>").option("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("net_worth", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
-report.command("spending").requiredOption("--year <year>").requiredOption("--month <month>").option("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("spending", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
-report.command("cash-flow").requiredOption("--year <year>").requiredOption("--month <month>").option("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("cash_flow", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
+report.command("income-statement").requiredOption("--year <year>").option("--month <month>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("income_statement", { year: Number(opts.year), month: opts.month ? Number(opts.month) : undefined, quote_asset_id: opts.quote }, ledger)));
+report.command("balance-sheet").option("--date <date>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("balance_sheet", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
+report.command("net-worth").option("--date <date>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("net_worth", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
+report.command("spending").requiredOption("--year <year>").requiredOption("--month <month>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("spending", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
+report.command("cash-flow").requiredOption("--year <year>").requiredOption("--month <month>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("cash_flow", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
 report.command("register").requiredOption("--account <id>").option("--asset <id>").option("--from <date>").option("--to <date>").option("--status <status>").action((opts) => withLedger(program, (ledger) => callTool("account_register", { account_id: opts.account, asset_id: opts.asset, date_from: opts.from, date_to: opts.to, status: opts.status }, ledger)));
-report.command("trial-balance").option("--status <status>").action((opts) => withLedger(program, (ledger) => callTool("trial_balance", { status: opts.status }, ledger)));
+report.command("trial-balance").requiredOption("--asset <id>").option("--status <status>").action((opts) => withLedger(program, (ledger) => callTool("trial_balance", { asset_id: opts.asset, status: opts.status }, ledger)));
 
 program.parseAsync();

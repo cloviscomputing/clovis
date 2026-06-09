@@ -42,7 +42,7 @@ describe("release smoke", () => {
     await withMcpClient(process.execPath, ["dist/mcp/main.js"], process.cwd(), join(dir, "ledger.db"), dir, async (client) => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
-      const result = await client.callTool({ name: "init_defaults", arguments: { template: "personal" } });
+      const result = await client.callTool({ name: "init_defaults", arguments: { template: "personal", currency: "USD" } });
       const text = (result.content[0] as { text: string }).text;
       expect(JSON.parse(text).accounts_created).toBeGreaterThan(0);
     });
@@ -69,7 +69,8 @@ describe("release smoke", () => {
       "catch (error) { deepImportBlocked = error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED'; }",
       "if (!deepImportBlocked) throw new Error('deep import was not blocked');",
       "const ledger = new Ledger('./api.db');",
-      "ledger.initDefaults('personal');",
+      "const assetId = ledger.createAsset('USD', 'currency', 2, 'US Dollar');",
+      "ledger.initDefaults('personal', assetId);",
       "ledger.close();",
       "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
     ].join("\n"), "utf8");
@@ -77,7 +78,7 @@ describe("release smoke", () => {
     expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: 1, server: true, deepImportBlocked: true });
 
     const binDir = join(dir, "node_modules", ".bin");
-    const cli = JSON.parse(execFileSync(join(binDir, "clovis"), ["--db", join(dir, "cli.db"), "--format", "json", "init"], { cwd: dir, encoding: "utf8" }));
+    const cli = JSON.parse(execFileSync(join(binDir, "clovis"), ["--db", join(dir, "cli.db"), "--format", "json", "init", "--currency", "USD"], { cwd: dir, encoding: "utf8" }));
     expect(cli.ok).toBe(true);
     expect(cli.data.accounts_created).toBeGreaterThan(0);
 
