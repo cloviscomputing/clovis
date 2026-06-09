@@ -74,7 +74,7 @@ describe("release smoke", () => {
       "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
     ].join("\n"), "utf8");
     const api = JSON.parse(execFileSync(process.execPath, [apiCheck], { cwd: dir, encoding: "utf8" }));
-    expect(api).toEqual({ tools: 133, signatures: 133, schemaVersion: 1, server: true, deepImportBlocked: true });
+    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: 1, server: true, deepImportBlocked: true });
 
     const binDir = join(dir, "node_modules", ".bin");
     const cli = JSON.parse(execFileSync(join(binDir, "clovis"), ["--db", join(dir, "cli.db"), "--format", "json", "init"], { cwd: dir, encoding: "utf8" }));
@@ -83,7 +83,7 @@ describe("release smoke", () => {
 
     await withMcpClient(join(binDir, "clovis-mcp"), [], dir, join(project, "mcp.db"), project, async (client) => {
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(133);
+      expect(tools.tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
     });
   }, 120_000);
 });

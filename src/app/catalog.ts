@@ -966,7 +966,7 @@ const handlers: Record<ToolName, Handler> = {
     return { count: rows.length, transactions: rows, total_cents: rows.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n) };
   },
   record_pending_expenses: (ledger, args) => {
-    const source = ledger.getOrCreateAccount("Pending Expenses", "liability");
+    const source = args.dry_run === false ? ledger.getOrCreateAccount("Pending Expenses", "liability") : "Pending Expenses";
     return handlers.import_transactions(ledger, {
       account_id: source,
       counterpart_id: args.account_id,

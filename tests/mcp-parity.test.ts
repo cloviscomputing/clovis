@@ -158,10 +158,20 @@ function ensureSchedule(ctx: TestContext): void {
 
 function expectObject(result: any): void {
   expect(result).toEqual(expect.any(Object));
+  expect(Object.keys(result)).not.toHaveLength(0);
 }
 
 function expectArray(result: any): void {
   expect(Array.isArray(result)).toBe(true);
+}
+
+function ledgerFingerprint(ledger: Ledger): string {
+  const tables = (ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
+  const rows = Object.fromEntries(tables.map((table) => [
+    table,
+    ledger.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()
+  ]));
+  return JSON.stringify(rows, (_key, value) => typeof value === "bigint" ? value.toString() : value);
 }
 
 const CASES = {
@@ -302,7 +312,6 @@ const CASES = {
 
 describe("MCP parity matrix", () => {
   it("has one explicit contract case for every MCP tool", () => {
-    expect(TOOL_NAMES).toHaveLength(133);
     expect(Object.keys(TOOL_SIGNATURES).sort()).toEqual([...TOOL_NAMES].sort());
     expect(Object.keys(CASES).sort()).toEqual([...TOOL_NAMES].sort());
   });
@@ -311,9 +320,14 @@ describe("MCP parity matrix", () => {
     const ctx = createContext();
     const row = CASES[name];
     row.setup?.(ctx);
+    const before = ledgerFingerprint(ctx.ledger);
     const result = callTool(name, row.args(ctx), ctx.ledger);
+    const after = ledgerFingerprint(ctx.ledger);
     expect(result).not.toBeUndefined();
     row.assert?.(result, ctx);
+    if (row.mutation === "read" || row.mutation === "dry-run") {
+      expect(after).toBe(before);
+    }
     expect(ctx.ledger.integrityCheck().ok).toBe(true);
   });
 });
