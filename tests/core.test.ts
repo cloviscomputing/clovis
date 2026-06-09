@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "../src/core/index.js";
 import { callTool, TOOL_NAMES } from "../src/app/index.js";
 import { toolHandlers } from "../src/app/catalog.js";
-import { mcpDbPathFromEnv } from "../src/app/context.js";
+import { defaultDbPath, mcpDbPathFromEnv } from "../src/app/context.js";
 import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/mcp/signatures.js";
 import { inputShapeFromDefinition } from "../src/mcp/tools.js";
 
@@ -495,6 +495,10 @@ describe("app and package surface", () => {
     } finally {
       if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
     }
+  });
+
+  it("uses the Clovis Computing default CLI database path", () => {
+    expect(defaultDbPath()).toBe(join(homedir(), ".cloviscomputing", "clovis.db"));
   });
 
   it("rejects unsupported branch filters explicitly", () => {

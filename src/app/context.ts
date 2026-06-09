@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Ledger } from "../core/ledger.js";
 
 export function defaultDbPath(): string {
-  return join(homedir(), ".clovis", "clovis.db");
+  return join(homedir(), ".cloviscomputing", "clovis.db");
 }
 
 export function dbPathFromEnv(): string {
@@ -23,4 +23,3 @@ export function openLedger(dbPath?: string | null): Ledger {
 export function openMcpLedger(): Ledger {
   return new Ledger(mcpDbPathFromEnv());
 }
-
