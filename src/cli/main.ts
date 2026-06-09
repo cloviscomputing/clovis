@@ -4,6 +4,7 @@ import { openLedger } from "../app/context.js";
 import { callTool } from "../app/catalog.js";
 import { stringifyPublic, publicize } from "../app/json.js";
 import type { Ledger } from "../core/ledger.js";
+import { VERSION } from "../version.js";
 
 type GlobalOptions = { format?: "json" | "table"; db?: string };
 
@@ -51,7 +52,7 @@ function addCommon(program: Command): Command {
 const program = addCommon(new Command())
   .name("clovis")
   .description("Local-first bookkeeping CLI")
-  .version("0.1.0");
+  .version(VERSION);
 
 const account = program.command("account").description("Manage accounts");
 account.command("add")

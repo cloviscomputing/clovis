@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -50,6 +50,7 @@ describe("release smoke", () => {
 
   it("installs the packed tarball and runs public exports plus both bins", async () => {
     const dir = tempDir("clovis-pack-smoke-");
+    const packageVersion = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")).version as string;
     const packOut = execFileSync("npm", ["pack", "--pack-destination", dir, "--json"], { cwd: process.cwd(), encoding: "utf8", timeout: 60_000 });
     const packed = JSON.parse(packOut)[0] as { filename: string };
     const tarball = join(dir, packed.filename);
@@ -59,7 +60,7 @@ describe("release smoke", () => {
 
     const apiCheck = join(dir, "api-check.mjs");
     writeFileSync(apiCheck, [
-      "import { Ledger as TopLevelLedger, SCHEMA_VERSION } from 'clovis';",
+      "import { Ledger as TopLevelLedger, SCHEMA_VERSION, VERSION } from 'clovis';",
       "import { Ledger } from 'clovis/core';",
       "import { TOOL_NAMES } from 'clovis/app';",
       "import { createClovisMcpServer, TOOL_SIGNATURES } from 'clovis/mcp';",
@@ -72,12 +73,13 @@ describe("release smoke", () => {
       "const assetId = ledger.createAsset('USD', 'currency', 2, 'US Dollar');",
       "ledger.initDefaults('personal', assetId);",
       "ledger.close();",
-      "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
+      "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, version: VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
     ].join("\n"), "utf8");
     const api = JSON.parse(execFileSync(process.execPath, [apiCheck], { cwd: dir, encoding: "utf8" }));
-    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: 1, server: true, deepImportBlocked: true });
+    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: 1, version: packageVersion, server: true, deepImportBlocked: true });
 
     const binDir = join(dir, "node_modules", ".bin");
+    expect(execFileSync(join(binDir, "clovis"), ["--version"], { cwd: dir, encoding: "utf8" }).trim()).toBe(packageVersion);
     const cli = JSON.parse(execFileSync(join(binDir, "clovis"), ["--db", join(dir, "cli.db"), "--format", "json", "init", "--currency", "USD"], { cwd: dir, encoding: "utf8" }));
     expect(cli.ok).toBe(true);
     expect(cli.data.accounts_created).toBeGreaterThan(0);

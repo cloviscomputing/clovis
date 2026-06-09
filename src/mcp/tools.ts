@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodTypeAny } from "zod";
 import { callTool } from "../app/catalog.js";
+import { VERSION } from "../version.js";
 import { TOOL_DEFINITIONS, type ToolDefinition, type ToolParameterDefinition } from "./signatures.js";
 
 type Shape = Record<string, ZodTypeAny>;
@@ -67,7 +68,7 @@ export function inputShapeFromDefinition(definition: ToolDefinition): Shape {
 }
 
 export function createClovisMcpServer(): McpServer {
-  const server = new McpServer({ name: "clovis", version: "0.1.0" });
+  const server = new McpServer({ name: "clovis", version: VERSION });
   for (const [name, definition] of Object.entries(TOOL_DEFINITIONS)) {
     (server as any).tool(
       name,

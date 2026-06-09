@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.2
+
+Public repository readiness release.
+
+- Source CLI, package, and MCP server versions from package metadata.
+- Re-enable npm provenance publishing for the public GitHub repository.
+- Document npm installation, CLI usage, MCP setup, and package entrypoints.
+- Add CI security audit and import-size hardening.
+
+## 0.1.1
+
+Release automation and package hardening.
+
+- Publish the package through npm Trusted Publishing.
+- Add explicit account/report currency handling with account default assets.
+- Set the default CLI ledger path to `~/.cloviscomputing/clovis.db`.
+- Tighten packed-package checks and public package metadata.
+
 ## 0.1.0
 
 First public release.
