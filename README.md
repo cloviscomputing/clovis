@@ -95,7 +95,7 @@ The CLI covers common setup, account, transaction, import/export, and report
 flows. The broader tool surface is available through `clovis/app` and
 `clovis-mcp`.
 
-By default, the CLI stores its ledger at `~/.cloviscomputing/clovis.db`. Use
+By default, the CLI stores its ledger at `~/.clovis/clovis.db`. Use
 `--db` or `CLOVIS_DB` to choose another database path.
 
 ```sh

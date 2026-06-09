@@ -5,7 +5,7 @@ import { Ledger } from "../core/ledger.js";
 // CLI defaults to the user ledger; MCP must be explicit through CLOVIS_DB so an
 // agent host cannot accidentally open a developer's personal database.
 export function defaultDbPath(): string {
-  return join(homedir(), ".cloviscomputing", "clovis.db");
+  return join(homedir(), ".clovis", "clovis.db");
 }
 
 export function dbPathFromEnv(): string {

@@ -627,8 +627,8 @@ describe("app and package surface", () => {
     }
   });
 
-  it("uses the Clovis Computing default CLI database path", () => {
-    expect(defaultDbPath()).toBe(join(homedir(), ".cloviscomputing", "clovis.db"));
+  it("uses the default CLI database path", () => {
+    expect(defaultDbPath()).toBe(join(homedir(), ".clovis", "clovis.db"));
   });
 
   it("rejects unsupported branch filters explicitly", () => {
