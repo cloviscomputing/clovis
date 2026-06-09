@@ -16,7 +16,13 @@ function checkSuffix(path: string, suffixes?: Set<string>): void {
 }
 
 function maxFileBytes(): number {
-  return Number(process.env.CLOVIS_MCP_MAX_FILE_BYTES || 10 * 1024 * 1024);
+  const value = Number(process.env.CLOVIS_MCP_MAX_FILE_BYTES || 10 * 1024 * 1024);
+  if (!Number.isFinite(value) || value <= 0) throw new Error("CLOVIS_MCP_MAX_FILE_BYTES must be a positive number");
+  return value;
+}
+
+export function assertMcpDataSize(text: string): void {
+  if (Buffer.byteLength(text, "utf8") > maxFileBytes()) throw new Error("Input data is too large");
 }
 
 function requestedPath(root: string, path: string): string {

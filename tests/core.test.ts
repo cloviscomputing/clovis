@@ -663,6 +663,39 @@ describe("app and package surface", () => {
     }
   });
 
+  it("rejects malformed and oversized statement imports", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-bad-import-"));
+      dirs.push(dir);
+      const previousDb = process.env.CLOVIS_DB;
+      const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+      process.env.CLOVIS_DB = join(dir, "ledger.db");
+      process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+      try {
+        const usd = ledger.createAsset("USD", "currency", 2);
+        const checking = ledger.createAccount("Checking", "asset");
+        const equity = ledger.createAccount("Equity", "equity");
+        for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+
+        writeFileSync(join(dir, "bad-quotes.csv"), "date,amount,description\n2026-06-01,1.00,\"unterminated\n", "utf8");
+        expect(() => callTool("preview_import", { file_path: "bad-quotes.csv", account_id: checking, counterpart_account_id: equity }, ledger)).toThrow(/Invalid CSV quote/);
+
+        writeFileSync(join(dir, "bad-amount.csv"), "date,amount,description\n2026-06-01,not-money,Bad\n", "utf8");
+        expect(() => callTool("preview_import", { file_path: "bad-amount.csv", account_id: checking, counterpart_account_id: equity }, ledger)).toThrow(/Invalid amount/);
+
+        const rows = Array.from({ length: 10001 }, (_, index) => `2026-06-01,${index + 1},Row`).join("\n");
+        writeFileSync(join(dir, "too-many.csv"), `date,amount,description\n${rows}\n`, "utf8");
+        expect(() => callTool("preview_import", { file_path: "too-many.csv", account_id: checking, counterpart_account_id: equity }, ledger)).toThrow(/too many rows/);
+      } finally {
+        if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
+        if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("stores import batch provenance on journal source_id", () => {
     const ledger = tempLedger();
     try {
@@ -895,6 +928,21 @@ describe("app and package surface", () => {
       }
     } finally {
       source.close();
+    }
+  });
+
+  it("applies MCP file size limits to inline ledger imports", () => {
+    const ledger = tempLedger();
+    try {
+      const previousMax = process.env.CLOVIS_MCP_MAX_FILE_BYTES;
+      process.env.CLOVIS_MCP_MAX_FILE_BYTES = "32";
+      try {
+        expect(() => callTool("import_ledger", { data: JSON.stringify({ format: "clovis-ledger-v1", assets: [] }) }, ledger)).toThrow(/too large/);
+      } finally {
+        if (previousMax == null) delete process.env.CLOVIS_MCP_MAX_FILE_BYTES; else process.env.CLOVIS_MCP_MAX_FILE_BYTES = previousMax;
+      }
+    } finally {
+      ledger.close();
     }
   });
 

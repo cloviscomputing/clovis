@@ -57,6 +57,7 @@
     "build": "tsc",
     "test": "npm run build && vitest run --no-file-parallelism",
     "typecheck": "tsc --noEmit",
+    "security:audit": "npm audit --audit-level=low",
     "prepack": "npm run build",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm run release:check",

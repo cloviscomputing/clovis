@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -16,4 +19,5 @@ jobs:
           node-version: "26.3.0"
           cache: npm
       - run: npm ci
+      - run: npm run security:audit
       - run: npm run release:check

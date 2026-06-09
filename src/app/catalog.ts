@@ -7,12 +7,15 @@ import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
 import { normalAmount } from "../core/accounting.js";
 import { openMcpLedger } from "./context.js";
 import { publicize, stringifyPublic } from "./json.js";
-import { redactPath, resolveMcpReadPath, resolveMcpWritePath } from "./filesystem.js";
+import { assertMcpDataSize, redactPath, resolveMcpReadPath, resolveMcpWritePath } from "./filesystem.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 type Args = Record<string, any>;
 type Handler = (ledger: Ledger, args: Args) => unknown;
 type Row = Record<string, any>;
+
+const MAX_IMPORT_ROWS = 10000;
+const MAX_CSV_COLUMNS = 200;
 
 export const TOOL_NAMES = [
   "account_register", "add_match_rule", "add_match_rules", "age_of_money", "apply_match_rules", "apply_pattern",
@@ -280,7 +283,7 @@ function incomeStatementRows(ledger: Ledger, year: number, month: number | null,
 function parseCsv(text: string): Row[] {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim() !== "");
   if (lines.length === 0) return [];
-  const split = (line: string) => {
+  const split = (line: string, lineNumber: number) => {
     const cells: string[] = [];
     let cell = "";
     let quoted = false;
@@ -295,11 +298,16 @@ function parseCsv(text: string): Row[] {
         cell = "";
       } else cell += ch;
     }
+    if (quoted) throw new Error(`Invalid CSV quote on line ${lineNumber}`);
     cells.push(cell);
+    if (cells.length > MAX_CSV_COLUMNS) throw new Error(`CSV has too many columns; maximum is ${MAX_CSV_COLUMNS}`);
     return cells;
   };
-  const headers = split(lines[0]).map((h) => h.trim());
-  return lines.slice(1).map((line, index) => Object.fromEntries(split(line).map((value, i) => [headers[i] || `col_${i}`, value.trim()])).valueOf() as Row & { index: number }).map((row, index) => ({ ...row, index }));
+  const headers = split(lines[0], 1).map((h) => h.trim());
+  if (headers.length > MAX_CSV_COLUMNS) throw new Error(`CSV has too many columns; maximum is ${MAX_CSV_COLUMNS}`);
+  const rows = lines.slice(1);
+  if (rows.length > MAX_IMPORT_ROWS) throw new Error(`CSV has too many rows; maximum is ${MAX_IMPORT_ROWS}`);
+  return rows.map((line, index) => Object.fromEntries(split(line, index + 2).map((value, i) => [headers[i] || `col_${i}`, value.trim()])).valueOf() as Row & { index: number }).map((row, index) => ({ ...row, index }));
 }
 
 function parseStatementRows(filePath: string, args: Args = {}): Row[] {
@@ -317,6 +325,7 @@ function parseStatementRows(filePath: string, args: Args = {}): Row[] {
     if (inflowCol && row[inflowCol] !== "") amount = Number(row[inflowCol]);
     if (outflowCol && row[outflowCol] !== "") amount = -Math.abs(Number(row[outflowCol]));
     if (args.amount_convention === "unsigned_charges") amount = -Math.abs(amount);
+    if (!Number.isFinite(amount)) throw new Error(`Invalid amount on row ${index}`);
     return {
       index,
       date: validateDate(String(row[dateCol])),
@@ -1025,6 +1034,7 @@ const handlers: Record<ToolName, Handler> = {
   import_ledger: (ledger, args) => {
     if (Boolean(args.file_path) === Boolean(args.data)) throw new Error("Exactly one of file_path or data is required");
     const text = args.file_path ? readFileSync(resolveMcpReadPath(args.file_path, new Set([".json"])), "utf8") : String(args.data);
+    assertMcpDataSize(text);
     return ledger.importDocument(JSON.parse(text), args.preserve_ids !== false, Boolean(args.dry_run));
   },
 
