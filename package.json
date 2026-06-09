@@ -1,0 +1,42 @@
+{
+  "name": "clovis",
+  "version": "0.1.0",
+  "description": "Local-first bookkeeping CLI, MCP server, and TypeScript ledger engine",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "engines": {
+    "node": ">=26.3.0"
+  },
+  "bin": {
+    "clovis": "./dist/cli/main.js",
+    "clovis-mcp": "./dist/mcp/main.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./core": "./dist/core/index.js",
+    "./app": "./dist/app/index.js",
+    "./mcp": "./dist/mcp/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && vitest run --no-file-parallelism",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run",
+    "release:check": "node scripts/release-check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "commander": "^15.0.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
