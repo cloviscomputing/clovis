@@ -70,6 +70,9 @@ exports, and backups under another local directory.
 
 ## Package API
 
+`npm install clovis` installs one package. Import the surface you need through
+an explicit public entrypoint:
+
 ```ts
 import { Ledger } from "clovis/core";
 
@@ -77,6 +80,23 @@ const ledger = new Ledger("./ledger.db");
 ledger.initDefaults("personal");
 ledger.close();
 ```
+
+```ts
+import { callTool, TOOL_NAMES } from "clovis/app";
+import { createClovisMcpServer, TOOL_SIGNATURES } from "clovis/mcp";
+```
+
+The top-level `clovis` entrypoint is intentionally small:
+
+```ts
+import { Ledger, SCHEMA_VERSION } from "clovis";
+```
+
+Use `clovis/core` for ledger engine APIs, schema constants, money helpers, and
+accounting primitives. Use `clovis/app` for the shared tool dispatcher and tool
+name contract. Use `clovis/mcp` for MCP server creation and MCP tool metadata.
+Files under `dist/` and `src/` are package internals and are not public import
+paths.
 
 ## Data Model
 

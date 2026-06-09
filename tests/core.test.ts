@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "../src/core/index.js";
-import { callTool, TOOL_NAMES, toolHandlers } from "../src/app/index.js";
+import { callTool, TOOL_NAMES } from "../src/app/index.js";
+import { toolHandlers } from "../src/app/catalog.js";
 import { mcpDbPathFromEnv } from "../src/app/context.js";
 import { TOOL_SIGNATURES } from "../src/mcp/signatures.js";
 

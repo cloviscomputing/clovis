@@ -59,16 +59,22 @@ describe("release smoke", () => {
 
     const apiCheck = join(dir, "api-check.mjs");
     writeFileSync(apiCheck, [
+      "import { Ledger as TopLevelLedger, SCHEMA_VERSION } from 'clovis';",
       "import { Ledger } from 'clovis/core';",
       "import { TOOL_NAMES } from 'clovis/app';",
-      "import { createClovisMcpServer } from 'clovis/mcp';",
+      "import { createClovisMcpServer, TOOL_SIGNATURES } from 'clovis/mcp';",
+      "if (TopLevelLedger !== Ledger) throw new Error('top-level Ledger export drifted');",
+      "let deepImportBlocked = false;",
+      "try { await import('clovis/dist/core/ledger.js'); }",
+      "catch (error) { deepImportBlocked = error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED'; }",
+      "if (!deepImportBlocked) throw new Error('deep import was not blocked');",
       "const ledger = new Ledger('./api.db');",
       "ledger.initDefaults('personal');",
       "ledger.close();",
-      "console.log(JSON.stringify({ tools: TOOL_NAMES.length, server: Boolean(createClovisMcpServer()) }));"
+      "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
     ].join("\n"), "utf8");
     const api = JSON.parse(execFileSync(process.execPath, [apiCheck], { cwd: dir, encoding: "utf8" }));
-    expect(api).toEqual({ tools: 133, server: true });
+    expect(api).toEqual({ tools: 133, signatures: 133, schemaVersion: 1, server: true, deepImportBlocked: true });
 
     const binDir = join(dir, "node_modules", ".bin");
     const cli = JSON.parse(execFileSync(join(binDir, "clovis"), ["--db", join(dir, "cli.db"), "--format", "json", "init"], { cwd: dir, encoding: "utf8" }));

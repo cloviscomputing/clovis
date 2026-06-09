@@ -12,10 +12,22 @@
     "clovis-mcp": "./dist/mcp/main.js"
   },
   "exports": {
-    ".": "./dist/index.js",
-    "./core": "./dist/core/index.js",
-    "./app": "./dist/app/index.js",
-    "./mcp": "./dist/mcp/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./app": {
+      "types": "./dist/app/index.d.ts",
+      "import": "./dist/app/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    }
   },
   "files": [
     "dist",
@@ -26,7 +38,9 @@
     "build": "tsc",
     "test": "npm run build && vitest run --no-file-parallelism",
     "typecheck": "tsc --noEmit",
+    "prepack": "npm run build",
     "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run release:check",
     "release:check": "node scripts/release-check.mjs"
   },
   "dependencies": {
