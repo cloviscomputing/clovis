@@ -1,8 +1,46 @@
 # Clovis
 
-Clovis is a local-first bookkeeping CLI, MCP server, and TypeScript ledger
-engine for Node.js. It stores ledger data in SQLite through Node's built-in
-`node:sqlite` module and runs without a cloud account.
+Clovis is the official TypeScript implementation of the Clovis local
+bookkeeping engine for Node.js. It provides a CLI, a package API, an MCP
+server, and a SQLite-backed ledger that runs without a cloud account.
+
+This package is the local ledger implementation. It is not a hosted service and
+not just a protocol document. The durable public surfaces are:
+
+- the SQLite schema created by the ledger engine
+- the package exports under `clovis`, `clovis/core`, `clovis/app`, and
+  `clovis/mcp`
+- the `clovis` CLI
+- the `clovis-mcp` server and its MCP tool signatures
+
+Future Clovis apps are expected to read and write the same local database
+format through this package or through the schema it owns.
+
+## Status
+
+The database format is versioned. The current schema is `SCHEMA_VERSION = 1`.
+Fresh databases are created directly with this schema. Ledger JSON snapshots can
+be exported and imported with `export_ledger` and `import_ledger`.
+
+The schema is intended to be a product contract, not a throwaway cache. Patch
+and minor releases should continue to read schema v1 databases. If a future
+release needs a schema change, it should ship a documented upgrade path before
+Clovis applications depend on it.
+
+## Financial Records
+
+Clovis is designed for local bookkeeping records, but you should treat any
+financial database with care:
+
+- keep backups of your ledger file
+- review imported or pending transactions before posting them
+- reconcile against source statements
+- run `npm run release:check` before release builds
+
+The engine enforces balanced double-entry journals per asset, stores quantities
+as integers using each asset's scale, uses SQLite foreign keys, supports period
+closes, and ships with a contract test row for every MCP tool. It is not a bank,
+custody system, tax filing product, or substitute for professional review.
 
 ## Install
 
@@ -39,10 +77,6 @@ const ledger = new Ledger("./ledger.db");
 ledger.initDefaults("personal");
 ledger.close();
 ```
-
-Fresh databases are created directly with the TypeScript schema. Ledger JSON
-snapshots can be exported and imported with `export_ledger` and
-`import_ledger`.
 
 ## Data Model
 

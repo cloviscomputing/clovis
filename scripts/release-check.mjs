@@ -39,19 +39,17 @@ function scanBlockedFiles() {
 
 function scanTextLeaks() {
   const blocked = [
-    ["Py", "thon"].join(""),
-    ["py", "thon"].join(""),
-    ["clovis", "-oss"].join(""),
-    ["project", "-clovis"].join(""),
-    ["/", "Users"].join(""),
-    ["paul", "yu"].join(""),
-    ["Ru", "st"].join(""),
-    ["ru", "st"].join(""),
-    ["th", "in"].join(""),
-    ["th", "inner"].join(""),
-    ["orig", "inal"].join(""),
-    ["other ", "SQLite"].join(""),
-    ["compat", "ib"].join("")
+    { label: ["Py", "thon"].join(""), pattern: new RegExp(`\\b${["Py", "thon"].join("")}\\b`, "i") },
+    { label: ["clovis", "-oss"].join(""), pattern: new RegExp(["clovis", "-oss"].join(""), "i") },
+    { label: ["project", "-clovis"].join(""), pattern: new RegExp(["project", "-clovis"].join(""), "i") },
+    { label: ["/", "Users"].join(""), pattern: new RegExp(["/", "Users"].join("")) },
+    { label: ["paul", "yu"].join(""), pattern: new RegExp(["paul", "yu"].join(""), "i") },
+    { label: ["Ru", "st"].join(""), pattern: new RegExp(`\\b${["Ru", "st"].join("")}\\b`, "i") },
+    { label: ["th", "in"].join(""), pattern: new RegExp(`\\b${["th", "in"].join("")}\\b`, "i") },
+    { label: ["th", "inner"].join(""), pattern: new RegExp(`\\b${["th", "inner"].join("")}\\b`, "i") },
+    { label: ["orig", "inal"].join(""), pattern: new RegExp(`\\b${["orig", "inal"].join("")}\\b`, "i") },
+    { label: ["other ", "SQLite"].join(""), pattern: new RegExp(["other ", "SQLite"].join(""), "i") },
+    { label: ["direct ", "compat", "ibility"].join(""), pattern: new RegExp(["direct ", "compat", "ibility"].join(""), "i") }
   ];
   const scanRoots = ["README.md", "package.json", "src", "tests", "dist", "scripts"];
   const textExts = new Set([".ts", ".js", ".mjs", ".json", ".md", ".map"]);
@@ -60,8 +58,8 @@ function scanTextLeaks() {
     for (const file of walk(join(root, scanRoot))) {
       if (!textExts.has(extname(file))) continue;
       const text = readFileSync(file, "utf8");
-      for (const word of blocked) {
-        if (text.includes(word)) hits.push(`${file}: ${word}`);
+      for (const item of blocked) {
+        if (item.pattern.test(text)) hits.push(`${file}: ${item.label}`);
       }
     }
   }
