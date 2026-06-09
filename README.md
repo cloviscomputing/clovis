@@ -277,6 +277,11 @@ proprietary product without AGPL obligations.
 npm run release:check
 ```
 
-The release check runs typecheck, build, the full test suite, package dry-run,
-packed-package artifact checks, and packed-package local path leak checks. The
-test suite includes a contract row for every MCP tool exposed by the package.
+The release check runs dependency audit, typecheck, build, the full test suite,
+package dry-run, packed-package artifact checks, and packed-package local path
+leak checks. The test suite includes a contract row for every MCP tool exposed
+by the package.
+
+Official npm releases are published by GitHub Actions through npm Trusted
+Publishing. See [RELEASING.md](RELEASING.md) for the full release runbook,
+dist-tag policy, post-publish verification commands, and failure recovery steps.

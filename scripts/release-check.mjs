@@ -27,6 +27,7 @@ function escapeRegExp(value) {
 
 function allowedPackedFile(file) {
   return file === "README.md" ||
+    file === "RELEASING.md" ||
     file === "LICENSE" ||
     file === "package.json" ||
     (file.startsWith("dist/") && (file.endsWith(".js") || file.endsWith(".d.ts") || file.endsWith(".js.map")));
@@ -61,6 +62,7 @@ function scanPackedPackage() {
   if (leaks.length) fail(`Blocked local path leakage in packed package:\n${leaks.join("\n")}`);
 }
 
+run("npm", ["run", "security:audit"]);
 run("npm", ["run", "typecheck"]);
 run("npm", ["test"]);
 scanPackedPackage();

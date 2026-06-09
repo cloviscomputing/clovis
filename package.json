@@ -51,6 +51,7 @@
   "files": [
     "dist",
     "README.md",
+    "RELEASING.md",
     "LICENSE"
   ],
   "scripts": {
@@ -61,7 +62,9 @@
     "prepack": "npm run build",
     "pack:check": "npm pack --dry-run",
     "prepublishOnly": "npm run release:check",
-    "release:check": "node scripts/release-check.mjs"
+    "release:check": "node scripts/release-check.mjs",
+    "release:status": "node scripts/release-status.mjs",
+    "release:verify": "node scripts/release-verify.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
