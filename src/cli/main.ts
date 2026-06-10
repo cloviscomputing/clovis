@@ -1,14 +1,31 @@
 #!/usr/bin/env node
 // Thin human-facing wrapper over the shared app catalog. The CLI should not
 // own bookkeeping behavior; it only maps flags to tool calls and formats output.
+import { readFileSync } from "node:fs";
 import { Command } from "commander";
-import { openLedger } from "../app/context.js";
-import { callTool } from "../app/catalog.js";
+import { defaultDbPath, openLedger } from "../app/context.js";
+import { assertToolCapabilities, callTool, TOOL_NAMES, type ToolCapability } from "../app/catalog.js";
 import { stringifyPublic, publicize } from "../app/json.js";
+import { TOOL_SIGNATURES } from "../app/signatures.js";
 import type { Ledger } from "../core/ledger.js";
 import { VERSION } from "../version.js";
 
 type GlobalOptions = { format?: "json" | "table"; db?: string };
+type ToolOptions = { json?: string; stdin?: boolean; allowFilesystem?: boolean; allowDestructive?: boolean; allowAll?: boolean };
+
+const STATUS_HELP = "Transaction status: posted, pending, planned, or void";
+
+function helpBlock(title: string, lines: string[]): string {
+  return `\n${title}:\n${lines.map((line) => `  ${line}`).join("\n")}`;
+}
+
+function examples(lines: string[]): string {
+  return helpBlock("Examples", lines);
+}
+
+function notes(lines: string[]): string {
+  return helpBlock("Notes", lines);
+}
 
 function withLedger(program: Command, fn: (ledger: Ledger, format: "json" | "table") => unknown): void {
   const opts = program.optsWithGlobals<GlobalOptions>();
@@ -45,6 +62,17 @@ function output(value: unknown, format: "json" | "table"): void {
   console.log(String(json));
 }
 
+function withOutput(program: Command, fn: (format: "json" | "table") => unknown): void {
+  const opts = program.optsWithGlobals<GlobalOptions>();
+  const format = opts.format ?? (process.stdout.isTTY ? "table" : "json");
+  try {
+    output(fn(format), format);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+}
+
 function addCommon(program: Command): Command {
   return program
     .option("--format <format>", "Output format: json or table")
@@ -54,107 +82,285 @@ function addCommon(program: Command): Command {
 const program = addCommon(new Command())
   .name("clovis")
   .description("Local-first bookkeeping CLI")
-  .version(VERSION);
+  .version(VERSION)
+  .showHelpAfterError()
+  .addHelpText("after", [
+    examples([
+      "clovis init --currency CAD",
+      "clovis account balances --type asset",
+      "clovis txn add --date 2026-06-01 --amount 100 --from <equity-id> --to <checking-id> --status posted",
+      "clovis report balance-sheet --quote CAD",
+      "clovis tool account_balances --json '{\"account_type\":\"asset\"}'"
+    ]),
+    notes([
+      `Default ledger: ${defaultDbPath()}`,
+      "Use --db or CLOVIS_DB to select another ledger.",
+      "Use --format json for stable machine-readable output.",
+      "Clovis does not infer report currency; report commands require --quote."
+    ])
+  ].join("\n"));
 
-const account = program.command("account").description("Manage accounts");
+function parseToolArgs(opts: ToolOptions): Record<string, unknown> {
+  if (opts.json && opts.stdin) throw new Error("Use either --json or --stdin, not both");
+  const text = opts.stdin ? readFileSync(0, "utf8") : opts.json ?? "{}";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Tool args must be a JSON object");
+  return parsed as Record<string, unknown>;
+}
+
+function grantedToolCapabilities(opts: ToolOptions): Set<ToolCapability | "all"> {
+  const granted = new Set<ToolCapability | "all">();
+  if (opts.allowAll) granted.add("all");
+  if (opts.allowFilesystem) granted.add("filesystem");
+  if (opts.allowDestructive) granted.add("destructive");
+  return granted;
+}
+
+program.command("tools")
+  .description("List every public app tool")
+  .addHelpText("after", examples([
+    "clovis --format json tools",
+    "clovis tools | grep account_balances"
+  ]))
+  .action(() => withOutput(program, () => TOOL_NAMES.map((name) => ({ name, signature: TOOL_SIGNATURES[name] }))));
+
+program.command("tool")
+  .description("Run any public app tool by name")
+  .argument("<name>")
+  .option("--json <json>", "Tool args as a JSON object")
+  .option("--stdin", "Read tool args as a JSON object from stdin")
+  .option("--allow-filesystem", "Allow file import, export, and backup tools")
+  .option("--allow-destructive", "Allow delete, rollback, hard state transition, and non-dry-run bulk mutation tools")
+  .option("--allow-all", "Allow filesystem and destructive tools")
+  .addHelpText("after", [
+    examples([
+      "clovis tool account_balances --json '{\"account_type\":\"asset\"}'",
+      "clovis tool import_transactions --stdin < args.json",
+      "clovis tool backup_now --allow-filesystem",
+      "clovis tool delete_account --json '{\"id\":\"<account-id>\"}' --allow-destructive"
+    ]),
+    notes([
+      "Run `clovis tools` to list tool names and signatures.",
+      "Tool args must be a JSON object.",
+      "Filesystem and destructive tools require explicit allow flags."
+    ])
+  ].join("\n"))
+  .action((name: string, opts: ToolOptions) => withLedger(program, (ledger) => {
+    const args = parseToolArgs(opts);
+    assertToolCapabilities(name, args, grantedToolCapabilities(opts), "CLI");
+    return callTool(name, args, ledger);
+  }));
+
+const account = program.command("account")
+  .description("Manage accounts")
+  .addHelpText("after", examples([
+    "clovis account list",
+    "clovis account balances --type asset",
+    "clovis account add --name \"Cash\" --type asset"
+  ]));
 account.command("add")
-  .requiredOption("--name <name>")
-  .requiredOption("--type <type>")
-  .option("--code <code>", "", "")
+  .description("Create an account")
+  .requiredOption("--name <name>", "Account name")
+  .requiredOption("--type <type>", "Account type: asset, liability, equity, income, or expense")
+  .option("--code <code>", "Optional account code", "")
   .option("--parent <id>", "Parent account id")
   .option("--color <hex>", "Account color", "#888888")
+  .addHelpText("after", examples([
+    "clovis account add --name \"RBC Chequing\" --type asset --code 1204",
+    "clovis account add --name \"Dining Out\" --type expense --color '#7c3aed'"
+  ]))
   .action((opts) => withLedger(program, (ledger) => callTool("create_account", { name: opts.name, type: opts.type, code: opts.code, parent_id: opts.parent, color_hex: opts.color }, ledger)));
+account.command("balances")
+  .description("List posted, pending, and current balances by account and asset")
+  .option("--type <type>", "Account type")
+  .option("--asset <id>", "Asset id or symbol")
+  .option("--as-of <date>", "Balance date, YYYY-MM-DD")
+  .option("--rollup", "Roll balances up through same-type account children")
+  .option("--show-zero", "Include zero-balance rows")
+  .addHelpText("after", [
+    examples([
+      "clovis account balances --type asset",
+      "clovis account balances --type liability --asset CAD",
+      "clovis --format json account balances --type asset --show-zero"
+    ]),
+    notes([
+      "Balances are reported in their native asset; Clovis does not silently convert currencies.",
+      "Current balance is posted plus pending."
+    ])
+  ].join("\n"))
+  .action((opts) => withLedger(program, (ledger) => callTool("account_balances", { account_type: opts.type, asset_id: opts.asset, as_of: opts.asOf, rollup: Boolean(opts.rollup), hide_zero: !opts.showZero }, ledger)));
 account.command("list")
-  .option("--type <type>")
-  .option("--parent <id>")
-  .option("--tree")
+  .description("List accounts")
+  .option("--type <type>", "Account type")
+  .option("--parent <id>", "Parent account id")
+  .option("--tree", "Include account tree context")
+  .addHelpText("after", examples([
+    "clovis account list",
+    "clovis --format json account list --type expense"
+  ]))
   .action((opts) => withLedger(program, (ledger) => callTool("list_accounts", { type: opts.type, parent_id: opts.parent, tree: Boolean(opts.tree) }, ledger)));
-account.command("get").argument("<id>").action((idValue) => withLedger(program, (ledger) => callTool("get_account", { id: idValue }, ledger)));
+account.command("get").description("Show one account").argument("<id>").action((idValue) => withLedger(program, (ledger) => callTool("get_account", { id: idValue }, ledger)));
 account.command("update")
+  .description("Update an account")
   .argument("<id>")
-  .option("--name <name>")
-  .option("--type <type>")
-  .option("--code <code>")
-  .option("--parent <id>")
-  .option("--color <hex>")
+  .option("--name <name>", "Account name")
+  .option("--type <type>", "Account type: asset, liability, equity, income, or expense")
+  .option("--code <code>", "Optional account code")
+  .option("--parent <id>", "Parent account id")
+  .option("--color <hex>", "Account color")
   .action((idValue, opts) => withLedger(program, (ledger) => callTool("update_account", { id: idValue, name: opts.name, type: opts.type, code: opts.code, parent_id: opts.parent, color_hex: opts.color }, ledger)));
-account.command("delete").argument("<id>").action((idValue) => withLedger(program, (ledger) => callTool("delete_account", { id: idValue }, ledger)));
+account.command("delete").description("Delete an unused account").argument("<id>").action((idValue) => withLedger(program, (ledger) => callTool("delete_account", { id: idValue }, ledger)));
 
-const txn = program.command("txn").description("Manage transactions");
+const txn = program.command("txn")
+  .description("Manage transactions")
+  .addHelpText("after", examples([
+    "clovis txn add --date 2026-06-01 --amount 100 --from <income-id> --to <checking-id> --status pending",
+    "clovis txn transfer --date 2026-06-02 --amount 50 --from <checking-id> --to <savings-id>",
+    "clovis txn list --status pending"
+  ]));
 txn.command("add")
-  .requiredOption("--date <date>")
-  .requiredOption("--amount <amount>")
-  .requiredOption("--from <id>")
-  .requiredOption("--to <id>")
-  .option("--desc <description>", "", "")
-  .option("--status <status>", "", "pending")
-  .option("--asset <id>")
+  .description("Record a two-sided transaction")
+  .requiredOption("--date <date>", "Transaction date, YYYY-MM-DD")
+  .requiredOption("--amount <amount>", "Positive decimal amount in the transaction asset")
+  .requiredOption("--from <id>", "Source account id")
+  .requiredOption("--to <id>", "Destination account id")
+  .option("--desc <description>", "Transaction description", "")
+  .option("--status <status>", STATUS_HELP, "pending")
+  .option("--asset <id>", "Asset id or symbol; required when account default assets differ")
+  .addHelpText("after", [
+    examples([
+      "clovis txn add --date 2026-06-01 --amount 100 --from <salary-id> --to <checking-id> --desc \"Pay\" --status posted",
+      "clovis txn add --date 2026-06-03 --amount 12.50 --from <checking-id> --to <dining-id>"
+    ]),
+    notes(["Default status is pending."])
+  ].join("\n"))
   .action((opts) => withLedger(program, (ledger) => callTool("create_transaction", { date: opts.date, amount: opts.amount, from_account_id: opts.from, to_account_id: opts.to, description: opts.desc, status: opts.status, asset_id: opts.asset }, ledger)));
 txn.command("transfer")
-  .requiredOption("--from <id>")
-  .requiredOption("--to <id>")
-  .requiredOption("--amount <amount>")
-  .requiredOption("--date <date>")
-  .option("--desc <description>", "", "Transfer")
-  .option("--asset <id>")
+  .description("Record a same-asset transfer between balance-sheet accounts")
+  .requiredOption("--from <id>", "Source account id")
+  .requiredOption("--to <id>", "Destination account id")
+  .requiredOption("--amount <amount>", "Positive decimal amount")
+  .requiredOption("--date <date>", "Transaction date, YYYY-MM-DD")
+  .option("--desc <description>", "Transfer description", "Transfer")
+  .option("--asset <id>", "Asset id or symbol")
+  .addHelpText("after", examples([
+    "clovis txn transfer --date 2026-06-02 --amount 250 --from <checking-id> --to <savings-id>",
+    "clovis txn transfer --date 2026-06-02 --amount 79 --asset USD --from <usd-checking-id> --to <usd-savings-id>"
+  ]))
   .action((opts) => withLedger(program, (ledger) => callTool("transfer", { from_account_id: opts.from, to_account_id: opts.to, amount: opts.amount, date: opts.date, description: opts.desc, asset_id: opts.asset }, ledger)));
 txn.command("journal")
-  .requiredOption("--date <date>")
+  .description("Post a manual journal entry")
+  .requiredOption("--date <date>", "Journal date, YYYY-MM-DD")
   .requiredOption("--leg <leg...>", "account_id:amount")
-  .option("--desc <description>", "", "")
-  .option("--status <status>", "", "pending")
-  .option("--asset <id>")
+  .option("--desc <description>", "Journal description", "")
+  .option("--status <status>", STATUS_HELP, "pending")
+  .option("--asset <id>", "Default asset id or symbol for legs without asset ids")
+  .addHelpText("after", [
+    examples(["clovis txn journal --date 2026-06-30 --leg <debit-account>:10 --leg <credit-account>:-10 --asset CAD"]),
+    notes(["Leg amounts must balance per asset."])
+  ].join("\n"))
   .action((opts) => withLedger(program, (ledger) => callTool("post_journal_entry", { date: opts.date, description: opts.desc, status: opts.status, asset_id: opts.asset, legs: opts.leg.map((leg: string) => { const [accountId, amount] = leg.split(":"); return { account_id: accountId, amount }; }) }, ledger)));
 txn.command("opening-balance")
-  .requiredOption("--account <id>")
-  .requiredOption("--amount <amount>")
-  .requiredOption("--date <date>")
-  .option("--status <status>", "", "pending")
-  .option("--asset <id>")
-  .option("--counterpart <id>")
+  .description("Record an opening balance")
+  .requiredOption("--account <id>", "Account id receiving the opening balance")
+  .requiredOption("--amount <amount>", "Decimal opening amount")
+  .requiredOption("--date <date>", "Opening date, YYYY-MM-DD")
+  .option("--status <status>", STATUS_HELP, "pending")
+  .option("--asset <id>", "Asset id or symbol")
+  .option("--counterpart <id>", "Counterpart equity account id")
+  .addHelpText("after", examples([
+    "clovis txn opening-balance --account <checking-id> --amount 125 --date 2026-05-31 --status posted"
+  ]))
   .action((opts) => withLedger(program, (ledger) => callTool("record_opening_balance", { account_id: opts.account, amount: opts.amount, date: opts.date, status: opts.status, asset_id: opts.asset, counterpart_account_id: opts.counterpart }, ledger)));
 txn.command("list")
-  .option("--account <id>")
-  .option("--year <year>")
-  .option("--month <month>")
-  .option("--status <status>")
-  .option("--desc <desc>")
-  .option("--limit <n>", "", "50")
+  .description("List transactions")
+  .option("--account <id>", "Filter by account id")
+  .option("--year <year>", "Filter by UTC year")
+  .option("--month <month>", "Filter by month, 1-12")
+  .option("--status <status>", STATUS_HELP)
+  .option("--desc <desc>", "Case-insensitive description search")
+  .option("--limit <n>", "Maximum rows", "50")
+  .addHelpText("after", examples([
+    "clovis txn list --status pending",
+    "clovis --format json txn list --account <checking-id> --limit 100"
+  ]))
   .action((opts) => withLedger(program, (ledger) => callTool("list_transactions", { account_id: opts.account, year: opts.year ? Number(opts.year) : undefined, month: opts.month ? Number(opts.month) : undefined, status: opts.status, desc: opts.desc, limit: Number(opts.limit), compact: false }, ledger)));
-txn.command("get").argument("<id>").action((idValue) => withLedger(program, (ledger) => callTool("get_transaction", { id: idValue }, ledger)));
-txn.command("delete").argument("<id>").option("--hard").action((idValue, opts) => withLedger(program, (ledger) => callTool("delete_transaction", { id: idValue, hard_delete: Boolean(opts.hard) }, ledger)));
-txn.command("entries").argument("<tx_id>").action((txId) => withLedger(program, (ledger) => callTool("list_entries", { tx_id: txId }, ledger)));
-txn.command("recategorize").argument("<tx_id>").requiredOption("--from <id>").requiredOption("--to <id>").action((txId, opts) => withLedger(program, (ledger) => callTool("recategorize_transaction", { tx_id: txId, old_account_id: opts.from, new_account_id: opts.to }, ledger)));
+txn.command("get").description("Show one transaction").argument("<id>").action((idValue) => withLedger(program, (ledger) => callTool("get_transaction", { id: idValue }, ledger)));
+txn.command("delete").description("Void a transaction, or hard-delete with --hard").argument("<id>").option("--hard", "Physically delete instead of voiding").action((idValue, opts) => withLedger(program, (ledger) => callTool("delete_transaction", { id: idValue, hard_delete: Boolean(opts.hard) }, ledger)));
+txn.command("entries").description("List journal entries for a transaction").argument("<tx_id>").action((txId) => withLedger(program, (ledger) => callTool("list_entries", { tx_id: txId }, ledger)));
+txn.command("recategorize").description("Move a transaction entry from one account to another").argument("<tx_id>").requiredOption("--from <id>", "Current account id").requiredOption("--to <id>", "New account id").action((txId, opts) => withLedger(program, (ledger) => callTool("recategorize_transaction", { tx_id: txId, old_account_id: opts.from, new_account_id: opts.to }, ledger)));
 
-program.command("balance").argument("<account_id>").action((accountId) => withLedger(program, (ledger) => callTool("get_balance", { account_id: accountId }, ledger)));
+program.command("balance")
+  .description("Show posted balances for an account")
+  .argument("<account_id>")
+  .addHelpText("after", [
+    examples(["clovis balance <checking-id>"]),
+    notes(["Use `clovis account balances` for posted, pending, and current balances across accounts."])
+  ].join("\n"))
+  .action((accountId) => withLedger(program, (ledger) => callTool("get_balance", { account_id: accountId }, ledger)));
 
 program.command("init")
-  .option("--template <template>", "", "personal")
-  .requiredOption("--currency <symbol>")
+  .description("Initialize a ledger with default accounts")
+  .option("--template <template>", "Default account template", "personal")
+  .requiredOption("--currency <symbol>", "Explicit setup currency symbol, e.g. CAD or USD")
+  .addHelpText("after", [
+    examples(["clovis init --currency CAD"]),
+    notes(["Clovis does not infer a default currency."])
+  ].join("\n"))
   .action((opts) => withLedger(program, (ledger) => callTool("init_defaults", { template: opts.template, currency: opts.currency }, ledger)));
 
 program.command("export")
-  .option("--account <id>")
-  .option("--from <date>")
-  .option("--to <date>")
-  .option("--output <path>")
+  .description("Export transactions as CSV")
+  .option("--account <id>", "Filter by account id")
+  .option("--from <date>", "Start date, YYYY-MM-DD")
+  .option("--to <date>", "End date, YYYY-MM-DD")
+  .option("--output <path>", "Write CSV file")
+  .addHelpText("after", examples([
+    "clovis export --from 2026-06-01 --to 2026-06-30 --output june.csv",
+    "clovis --format json export --account <checking-id>"
+  ]))
   .action((opts) => withLedger(program, (ledger) => callTool("export_transactions", { account_id: opts.account, date_from: opts.from, date_to: opts.to, output_path: opts.output }, ledger)));
 
 program.command("import")
-  .requiredOption("--file <path>")
-  .requiredOption("--account <id>")
-  .requiredOption("--counterpart <id>")
-  .option("--currency <symbol>")
-  .option("--status <status>", "", "posted")
+  .description("Import a CSV statement into an account")
+  .requiredOption("--file <path>", "CSV file path")
+  .requiredOption("--account <id>", "Destination account id")
+  .requiredOption("--counterpart <id>", "Counterpart/category account id for imported rows")
+  .option("--currency <symbol>", "Explicit asset symbol if the file differs from the account default")
+  .option("--status <status>", STATUS_HELP, "pending")
+  .addHelpText("after", [
+    examples([
+      "clovis import --file statement.csv --account <checking-id> --counterpart <uncategorized-id>",
+      "clovis import --file visa.csv --account <card-id> --counterpart <uncategorized-id> --status pending"
+    ]),
+    notes([
+      "Default status is pending so imported rows can be reviewed before posting.",
+      "File paths are limited to the ledger directory unless CLOVIS_ALLOWED_ROOT is set."
+    ])
+  ].join("\n"))
   .action((opts) => withLedger(program, (ledger) => callTool("import_file", { file_path: opts.file, account_id: opts.account, counterpart_account_id: opts.counterpart, currency: opts.currency, status: opts.status }, ledger)));
 
-const report = program.command("report").description("Reports");
-report.command("income-statement").requiredOption("--year <year>").option("--month <month>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("income_statement", { year: Number(opts.year), month: opts.month ? Number(opts.month) : undefined, quote_asset_id: opts.quote }, ledger)));
-report.command("balance-sheet").option("--date <date>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("balance_sheet", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
-report.command("net-worth").option("--date <date>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("net_worth", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
-report.command("spending").requiredOption("--year <year>").requiredOption("--month <month>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("spending", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
-report.command("cash-flow").requiredOption("--year <year>").requiredOption("--month <month>").requiredOption("--quote <asset>").action((opts) => withLedger(program, (ledger) => callTool("cash_flow", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
-report.command("register").requiredOption("--account <id>").option("--asset <id>").option("--from <date>").option("--to <date>").option("--status <status>").action((opts) => withLedger(program, (ledger) => callTool("account_register", { account_id: opts.account, asset_id: opts.asset, date_from: opts.from, date_to: opts.to, status: opts.status }, ledger)));
-report.command("trial-balance").requiredOption("--asset <id>").option("--status <status>").action((opts) => withLedger(program, (ledger) => callTool("trial_balance", { asset_id: opts.asset, status: opts.status }, ledger)));
+const report = program.command("report")
+  .description("Run accounting reports")
+  .addHelpText("after", [
+    examples([
+      "clovis report balance-sheet --quote CAD",
+      "clovis report income-statement --year 2026 --month 6 --quote CAD",
+      "clovis report register --account <checking-id> --status posted"
+    ]),
+    notes(["Reports require explicit quote assets; Clovis does not infer report currency."])
+  ].join("\n"));
+report.command("income-statement").description("Report income, expenses, and net income").requiredOption("--year <year>", "UTC year").option("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report income-statement --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("income_statement", { year: Number(opts.year), month: opts.month ? Number(opts.month) : undefined, quote_asset_id: opts.quote }, ledger)));
+report.command("balance-sheet").description("Report assets, liabilities, and equity").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report balance-sheet --date 2026-06-30 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("balance_sheet", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
+report.command("net-worth").description("Report net worth").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report net-worth --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("net_worth", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
+report.command("spending").description("Report spending by category").requiredOption("--year <year>", "UTC year").requiredOption("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report spending --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("spending", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
+report.command("cash-flow").description("Report cash flow by activity").requiredOption("--year <year>", "UTC year").requiredOption("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report cash-flow --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("cash_flow", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
+report.command("register").description("Show an account register").requiredOption("--account <id>", "Account id").option("--asset <id>", "Asset id or symbol").option("--from <date>", "Start date, YYYY-MM-DD").option("--to <date>", "End date, YYYY-MM-DD").option("--status <status>", STATUS_HELP).addHelpText("after", examples(["clovis report register --account <checking-id> --from 2026-06-01 --to 2026-06-30"])).action((opts) => withLedger(program, (ledger) => callTool("account_register", { account_id: opts.account, asset_id: opts.asset, date_from: opts.from, date_to: opts.to, status: opts.status }, ledger)));
+report.command("trial-balance").description("Show debit and credit totals for one asset").requiredOption("--asset <id>", "Asset id or symbol").option("--status <status>", STATUS_HELP).addHelpText("after", examples(["clovis report trial-balance --asset CAD"])).action((opts) => withLedger(program, (ledger) => callTool("trial_balance", { asset_id: opts.asset, status: opts.status }, ledger)));
 
 program.parseAsync();

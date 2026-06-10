@@ -39,16 +39,16 @@ afterEach(() => {
 
 function createContext(): TestContext {
   const previousDb = process.env.CLOVIS_DB;
-  const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+  const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
   const dir = mkdtempSync(join(tmpdir(), "clovis-contract-"));
   const db = join(dir, "ledger.db");
   process.env.CLOVIS_DB = db;
-  process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+  process.env.CLOVIS_ALLOWED_ROOT = dir;
   const ledger = new Ledger(db);
   cleanups.push(() => {
     ledger.close();
     if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-    if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+    if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -178,6 +178,7 @@ function ledgerFingerprint(ledger: Ledger): string {
 }
 
 const CASES = {
+  account_balances: { mutation: "read", args: () => ({ account_type: "asset" }), assert: expectArray },
   account_register: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking }), assert: expectObject },
   add_match_rule: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Groceries, pattern: "Market" }), assert: expectObject },
   add_match_rules: { mutation: "write", args: (ctx) => ({ rules: [{ account_id: ctx.accounts.Groceries, pattern: "Market" }] }), assert: (result) => expect(result.created).toBe(1) },

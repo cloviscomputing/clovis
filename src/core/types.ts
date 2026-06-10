@@ -28,6 +28,32 @@ export interface Account {
   statement: "balance_sheet" | "income_statement";
 }
 
+export interface AccountBalance {
+  account_id: string;
+  account_name: string;
+  account_type: AccountType;
+  type: AccountType;
+  parent_id: string | null;
+  asset_id: string;
+  asset_symbol: string;
+  default_asset_id: string | null;
+  default_asset_symbol: string | null;
+  scale: number;
+  rollup: boolean;
+  posted_quantity: bigint;
+  pending_quantity: bigint;
+  current_quantity: bigint;
+  posted_balance: bigint;
+  pending_balance: bigint;
+  current_balance: bigint;
+  posted_balance_cents: bigint;
+  pending_balance_cents: bigint;
+  current_balance_cents: bigint;
+  posted_display: number;
+  pending_display: number;
+  current_display: number;
+}
+
 export interface Journal {
   id: string;
   book_id: string;

@@ -4,7 +4,7 @@ import { dirname, join, sep } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { annotateAccount, annotateAmounts, debitCredit, normalAmount, normalSide } from "./accounting.js";
 import { DEFAULT_BOOK_ID, DDL, SCHEMA_VERSION } from "./schema.js";
-import type { Account, AccountType, Asset, AssetType, Journal, JournalLine, Price, TxStatus } from "./types.js";
+import type { Account, AccountBalance, AccountType, Asset, AssetType, Journal, JournalLine, Price, TxStatus } from "./types.js";
 import { InvariantError } from "./types.js";
 import { decimalToScaled, fromAtomicUnits, gcd, reduceRatio, roundRatio, scaledToNumber, toAtomicUnits } from "./money.js";
 
@@ -1023,6 +1023,80 @@ export class Ledger {
     let total = 0n;
     for (const id of this.descendants(accountId)) total += this.balance(id, assetId, asOf, status, dateFrom);
     return total;
+  }
+
+  accountBalances(options: {
+    accountType?: AccountType | string | null;
+    assetId?: string | null;
+    asOf?: string | null;
+    rollup?: boolean;
+    hideZero?: boolean;
+  } = {}): AccountBalance[] {
+    const filteredType = options.accountType ? accountType(String(options.accountType)) : null;
+    const asOf = options.asOf ? dateOnly(options.asOf) : null;
+    const rollup = Boolean(options.rollup);
+    const hideZero = options.hideZero !== false;
+    const accounts = this.listAccounts().filter((account) => !filteredType || account.account_type === filteredType);
+    const assets = options.assetId
+      ? [this.getAsset(options.assetId)].filter((asset): asset is Asset => asset != null)
+      : this.listAssets();
+    if (options.assetId && assets.length === 0) throw new Error(`Asset ${options.assetId} not found`);
+
+    const allAccounts = this.listAccounts();
+    const children = new Map<string, Account[]>();
+    for (const account of allAccounts) {
+      if (!account.parent_id) continue;
+      children.set(account.parent_id, [...(children.get(account.parent_id) ?? []), account]);
+    }
+    const sameTypeDescendantIds = (account: Account): string[] => {
+      if (!rollup) return [account.id];
+      const ids: string[] = [];
+      const visit = (current: Account): void => {
+        if (current.account_type === account.account_type) ids.push(current.id);
+        for (const child of children.get(current.id) ?? []) visit(child);
+      };
+      visit(account);
+      return ids;
+    };
+
+    const rows: AccountBalance[] = [];
+    for (const account of accounts) {
+      const ids = sameTypeDescendantIds(account);
+      const defaultAssetId = this.listAnnotations("account", account.id).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
+      const defaultAsset = defaultAssetId ? this.getAsset(defaultAssetId) : null;
+      for (const asset of assets) {
+        const posted = ids.reduce((sum, id) => sum + this.balance(id, asset.id, asOf, "posted"), 0n);
+        const pending = ids.reduce((sum, id) => sum + this.balance(id, asset.id, asOf, "pending"), 0n);
+        const current = posted + pending;
+        if (hideZero && posted === 0n && pending === 0n && current === 0n) continue;
+        rows.push({
+          account_id: account.id,
+          account_name: account.name,
+          account_type: account.account_type,
+          type: account.account_type,
+          parent_id: account.parent_id,
+          asset_id: asset.id,
+          asset_symbol: asset.symbol,
+          default_asset_id: defaultAssetId,
+          default_asset_symbol: defaultAsset?.symbol ?? null,
+          scale: asset.scale,
+          rollup,
+          posted_quantity: posted,
+          pending_quantity: pending,
+          current_quantity: current,
+          posted_balance: posted,
+          pending_balance: pending,
+          current_balance: current,
+          posted_balance_cents: posted,
+          pending_balance_cents: pending,
+          current_balance_cents: current,
+          posted_display: Number(fromAtomicUnits(posted, asset.scale)),
+          pending_display: Number(fromAtomicUnits(pending, asset.scale)),
+          current_display: Number(fromAtomicUnits(current, asset.scale))
+        });
+      }
+    }
+    return rows;
   }
 
   accountingBalance(accountId: string, assetId: string, asOf?: string | null, status: TxStatus | string | null = "posted") {

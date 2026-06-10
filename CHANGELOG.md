@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.4
+
+CLI/MCP parity and help polish release.
+
+- Add `account_balances` as a core-owned app/MCP/CLI balance projection.
+- Add `clovis tools` and `clovis tool <name>` for full CLI parity with the app/MCP catalog.
+- Move tool signatures to the app layer and keep MCP re-exports compatible.
+- Replace the file tool root setting with shared `CLOVIS_ALLOWED_ROOT`.
+- Improve CLI help with examples, safety notes, currency guidance, and status values.
+- Default CLI CSV imports to `pending` for review before posting.
+- Document how users update the npm package.
+
 ## 0.1.3
 
 Default path alignment release.

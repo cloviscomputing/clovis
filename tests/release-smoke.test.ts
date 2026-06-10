@@ -26,7 +26,7 @@ async function withMcpClient(command: string, args: string[], cwd: string, db: s
     command,
     args,
     cwd,
-    env: { ...process.env, CLOVIS_DB: db, CLOVIS_MCP_ALLOWED_ROOT: root },
+    env: { ...process.env, CLOVIS_DB: db, CLOVIS_ALLOWED_ROOT: root },
     stderr: "pipe"
   });
   const client = new Client({ name: "clovis-release-smoke", version: "0.0.0" });
@@ -64,8 +64,8 @@ describe("release smoke", () => {
     writeFileSync(apiCheck, [
       "import { Ledger as TopLevelLedger, SCHEMA_VERSION, VERSION } from 'clovis';",
       "import { Ledger } from 'clovis/core';",
-      "import { TOOL_NAMES } from 'clovis/app';",
-      "import { createClovisMcpServer, TOOL_SIGNATURES } from 'clovis/mcp';",
+      "import { TOOL_NAMES, TOOL_SIGNATURES } from 'clovis/app';",
+      "import { createClovisMcpServer } from 'clovis/mcp';",
       "if (TopLevelLedger !== Ledger) throw new Error('top-level Ledger export drifted');",
       "let deepImportBlocked = false;",
       "try { await import('clovis/dist/core/ledger.js'); }",

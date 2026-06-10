@@ -7,7 +7,7 @@ import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "..
 import { callTool, TOOL_NAMES } from "../src/app/index.js";
 import { toolHandlers } from "../src/app/catalog.js";
 import { defaultDbPath, mcpDbPathFromEnv } from "../src/app/context.js";
-import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/mcp/signatures.js";
+import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/app/signatures.js";
 import { inputShapeFromDefinition } from "../src/mcp/tools.js";
 
 // Core tests are invariant-oriented: schema shape, balancing, currency scale,
@@ -386,6 +386,43 @@ describe("app and package surface", () => {
     }
   });
 
+  it("projects explicit native account balances through the app surface", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      const cad = (callTool("create_asset", { symbol: "CAD", asset_type: "currency", decimals: 2 }, ledger) as any).id;
+      const cadCash = (callTool("create_account", { name: "CAD Cash", type: "asset", default_asset_id: cad }, ledger) as any).id;
+      const cadEquity = (callTool("create_account", { name: "CAD Equity", type: "equity", default_asset_id: cad }, ledger) as any).id;
+      const wallet = (callTool("create_account", { name: "Wallet", type: "asset", default_asset_id: usd }, ledger) as any).id;
+      const pocket = (callTool("create_account", { name: "Pocket Cash", type: "asset", parent_id: wallet, default_asset_id: usd }, ledger) as any).id;
+
+      callTool("create_transaction", { date: "2026-06-01", amount: 2000, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Posted pay", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-02", amount: 50, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Pending pay", status: "pending" }, ledger);
+      callTool("create_transaction", { date: "2026-06-03", amount: 100, from_account_id: cadEquity, to_account_id: cadCash, description: "CAD seed", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-04", amount: 25, from_account_id: cadEquity, to_account_id: cadCash, description: "CAD pending", status: "pending" }, ledger);
+      callTool("create_transaction", { date: "2026-06-05", amount: 3, from_account_id: accounts.Salary, to_account_id: pocket, description: "Pocket cash", status: "posted" }, ledger);
+
+      const rows = callTool("account_balances", { account_type: "asset" }, ledger) as any[];
+      const checkingUsd = rows.find((row) => row.account_id === accounts.Checking && row.asset_symbol === "USD");
+      const cadCashCad = rows.find((row) => row.account_id === cadCash && row.asset_symbol === "CAD");
+      expect(checkingUsd).toMatchObject({ default_asset_symbol: "USD", posted_balance_cents: 200000, pending_balance_cents: 5000, current_balance_cents: 205000, current_display: 2050 });
+      expect(cadCashCad).toMatchObject({ default_asset_symbol: "CAD", posted_balance_cents: 10000, pending_balance_cents: 2500, current_balance_cents: 12500, current_display: 125 });
+      expect(rows.find((row) => row.account_id === accounts.Checking && row.asset_symbol === "CAD")).toBeUndefined();
+      expect(rows.find((row) => row.account_id === cadCash && row.asset_symbol === "USD")).toBeUndefined();
+
+      const cadRows = callTool("account_balances", { account_type: "asset", asset_id: "CAD" }, ledger) as any[];
+      expect(cadRows.map((row) => row.asset_symbol)).toEqual(["CAD"]);
+      expect(cadRows[0].account_id).toBe(cadCash);
+
+      const rollupRows = callTool("account_balances", { account_type: "asset", rollup: true }, ledger) as any[];
+      expect(rollupRows.find((row) => row.account_id === wallet && row.asset_symbol === "USD")).toMatchObject({ current_balance_cents: 300, rollup: true });
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("matches the app transaction and report flow", () => {
     const ledger = tempLedger();
     try {
@@ -671,9 +708,9 @@ describe("app and package surface", () => {
       const dir = mkdtempSync(join(tmpdir(), "clovis-statement-"));
       dirs.push(dir);
       const previousDb = process.env.CLOVIS_DB;
-      const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
       process.env.CLOVIS_DB = join(dir, "ledger.db");
-      process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
       try {
         const usd = ledger.createAsset("USD", "currency", 2);
         const checking = ledger.createAccount("Checking", "asset");
@@ -692,7 +729,7 @@ describe("app and package surface", () => {
       expect(result.transactions[0].status).toBe("posted");
       } finally {
         if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-        if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
       }
     } finally {
       ledger.close();
@@ -705,9 +742,9 @@ describe("app and package surface", () => {
       const dir = mkdtempSync(join(tmpdir(), "clovis-row-import-"));
       dirs.push(dir);
       const previousDb = process.env.CLOVIS_DB;
-      const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
       process.env.CLOVIS_DB = join(dir, "ledger.db");
-      process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
       try {
         const usd = ledger.createAsset("USD", "currency", 2);
         const checking = ledger.createAccount("Checking", "asset");
@@ -724,7 +761,7 @@ describe("app and package surface", () => {
         expect(ledger.balance(checking, usd)).toBe(-1250n);
       } finally {
         if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-        if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
       }
     } finally {
       ledger.close();
@@ -737,9 +774,9 @@ describe("app and package surface", () => {
       const dir = mkdtempSync(join(tmpdir(), "clovis-bad-import-"));
       dirs.push(dir);
       const previousDb = process.env.CLOVIS_DB;
-      const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
       process.env.CLOVIS_DB = join(dir, "ledger.db");
-      process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
       try {
         const usd = ledger.createAsset("USD", "currency", 2);
         const checking = ledger.createAccount("Checking", "asset");
@@ -757,7 +794,7 @@ describe("app and package surface", () => {
         expect(() => callTool("preview_import", { file_path: "too-many.csv", account_id: checking, counterpart_account_id: equity }, ledger)).toThrow(/too many rows/);
       } finally {
         if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-        if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
       }
     } finally {
       ledger.close();
@@ -878,9 +915,9 @@ describe("app and package surface", () => {
       const dir = mkdtempSync(join(tmpdir(), "clovis-files-"));
       dirs.push(dir);
       const previousDb = process.env.CLOVIS_DB;
-      const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
       process.env.CLOVIS_DB = join(dir, "ledger.db");
-      process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
       try {
         callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
         const result = callTool("export_ledger", { output_path: "snapshot.json" }, ledger) as any;
@@ -897,7 +934,7 @@ describe("app and package surface", () => {
         expect(() => callTool("export_ledger", { output_path: "outside-link/snapshot.json" }, ledger)).toThrow(/escapes/);
       } finally {
         if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-        if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
       }
     } finally {
       ledger.close();
@@ -908,10 +945,10 @@ describe("app and package surface", () => {
     const dir = mkdtempSync(join(tmpdir(), "clovis-mcp-cap-"));
     dirs.push(dir);
     const previousDb = process.env.CLOVIS_DB;
-    const previousRoot = process.env.CLOVIS_MCP_ALLOWED_ROOT;
+    const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
     const previousCaps = process.env.CLOVIS_MCP_CAPABILITIES;
     process.env.CLOVIS_DB = join(dir, "ledger.db");
-    process.env.CLOVIS_MCP_ALLOWED_ROOT = dir;
+    process.env.CLOVIS_ALLOWED_ROOT = dir;
     try {
       delete process.env.CLOVIS_MCP_CAPABILITIES;
       expect(() => callTool("backup_now", {})).toThrow(/filesystem/);
@@ -923,7 +960,7 @@ describe("app and package surface", () => {
       expect(() => callTool("delete_account", { id: "missing" })).toThrow(/destructive/);
     } finally {
       if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-      if (previousRoot == null) delete process.env.CLOVIS_MCP_ALLOWED_ROOT; else process.env.CLOVIS_MCP_ALLOWED_ROOT = previousRoot;
+      if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
       if (previousCaps == null) delete process.env.CLOVIS_MCP_CAPABILITIES; else process.env.CLOVIS_MCP_CAPABILITIES = previousCaps;
     }
   });
@@ -978,6 +1015,18 @@ describe("app and package surface", () => {
     expect(accounts.data.some((row: any) => row.name === "Checking")).toBe(true);
   });
 
+  it("prints useful CLI help for core workflows and the generic tool path", () => {
+    const help = (...args: string[]) => execFileSync(process.execPath, ["dist/cli/main.js", ...args, "--help"], { cwd: process.cwd(), encoding: "utf8" });
+    expect(help()).toContain("Default ledger:");
+    expect(help()).toContain("clovis tool account_balances");
+    expect(help("tool")).toContain("Tool args must be a JSON object");
+    expect(help("tool")).toContain("--allow-destructive");
+    expect(help("account", "balances")).toContain("Current balance is posted plus pending");
+    expect(help("import")).toContain("Default status is pending");
+    expect(help("report", "balance-sheet")).toContain("Quote asset symbol or id");
+    expect(help("txn", "add")).toContain("Transaction status: posted, pending, planned, or void");
+  });
+
   it("matches the CLI transaction and report flow on built output", () => {
     const dir = mkdtempSync(join(tmpdir(), "clovis-cli-flow-"));
     dirs.push(dir);
@@ -996,6 +1045,72 @@ describe("app and package surface", () => {
     expect(statement.data.expense).toBe(12000);
     expect(statement.data.net).toBe(288000);
     expect(run("balance", checking).data.balance).toBe(288000);
+    const balances = run("account", "balances", "--type", "asset").data;
+    expect(balances.find((row: any) => row.account_id === checking && row.asset_symbol === "USD").current_balance_cents).toBe(288000);
+  });
+
+  it("exposes the full app catalog through the generic CLI tool path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-cli-tools-"));
+    dirs.push(dir);
+    const db = join(dir, "ledger.db");
+    const run = (...args: string[]) => JSON.parse(execFileSync(process.execPath, ["dist/cli/main.js", "--db", db, "--format", "json", ...args], { cwd: process.cwd(), encoding: "utf8" }));
+    const tools = run("tools");
+    expect(tools.count).toBe(TOOL_NAMES.length);
+    expect(tools.data.find((row: any) => row.name === "account_balances").signature).toBe(TOOL_SIGNATURES.account_balances);
+
+    run("tool", "init_defaults", "--json", JSON.stringify({ template: "personal", currency: "USD" }));
+    const accounts = run("tool", "list_accounts").data;
+    const checking = accounts.find((row: any) => row.name === "Checking").id;
+    const balances = run("tool", "account_balances", "--json", JSON.stringify({ account_type: "asset", hide_zero: false })).data;
+    expect(balances.find((row: any) => row.account_id === checking && row.asset_symbol === "USD").current_balance_cents).toBe(0);
+
+    const created = JSON.parse(execFileSync(process.execPath, ["dist/cli/main.js", "--db", db, "--format", "json", "tool", "create_asset", "--stdin"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      input: JSON.stringify({ symbol: "CAD", asset_type: "currency", decimals: 2 })
+    }));
+    expect(created.data.symbol).toBe("CAD");
+  });
+
+  it("enforces generic CLI tool JSON shape and capability gates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-cli-tool-gates-"));
+    dirs.push(dir);
+    const db = join(dir, "ledger.db");
+    const base = ["dist/cli/main.js", "--db", db, "--format", "json"];
+    const run = (...args: string[]) => JSON.parse(execFileSync(process.execPath, [...base, ...args], { cwd: process.cwd(), encoding: "utf8" }));
+    const fail = (args: string[], input?: string) => {
+      try {
+        execFileSync(process.execPath, [...base, ...args], { cwd: process.cwd(), encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"] });
+        throw new Error("expected CLI command to fail");
+      } catch (error: any) {
+        return String(error.stderr ?? error.message);
+      }
+    };
+
+    run("init", "--currency", "USD");
+    expect(fail(["tool", "list_accounts", "--json", "[]"])).toContain("Tool args must be a JSON object");
+    expect(fail(["tool", "backup_now"])).toContain("--allow-filesystem");
+    expect(run("tool", "backup_now", "--allow-filesystem").data.path).toContain("backups");
+
+    const disposable = run("tool", "create_account", "--json", JSON.stringify({ name: "Disposable", type: "expense" })).data.id;
+    const deleteArgs = ["tool", "delete_account", "--json", JSON.stringify({ id: disposable })];
+    expect(fail(deleteArgs)).toContain("--allow-destructive");
+    expect(run(...deleteArgs, "--allow-destructive").data.deleted).toBe(disposable);
+  });
+
+  it("roots generic CLI file tools beside --db when CLOVIS_DB is unset", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-cli-tool-root-"));
+    dirs.push(dir);
+    const db = join(dir, "ledger.db");
+    writeFileSync(join(dir, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Seed\n", "utf8");
+    const env = { ...process.env };
+    delete env.CLOVIS_DB;
+    delete env.CLOVIS_ALLOWED_ROOT;
+    const preview = JSON.parse(execFileSync(process.execPath, [
+      "dist/cli/main.js", "--db", db, "--format", "json", "tool", "preview_import",
+      "--json", JSON.stringify({ file_path: "statement.csv" }), "--allow-filesystem"
+    ], { cwd: process.cwd(), encoding: "utf8", env }));
+    expect(preview.data.total_rows).toBe(1);
   });
 
   it("posts opening balances through the CLI", () => {
@@ -1009,6 +1124,20 @@ describe("app and package surface", () => {
     const result = run("txn", "opening-balance", "--account", checking, "--amount", "125", "--date", "2026-05-31", "--status", "posted");
     expect(result.data.amount).toBe(12500);
     expect(run("balance", checking).data.balance).toBe(12500);
+  });
+
+  it("defaults CLI imports to pending for review", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-cli-import-"));
+    dirs.push(dir);
+    const db = join(dir, "ledger.db");
+    writeFileSync(join(dir, "statement.csv"), "date,amount,description\n2026-06-01,10.00,Statement row\n", "utf8");
+    const run = (...args: string[]) => JSON.parse(execFileSync(process.execPath, ["dist/cli/main.js", "--db", db, "--format", "json", ...args], { cwd: process.cwd(), encoding: "utf8" }));
+    run("init", "--currency", "USD");
+    const accounts = run("account", "list").data;
+    const accountId = (name: string) => accounts.find((row: any) => row.name === name).id;
+    const imported = run("import", "--file", "statement.csv", "--account", accountId("Checking"), "--counterpart", accountId("Uncategorized"));
+    expect(imported.data.transactions[0].status).toBe("pending");
+    expect(run("txn", "list", "--status", "pending").data.transactions.some((tx: any) => tx.description === "Statement row")).toBe(true);
   });
 
   it("validates ledger imports before writing", () => {
@@ -1072,12 +1201,12 @@ describe("app and package surface", () => {
   it("applies MCP file size limits to inline ledger imports", () => {
     const ledger = tempLedger();
     try {
-      const previousMax = process.env.CLOVIS_MCP_MAX_FILE_BYTES;
-      process.env.CLOVIS_MCP_MAX_FILE_BYTES = "32";
+      const previousMax = process.env.CLOVIS_MAX_FILE_BYTES;
+      process.env.CLOVIS_MAX_FILE_BYTES = "32";
       try {
         expect(() => callTool("import_ledger", { data: JSON.stringify({ format: "clovis-ledger-v1", assets: [] }) }, ledger)).toThrow(/too large/);
       } finally {
-        if (previousMax == null) delete process.env.CLOVIS_MCP_MAX_FILE_BYTES; else process.env.CLOVIS_MCP_MAX_FILE_BYTES = previousMax;
+        if (previousMax == null) delete process.env.CLOVIS_MAX_FILE_BYTES; else process.env.CLOVIS_MAX_FILE_BYTES = previousMax;
       }
     } finally {
       ledger.close();

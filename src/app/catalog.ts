@@ -7,7 +7,7 @@ import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
 import { normalAmount } from "../core/accounting.js";
 import { openMcpLedger } from "./context.js";
 import { publicize, stringifyPublic } from "./json.js";
-import { assertMcpDataSize, redactPath, resolveMcpReadPath, resolveMcpWritePath } from "./filesystem.js";
+import { assertToolDataSize, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 // Shared command catalog for CLI and MCP. This layer translates user/tool
@@ -20,7 +20,7 @@ const MAX_IMPORT_ROWS = 10000;
 const MAX_CSV_COLUMNS = 200;
 
 export const TOOL_NAMES = [
-  "account_register", "add_match_rule", "add_match_rules", "age_of_money", "apply_match_rules", "apply_pattern",
+  "account_balances", "account_register", "add_match_rule", "add_match_rules", "age_of_money", "apply_match_rules", "apply_pattern",
   "apply_reconciliation_plan", "apply_rollover", "assert_balance", "assert_balances", "audit_categorization", "backup_now",
   "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "buy_security",
   "cash_flow", "cash_projection", "close_period", "commit_batch", "compare_scenarios", "consolidate_transfers",
@@ -322,8 +322,8 @@ function parseCsv(text: string): Row[] {
   return rows.map((line, index) => Object.fromEntries(split(line, index + 2).map((value, i) => [headers[i] || `col_${i}`, value.trim()])).valueOf() as Row & { index: number }).map((row, index) => ({ ...row, index }));
 }
 
-function parseStatementRows(filePath: string, args: Args = {}): Row[] {
-  const file = resolveMcpReadPath(filePath, new Set([".csv"]));
+function parseStatementRows(ledger: Ledger, filePath: string, args: Args = {}): Row[] {
+  const file = resolveToolReadPath(ledger.path, filePath, new Set([".csv"]));
   const rows = parseCsv(readFileSync(file, "utf8")).slice(Number(args.skip_rows ?? 0));
   const dateCol = args.date_col || "date";
   const amountCol = args.amount_col || "amount";
@@ -434,7 +434,9 @@ function safeMatchRegex(pattern: unknown): RegExp {
   }
 }
 
-const MCP_FILESYSTEM_TOOLS = new Set([
+export type ToolCapability = "filesystem" | "destructive";
+
+const FILESYSTEM_TOOLS = new Set([
   "apply_reconciliation_plan",
   "backup_now",
   "import_file",
@@ -442,7 +444,7 @@ const MCP_FILESYSTEM_TOOLS = new Set([
   "process_statement"
 ]);
 
-const MCP_DESTRUCTIVE_TOOLS = new Set([
+const DESTRUCTIVE_TOOLS = new Set([
   "close_period",
   "commit_batch",
   "delete_account",
@@ -461,26 +463,33 @@ const MCP_DESTRUCTIVE_TOOLS = new Set([
   "rollback_recategorize"
 ]);
 
-function mcpCapabilities(): Set<string> {
+function mcpCapabilities(): Set<ToolCapability | "all"> {
   return new Set(String(process.env.CLOVIS_MCP_CAPABILITIES ?? "")
     .split(",")
     .map((value) => value.trim().toLowerCase())
-    .filter(Boolean));
+    .filter(Boolean)) as Set<ToolCapability | "all">;
 }
 
-function hasMcpCapability(caps: Set<string>, capability: string): boolean {
+function hasToolCapability(caps: Set<ToolCapability | "all">, capability: ToolCapability): boolean {
   return caps.has("all") || caps.has(capability);
 }
 
-function mcpRequiresFilesystem(name: string, args: Args): boolean {
-  return MCP_FILESYSTEM_TOOLS.has(name) ||
+export function requiredToolCapabilities(name: string, args: Args = {}): ToolCapability[] {
+  const capabilities: ToolCapability[] = [];
+  if (toolRequiresFilesystem(name, args)) capabilities.push("filesystem");
+  if (toolRequiresDestructive(name, args)) capabilities.push("destructive");
+  return capabilities;
+}
+
+function toolRequiresFilesystem(name: string, args: Args): boolean {
+  return FILESYSTEM_TOOLS.has(name) ||
     (name === "export_ledger" && args.output_path != null) ||
     (name === "export_transactions" && args.output_path != null) ||
     (name === "import_ledger" && args.file_path != null);
 }
 
-function mcpRequiresDestructive(name: string, args: Args): boolean {
-  return MCP_DESTRUCTIVE_TOOLS.has(name) ||
+function toolRequiresDestructive(name: string, args: Args): boolean {
+  return DESTRUCTIVE_TOOLS.has(name) ||
     (name === "apply_match_rules" && args.dry_run === false) ||
     (name === "apply_pattern" && args.dry_run === false) ||
     (name === "apply_reconciliation_plan" && args.dry_run === false) ||
@@ -493,16 +502,18 @@ function mcpRequiresDestructive(name: string, args: Args): boolean {
     (name === "void_by_filter" && args.dry_run === false);
 }
 
+export function assertToolCapabilities(name: string, args: Args, granted: Set<ToolCapability | "all">, surface: "CLI" | "MCP"): void {
+  const missing = requiredToolCapabilities(name, args).filter((capability) => !hasToolCapability(granted, capability));
+  if (missing.length) {
+    if (surface === "MCP") throw new Error(`MCP tool '${name}' requires CLOVIS_MCP_CAPABILITIES=${missing.join(",")}`);
+    throw new Error(`CLI tool '${name}' requires ${missing.map((capability) => `--allow-${capability}`).join(", ")}`);
+  }
+}
+
 function assertMcpCapability(name: string, args: Args): void {
   // MCP can be driven by model output. Filesystem and destructive operations
   // therefore require explicit environment capabilities.
-  const caps = mcpCapabilities();
-  const missing: string[] = [];
-  if (mcpRequiresFilesystem(name, args) && !hasMcpCapability(caps, "filesystem")) missing.push("filesystem");
-  if (mcpRequiresDestructive(name, args) && !hasMcpCapability(caps, "destructive")) missing.push("destructive");
-  if (missing.length) {
-    throw new Error(`MCP tool '${name}' requires CLOVIS_MCP_CAPABILITIES=${missing.join(",")}`);
-  }
+  assertToolCapabilities(name, args, mcpCapabilities(), "MCP");
 }
 
 const handlers: Record<ToolName, Handler> = {
@@ -705,6 +716,13 @@ const handlers: Record<ToolName, Handler> = {
       total_cents: balances.reduce((sum, row) => sum + row.balance, 0n)
     };
   },
+  account_balances: (ledger, args) => ledger.accountBalances({
+    accountType: args.account_type ?? null,
+    assetId: args.asset_id ? asset(ledger, args.asset_id) : null,
+    asOf: args.as_of ? validateDate(args.as_of) : null,
+    rollup: Boolean(args.rollup),
+    hideZero: args.hide_zero !== false
+  }),
   recategorize_transaction: (ledger, args) => {
     const entries = ledger.getEntries(args.tx_id);
     const oldAccount = args.old_account_id
@@ -920,17 +938,17 @@ const handlers: Record<ToolName, Handler> = {
     return { ...result, batch_id: batchId, imported: result.created, skipped: 0, transfer_stats: { matched: 0, unmatched: 0 } };
   },
   import_file: (ledger, args) => {
-    const rows = parseStatementRows(args.file_path, args);
+    const rows = parseStatementRows(ledger, args.file_path, args);
     return handlers.import_transactions(ledger, { account_id: args.account_id, counterpart_id: args.counterpart_account_id, transactions: rows, status: args.status ?? "pending", currency: args.currency, asset_id: args.asset_id, amount_convention: args.amount_convention ?? "signed", statement_type: args.statement_type });
   },
   preview_import: (_ledger, args) => {
-    const rows = parseStatementRows(args.file_path, args);
+    const rows = parseStatementRows(_ledger, args.file_path, args);
     return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true };
   },
   process_statement: (ledger, args) => {
     if (args.date_tolerance_days != null && args.date_tolerance_days !== 1) unsupportedArguments({ date_tolerance_days: args.date_tolerance_days });
     unsupportedArguments({ transfer_account_id: args.transfer_account_id });
-    const rows = parseStatementRows(args.file_path, args);
+    const rows = parseStatementRows(ledger, args.file_path, args);
     const accountId = account(ledger, args.account_id);
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : accountAsset(ledger, accountId);
     const projectedDelta = rows.reduce((sum, row) => sum + amountToQuantity(ledger, assetId, row.amount ?? 0), 0n);
@@ -1039,22 +1057,22 @@ const handlers: Record<ToolName, Handler> = {
     return { batch_id: args.batch_id, rolled_back: rolled };
   },
 
-  export_transactions: (ledger, args) => ledger.exportTransactionsCsv(args.output_path ? resolveMcpWritePath(args.output_path, new Set([".csv"])) : null),
+  export_transactions: (ledger, args) => ledger.exportTransactionsCsv(args.output_path ? resolveToolWritePath(ledger.path, args.output_path, new Set([".csv"])) : null),
   export_ledger: (ledger, args) => {
     const doc = ledger.exportDocument();
     const text = stringifyPublic(doc);
     const content_hash = createHash("sha256").update(text).digest("hex");
     if (args.output_path) {
-      const output = resolveMcpWritePath(args.output_path, new Set([".json"]));
+      const output = resolveToolWritePath(ledger.path, args.output_path, new Set([".json"]));
       writeFileSync(output, text, "utf8");
-      return { file: redactPath(output), content_hash };
+      return { file: redactToolPath(ledger.path, output), content_hash };
     }
     return { data: text, content_hash };
   },
   import_ledger: (ledger, args) => {
     if (Boolean(args.file_path) === Boolean(args.data)) throw new Error("Exactly one of file_path or data is required");
-    const text = args.file_path ? readFileSync(resolveMcpReadPath(args.file_path, new Set([".json"])), "utf8") : String(args.data);
-    assertMcpDataSize(text);
+    const text = args.file_path ? readFileSync(resolveToolReadPath(ledger.path, args.file_path, new Set([".json"])), "utf8") : String(args.data);
+    assertToolDataSize(text);
     return ledger.importDocument(JSON.parse(text), args.preserve_ids !== false, Boolean(args.dry_run));
   },
 
@@ -1228,7 +1246,10 @@ const handlers: Record<ToolName, Handler> = {
     }
     return { matched: (args.transactions ?? []).length - unmatched.length, unmatched: unmatched.length, unmatched_rows: unmatched, reconciled: unmatched.length === 0 };
   },
-  reconcile_statement_plan: (ledger, args) => ({ ...(handlers.reconcile_statement(ledger, { account_id: args.account_id, counterpart_id: args.counterpart_account_id ?? args.account_id, transactions: parseStatementRows(args.file_path, args) }) as Row), rows: parseStatementRows(args.file_path, args).slice(0, args.sample_limit ?? 20) }),
+  reconcile_statement_plan: (ledger, args) => {
+    const rows = parseStatementRows(ledger, args.file_path, args);
+    return { ...(handlers.reconcile_statement(ledger, { account_id: args.account_id, counterpart_id: args.counterpart_account_id ?? args.account_id, transactions: rows }) as Row), rows: rows.slice(0, args.sample_limit ?? 20) };
+  },
   apply_reconciliation_plan: (ledger, args) => args.dry_run === false ? handlers.import_file(ledger, args) : handlers.reconcile_statement_plan(ledger, args),
   reconcile_diff: (ledger, args) => {
     unsupportedArguments({ branch: args.branch });
@@ -1316,9 +1337,9 @@ const handlers: Record<ToolName, Handler> = {
 
   backup_now: (ledger, args) => {
     unsupportedArguments({ compact: args.compact });
-    const target = args.output_path ? resolveMcpWritePath(args.output_path, new Set([".db", ".sqlite", ".sqlite3"])) : null;
+    const target = args.output_path ? resolveToolWritePath(ledger.path, args.output_path, new Set([".db", ".sqlite", ".sqlite3"])) : null;
     const result = ledger.backupNow(target);
-    return { ...result, path: redactPath(result.path) };
+    return { ...result, path: redactToolPath(ledger.path, result.path) };
   },
   backup_status: (ledger) => {
     const backups = handlers.list_backups(ledger, {}) as Row[];
@@ -1327,7 +1348,7 @@ const handlers: Record<ToolName, Handler> = {
   list_backups: (ledger) => {
     const dir = join(dirname(ledger.path), "backups");
     if (!existsSync(dir)) return [];
-    return readdirSync(dir).map((file) => join(dir, file)).filter((path) => statSync(path).isFile()).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs).map((path) => ({ path: redactPath(path), size_bytes: statSync(path).size, modified_at: statSync(path).mtime.toISOString() }));
+    return readdirSync(dir).map((file) => join(dir, file)).filter((path) => statSync(path).isFile()).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs).map((path) => ({ path: redactToolPath(ledger.path, path), size_bytes: statSync(path).size, modified_at: statSync(path).mtime.toISOString() }));
   },
   init_defaults: (ledger, args) => {
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : null;
@@ -1346,7 +1367,7 @@ const handlers: Record<ToolName, Handler> = {
     const ids = [...new Set(repairable.map((row) => String(row.id)).filter(Boolean))];
     if (!dryRun) for (const id of ids) ledger.deleteAnnotation(id);
     const after = dryRun ? before : ledger.integrityCheck();
-    return { dry_run: dryRun, backup: backup ? redactPath(backup) : args.backup !== false, before, repaired: dryRun ? 0 : ids.length, after, ok: (after as Row).ok };
+    return { dry_run: dryRun, backup: backup ? redactToolPath(ledger.path, backup) : args.backup !== false, before, repaired: dryRun ? 0 : ids.length, after, ok: (after as Row).ok };
   },
   list_tags: (ledger, args) => ledger.listAnnotations(args.entity_type, args.entity_id),
   delete_tag: (ledger, args) => { ledger.deleteAnnotation(args.tag_id); return { deleted: args.tag_id }; },

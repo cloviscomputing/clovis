@@ -1,8 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodTypeAny } from "zod";
 import { callTool } from "../app/catalog.js";
+import { TOOL_DEFINITIONS, type ToolDefinition, type ToolParameterDefinition } from "../app/signatures.js";
 import { VERSION } from "../version.js";
-import { TOOL_DEFINITIONS, type ToolDefinition, type ToolParameterDefinition } from "./signatures.js";
 
 type Shape = Record<string, ZodTypeAny>;
 

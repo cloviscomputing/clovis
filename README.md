@@ -89,11 +89,42 @@ You can also run the CLI without a global install:
 npx clovis --help
 ```
 
+## Update
+
+After a new version is published to npm, update the global CLI and MCP server
+with:
+
+```sh
+npm install -g clovis@latest
+clovis --version
+```
+
+Update a project dependency with:
+
+```sh
+npm install clovis@latest
+```
+
+If your `package.json` semver range already accepts the latest version, you can
+also run:
+
+```sh
+npm update clovis
+```
+
+For one-off use without installing globally:
+
+```sh
+npx clovis@latest --help
+```
+
+MCP hosts that point to the global `clovis-mcp` binary should be restarted
+after the global package is updated.
+
 ## CLI
 
 The CLI covers common setup, account, transaction, import/export, and report
-flows. The broader tool surface is available through `clovis/app` and
-`clovis-mcp`.
+flows. The complete app tool catalog is also available through `clovis tool`.
 
 By default, the CLI stores its ledger at `~/.clovis/clovis.db`. Use
 `--db` or `CLOVIS_DB` to choose another database path.
@@ -101,6 +132,7 @@ By default, the CLI stores its ledger at `~/.clovis/clovis.db`. Use
 ```sh
 clovis --db ./ledger.db init --currency CAD
 clovis --db ./ledger.db --format json account list
+clovis --db ./ledger.db --format json account balances --type asset
 ```
 
 Record a posted transaction between two accounts that share the same account
@@ -121,11 +153,29 @@ clovis --db ./ledger.db report income-statement --year 2026 --month 6 --quote CA
 
 Import a CSV statement into an existing account. If `--currency` is omitted,
 the import uses the account `default_asset`; pass `--currency` when the file
-needs to create or use a different explicit asset.
+needs to create or use a different explicit asset. CLI imports default to
+`pending` so rows can be reviewed before posting.
 
 ```sh
 clovis --db ./ledger.db import --file ./statement.csv \
   --account "<checking-id>" --counterpart "<uncategorized-id>"
+```
+
+For full CLI parity with the app and MCP catalog, call any public tool by name:
+
+```sh
+clovis --db ./ledger.db --format json tools
+clovis --db ./ledger.db --format json tool account_balances \
+  --json '{"account_type":"asset"}'
+clovis --db ./ledger.db --format json tool import_transactions --stdin < args.json
+```
+
+Generic file and destructive tools require explicit CLI gates:
+
+```sh
+clovis --db ./ledger.db tool backup_now --allow-filesystem
+clovis --db ./ledger.db tool delete_account \
+  --json '{"id":"<account-id>"}' --allow-destructive
 ```
 
 ## MCP
@@ -137,7 +187,7 @@ CLOVIS_DB=./ledger.db clovis-mcp
 ```
 
 `clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools are limited to the
-ledger directory by default. Set `CLOVIS_MCP_ALLOWED_ROOT` to allow imports,
+ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` to allow imports,
 exports, and backups under another local directory.
 
 MCP file operations and destructive operations are disabled unless explicitly
@@ -161,6 +211,7 @@ Example local MCP configuration:
       "command": "clovis-mcp",
       "env": {
         "CLOVIS_DB": "/absolute/path/to/ledger.db",
+        "CLOVIS_ALLOWED_ROOT": "/absolute/path",
         "CLOVIS_MCP_CAPABILITIES": "filesystem"
       }
     }
@@ -195,8 +246,8 @@ ledger.close();
 ```
 
 ```ts
-import { callTool, TOOL_NAMES } from "clovis/app";
-import { createClovisMcpServer, TOOL_SIGNATURES } from "clovis/mcp";
+import { callTool, TOOL_NAMES, TOOL_SIGNATURES } from "clovis/app";
+import { createClovisMcpServer } from "clovis/mcp";
 ```
 
 The top-level `clovis` entrypoint is intentionally small:
@@ -206,8 +257,9 @@ import { Ledger, SCHEMA_VERSION } from "clovis";
 ```
 
 Use `clovis/core` for ledger engine APIs, schema constants, money helpers, and
-accounting primitives. Use `clovis/app` for the shared tool dispatcher and tool
-name contract. Use `clovis/mcp` for MCP server creation and MCP tool metadata.
+accounting primitives. Use `clovis/app` for the shared tool dispatcher, tool
+name contract, signatures, and tool metadata. Use `clovis/mcp` for MCP server
+creation.
 Files under `dist/` and `src/` are package internals and are not public import
 paths.
 
@@ -279,8 +331,8 @@ npm run release:check
 
 The release check runs dependency audit, typecheck, build, the full test suite,
 package dry-run, packed-package artifact checks, and packed-package local path
-leak checks. The test suite includes a contract row for every MCP tool exposed
-by the package.
+leak checks. The test suite includes a contract row for every app/MCP tool
+exposed by the package.
 
 Official npm releases are published by GitHub Actions through npm Trusted
 Publishing. See [RELEASING.md](RELEASING.md) for the full release runbook,
