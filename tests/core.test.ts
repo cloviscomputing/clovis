@@ -941,7 +941,7 @@ describe("app and package surface", () => {
     }
   });
 
-  it("requires explicit MCP capabilities for filesystem and destructive tools", () => {
+  it("runs sandboxed MCP file tools without a capability flag and still gates destructive tools", () => {
     const dir = mkdtempSync(join(tmpdir(), "clovis-mcp-cap-"));
     dirs.push(dir);
     const previousDb = process.env.CLOVIS_DB;
@@ -951,13 +951,12 @@ describe("app and package surface", () => {
     process.env.CLOVIS_ALLOWED_ROOT = dir;
     try {
       delete process.env.CLOVIS_MCP_CAPABILITIES;
-      expect(() => callTool("backup_now", {})).toThrow(/filesystem/);
-      expect(() => callTool("delete_account", { id: "missing" })).toThrow(/destructive/);
-      process.env.CLOVIS_MCP_CAPABILITIES = "filesystem";
       const backup = callTool("backup_now", {}) as any;
       expect(String(backup.path)).toContain("backups");
       expect(String(backup.path)).not.toContain(dir);
       expect(() => callTool("delete_account", { id: "missing" })).toThrow(/destructive/);
+      process.env.CLOVIS_MCP_CAPABILITIES = "destructive";
+      expect(() => callTool("delete_account", { id: "missing" })).toThrow(/not found/);
     } finally {
       if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
       if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
@@ -1089,8 +1088,7 @@ describe("app and package surface", () => {
 
     run("init", "--currency", "USD");
     expect(fail(["tool", "list_accounts", "--json", "[]"])).toContain("Tool args must be a JSON object");
-    expect(fail(["tool", "backup_now"])).toContain("--allow-filesystem");
-    expect(run("tool", "backup_now", "--allow-filesystem").data.path).toContain("backups");
+    expect(run("tool", "backup_now").data.path).toContain("backups");
 
     const disposable = run("tool", "create_account", "--json", JSON.stringify({ name: "Disposable", type: "expense" })).data.id;
     const deleteArgs = ["tool", "delete_account", "--json", JSON.stringify({ id: disposable })];
@@ -1108,7 +1106,7 @@ describe("app and package surface", () => {
     delete env.CLOVIS_ALLOWED_ROOT;
     const preview = JSON.parse(execFileSync(process.execPath, [
       "dist/cli/main.js", "--db", db, "--format", "json", "tool", "preview_import",
-      "--json", JSON.stringify({ file_path: "statement.csv" }), "--allow-filesystem"
+      "--json", JSON.stringify({ file_path: "statement.csv" })
     ], { cwd: process.cwd(), encoding: "utf8", env }));
     expect(preview.data.total_rows).toBe(1);
   });

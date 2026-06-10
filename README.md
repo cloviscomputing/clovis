@@ -170,10 +170,11 @@ clovis --db ./ledger.db --format json tool account_balances \
 clovis --db ./ledger.db --format json tool import_transactions --stdin < args.json
 ```
 
-Generic file and destructive tools require explicit CLI gates:
+File tools are sandboxed to the ledger directory unless `CLOVIS_ALLOWED_ROOT`
+is set. Destructive tools require an explicit CLI gate:
 
 ```sh
-clovis --db ./ledger.db tool backup_now --allow-filesystem
+clovis --db ./ledger.db tool backup_now
 clovis --db ./ledger.db tool delete_account \
   --json '{"id":"<account-id>"}' --allow-destructive
 ```
@@ -190,17 +191,15 @@ CLOVIS_DB=./ledger.db clovis-mcp
 ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` to allow imports,
 exports, and backups under another local directory.
 
-MCP file operations and destructive operations are disabled unless explicitly
-enabled:
+MCP file tools are sandboxed to the ledger directory or `CLOVIS_ALLOWED_ROOT`.
+Destructive MCP operations are disabled unless explicitly enabled:
 
 ```sh
-CLOVIS_MCP_CAPABILITIES=filesystem clovis-mcp
-CLOVIS_MCP_CAPABILITIES=filesystem,destructive clovis-mcp
+CLOVIS_MCP_CAPABILITIES=destructive clovis-mcp
 ```
 
-Use `filesystem` for local file import/export/backup tools. Use `destructive`
-for delete, rollback, hard state transition, and non-dry-run bulk mutation
-tools.
+Use `destructive` for delete, rollback, hard state transition, and non-dry-run
+bulk mutation tools.
 
 Example local MCP configuration:
 
@@ -211,8 +210,7 @@ Example local MCP configuration:
       "command": "clovis-mcp",
       "env": {
         "CLOVIS_DB": "/absolute/path/to/ledger.db",
-        "CLOVIS_ALLOWED_ROOT": "/absolute/path",
-        "CLOVIS_MCP_CAPABILITIES": "filesystem"
+        "CLOVIS_ALLOWED_ROOT": "/absolute/path"
       }
     }
   }

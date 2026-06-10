@@ -434,15 +434,7 @@ function safeMatchRegex(pattern: unknown): RegExp {
   }
 }
 
-export type ToolCapability = "filesystem" | "destructive";
-
-const FILESYSTEM_TOOLS = new Set([
-  "apply_reconciliation_plan",
-  "backup_now",
-  "import_file",
-  "preview_import",
-  "process_statement"
-]);
+export type ToolCapability = "destructive";
 
 const DESTRUCTIVE_TOOLS = new Set([
   "close_period",
@@ -476,16 +468,8 @@ function hasToolCapability(caps: Set<ToolCapability | "all">, capability: ToolCa
 
 export function requiredToolCapabilities(name: string, args: Args = {}): ToolCapability[] {
   const capabilities: ToolCapability[] = [];
-  if (toolRequiresFilesystem(name, args)) capabilities.push("filesystem");
   if (toolRequiresDestructive(name, args)) capabilities.push("destructive");
   return capabilities;
-}
-
-function toolRequiresFilesystem(name: string, args: Args): boolean {
-  return FILESYSTEM_TOOLS.has(name) ||
-    (name === "export_ledger" && args.output_path != null) ||
-    (name === "export_transactions" && args.output_path != null) ||
-    (name === "import_ledger" && args.file_path != null);
 }
 
 function toolRequiresDestructive(name: string, args: Args): boolean {

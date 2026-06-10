@@ -2,7 +2,7 @@
 // Thin human-facing wrapper over the shared app catalog. The CLI should not
 // own bookkeeping behavior; it only maps flags to tool calls and formats output.
 import { readFileSync } from "node:fs";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { defaultDbPath, openLedger } from "../app/context.js";
 import { assertToolCapabilities, callTool, TOOL_NAMES, type ToolCapability } from "../app/catalog.js";
 import { stringifyPublic, publicize } from "../app/json.js";
@@ -116,7 +116,6 @@ function parseToolArgs(opts: ToolOptions): Record<string, unknown> {
 function grantedToolCapabilities(opts: ToolOptions): Set<ToolCapability | "all"> {
   const granted = new Set<ToolCapability | "all">();
   if (opts.allowAll) granted.add("all");
-  if (opts.allowFilesystem) granted.add("filesystem");
   if (opts.allowDestructive) granted.add("destructive");
   return granted;
 }
@@ -134,20 +133,21 @@ program.command("tool")
   .argument("<name>")
   .option("--json <json>", "Tool args as a JSON object")
   .option("--stdin", "Read tool args as a JSON object from stdin")
-  .option("--allow-filesystem", "Allow file import, export, and backup tools")
   .option("--allow-destructive", "Allow delete, rollback, hard state transition, and non-dry-run bulk mutation tools")
-  .option("--allow-all", "Allow filesystem and destructive tools")
+  .option("--allow-all", "Allow destructive tools")
+  .addOption(new Option("--allow-filesystem", "Deprecated no-op; file tools are sandboxed by path").hideHelp())
   .addHelpText("after", [
     examples([
       "clovis tool account_balances --json '{\"account_type\":\"asset\"}'",
       "clovis tool import_transactions --stdin < args.json",
-      "clovis tool backup_now --allow-filesystem",
+      "clovis tool backup_now",
       "clovis tool delete_account --json '{\"id\":\"<account-id>\"}' --allow-destructive"
     ]),
     notes([
       "Run `clovis tools` to list tool names and signatures.",
       "Tool args must be a JSON object.",
-      "Filesystem and destructive tools require explicit allow flags."
+      "File tools are sandboxed to the ledger directory or CLOVIS_ALLOWED_ROOT.",
+      "Destructive tools require an explicit allow flag."
     ])
   ].join("\n"))
   .action((name: string, opts: ToolOptions) => withLedger(program, (ledger) => {

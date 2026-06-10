@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+Filesystem gate simplification release.
+
+- Remove the extra `filesystem` capability requirement from MCP and generic CLI file tools.
+- Keep file tools sandboxed by the active ledger directory or `CLOVIS_ALLOWED_ROOT`.
+- Keep destructive tool gating through `CLOVIS_MCP_CAPABILITIES=destructive` and `--allow-destructive`.
+
 ## 0.1.4
 
 CLI/MCP parity and help polish release.
