@@ -468,13 +468,13 @@ describe("app and package surface", () => {
       expect((callTool("income_statement", { year: 2026, month: 6, include_pending: true, quote_asset_id: usd }, ledger) as any).income).toBe(15000);
       expect((callTool("income_statement", { year: 2026, month: 6, status: "active", quote_asset_id: usd }, ledger) as any).income).toBe(15000);
       expect((callTool("balance_sheet", { quote_asset_id: usd }, ledger) as any).total_assets).toBe(10000);
-      expect((callTool("balance_sheet", { include_pending: true, quote_asset_id: usd }, ledger) as any).total_assets).toBe(10000);
+      expect((callTool("balance_sheet", { include_pending: true, quote_asset_id: usd }, ledger) as any).total_assets).toBe(15000);
       expect((callTool("balance_sheet", { status: "active", quote_asset_id: usd }, ledger) as any).total_assets).toBe(15000);
       expect((callTool("net_worth", { quote_asset_id: usd }, ledger) as any).net_worth).toBe(10000);
-      expect((callTool("net_worth", { include_pending: true, quote_asset_id: usd }, ledger) as any).net_worth).toBe(10000);
+      expect((callTool("net_worth", { include_pending: true, quote_asset_id: usd }, ledger) as any).net_worth).toBe(15000);
       expect((callTool("net_worth", { status: "active", quote_asset_id: usd }, ledger) as any).net_worth).toBe(15000);
       expect((callTool("cash_flow", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any).operating_total).toBe(-10000);
-      expect((callTool("cash_flow", { year: 2026, month: 6, include_pending: true, quote_asset_id: usd }, ledger) as any).operating_total).toBe(-10000);
+      expect((callTool("cash_flow", { year: 2026, month: 6, include_pending: true, quote_asset_id: usd }, ledger) as any).operating_total).toBe(-15000);
       expect((callTool("cash_flow", { year: 2026, month: 6, status: "active", quote_asset_id: usd }, ledger) as any).operating_total).toBe(-15000);
       expect((callTool("cash_flow", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any).net_change).toBe(10000);
 
@@ -484,6 +484,33 @@ describe("app and package surface", () => {
       const low = callTool("search_transactions", { amount_max: 7500, status: null }, ledger) as any;
       expect(low.total).toBe(1);
       expect(low.transactions[0].description).toBe("Pending pay");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("keeps financial picture report scopes consistent", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Posted pay", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-15", amount: 50, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Pending pay", status: "pending" }, ledger);
+      callTool("plan_transaction", { date: "2026-06-30", amount: 25, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Planned pay" }, ledger);
+      callTool("set_budget", { account: accounts.Groceries, amount: 200, year: 2026, month: 6 }, ledger);
+      callTool("create_transaction", { date: "2026-06-10", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Posted groceries", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-11", amount: 5, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Pending groceries", status: "pending" }, ledger);
+
+      const picture = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      expect(picture.monthly_activity.income).toBe(17500);
+      expect(picture.current_snapshot.total_assets).toBe(16000);
+      expect(picture.budget_position.total_spent_cents).toBe(1500);
+
+      const postedOnly = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: false }, ledger) as any;
+      expect(postedOnly.monthly_activity.income).toBe(10000);
+      expect(postedOnly.current_snapshot.total_assets).toBe(9000);
+      expect(postedOnly.budget_position.total_spent_cents).toBe(1000);
     } finally {
       ledger.close();
     }
@@ -607,6 +634,54 @@ describe("app and package surface", () => {
     }
   });
 
+  it("surfaces missing conversions in cash flow", () => {
+    const ledger = tempLedger();
+    try {
+      const cad = ledger.createAsset("CAD", "currency", 2);
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const cadChecking = ledger.createAccount("CAD Checking", "asset");
+      const usdChecking = ledger.createAccount("USD Checking", "asset");
+      const salary = ledger.createAccount("Salary", "income");
+      const fees = ledger.createAccount("Fees", "expense");
+      ledger.recordTransaction("2026-06-01", 10000n, salary, cadChecking, cad, "CAD pay", "posted");
+      ledger.recordTransaction("2026-06-02", 300n, usdChecking, fees, usd, "USD fee", "posted");
+
+      const report = callTool("cash_flow", { year: 2026, month: 6, quote_asset_id: cad }, ledger) as any;
+      expect(report.operating_total).toBe(-10000);
+      expect(report.valuation_complete).toBe(false);
+      expect(report.missing_conversions).toHaveLength(1);
+      expect(report.missing_conversions[0]).toMatchObject({ account_id: fees, asset_id: usd, quote_asset_id: cad, quantity: 300 });
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("projects balances through quote conversion paths", () => {
+    const ledger = tempLedger();
+    try {
+      const cad = ledger.createAsset("CAD", "currency", 2);
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const usdChecking = ledger.createAccount("USD Checking", "asset");
+      const equity = ledger.createAccount("Opening Balance", "equity");
+      ledger.recordTransaction("2026-06-01", 7900n, equity, usdChecking, usd, "USD opening", "posted");
+
+      const missing = callTool("project_balances", { through: "2026-06-30", account_ids: [usdChecking], quote_asset_id: cad }, ledger) as any;
+      expect(missing.accounts[0].balance_cents).toBe(0);
+      expect(missing.net_worth_cents).toBe(0);
+      expect(missing.valuation_complete).toBe(false);
+      expect(missing.missing_conversions[0]).toMatchObject({ account_id: usdChecking, asset_id: usd, quote_asset_id: cad, quantity: 7900 });
+
+      ledger.createPrice(usd, cad, "1.25", "2026-06-01");
+      const converted = callTool("project_balances", { through: "2026-06-30", account_ids: [usdChecking], quote_asset_id: cad }, ledger) as any;
+      expect(converted.accounts[0].balance_cents).toBe(9875);
+      expect(converted.net_worth_cents).toBe(9875);
+      expect(converted.valuation_complete).toBe(true);
+      expect(converted.missing_conversions).toEqual([]);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("covers restored MCP domains through the shared dispatcher", () => {
     const ledger = tempLedger();
     try {
@@ -670,6 +745,60 @@ describe("app and package surface", () => {
       expect(full.liability_effect_cents).toBe(-7500);
       expect(full.available_cash_cents).toBe(406843);
       expect(full.available_cash_cents).not.toBe(base.available_cash_cents);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("keeps mixed-type account trees out of balance projections", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const assetParent = ledger.createAccount("Asset Parent", "asset");
+      const checking = ledger.createAccount("Checking", "asset", assetParent);
+      const dining = ledger.createAccount("Dining", "expense", assetParent);
+      const salary = ledger.createAccount("Salary", "income", assetParent);
+      ledger.createAnnotation("account", assetParent, "default_asset", usd);
+      ledger.createAnnotation("account", checking, "default_asset", usd);
+
+      ledger.recordTransaction("2026-06-01", 10000n, salary, checking, usd, "Pay", "posted");
+      ledger.recordTransaction("2026-06-02", 1000n, checking, dining, usd, "Dinner", "posted");
+      ledger.recordTransaction("2026-06-15", 5000n, salary, checking, usd, "Planned pay", "planned");
+
+      expect(ledger.balanceTree(assetParent, usd, null, "posted")).toBe(9000n);
+      expect((callTool("get_balance", { account_id: assetParent, asset_id: usd }, ledger) as any).balance_cents).toBe(9000);
+      expect((callTool("forecast", { account_id: assetParent, asset_id: usd, as_of: "2026-06-30" }, ledger) as any).projected_cents).toBe(14000);
+
+      const projection = callTool("cash_projection", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      expect(projection.asset_account_ids).toEqual([assetParent]);
+      expect(projection.gross_cash_cents).toBe(14000);
+
+      const monthEnd = callTool("project_month_end", { year: 2026, month: 6, account_ids: [checking], expected_inflows: [{ amount: 2 }], expected_outflows: [{ amount: 1 }], quote_asset_id: usd }, ledger) as any;
+      expect(monthEnd.asset_account_ids).toEqual([checking]);
+      expect(monthEnd.gross_cash_cents).toBe(14000);
+      expect(monthEnd.projected_month_end_cents).toBe(14100);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("rolls child category spending into parent budgets when requested", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const food = ledger.createAccount("Food", "expense");
+      const dining = ledger.createAccount("Dining", "expense", food);
+
+      ledger.recordTransaction("2026-06-02", 4200n, checking, dining, usd, "Dinner", "posted");
+      callTool("set_budget", { account: food, amount: 100, asset_id: usd, year: 2026, month: 6 }, ledger);
+
+      const exact = callTool("budget_status", { account: food, year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      expect(exact.budgets[0].spent_cents).toBe(0);
+
+      const rolled = callTool("budget_status", { account: food, year: 2026, month: 6, rollup: true, quote_asset_id: usd }, ledger) as any;
+      expect(rolled.budgets[0].spent_cents).toBe(4200);
+      expect(rolled.budgets[0].remaining_cents).toBe(5800);
     } finally {
       ledger.close();
     }
@@ -1319,6 +1448,9 @@ describe("app and package surface", () => {
     const spending = inputShapeFromDefinition(TOOL_DEFINITIONS.spending);
     expect(() => spending.month.parse(99)).toThrow();
     expect(spending.month.parse(12)).toBe(12);
+
+    const ageOfMoney = inputShapeFromDefinition(TOOL_DEFINITIONS.age_of_money);
+    expect(ageOfMoney.quote_asset_id.parse("USD")).toBe("USD");
 
     const createTransaction = inputShapeFromDefinition(TOOL_DEFINITIONS.create_transaction);
     expect(() => createTransaction.date.parse("today")).toThrow();

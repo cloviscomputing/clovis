@@ -75,7 +75,8 @@ export const TOOL_DEFINITIONS = {
   },
   "age_of_money": {
     parameters: [
-      ["days", "integer", { optional: true, defaultValue: 30 }]
+      ["days", "integer", { optional: true, defaultValue: 30 }],
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -181,6 +182,7 @@ export const TOOL_DEFINITIONS = {
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
       ["compact", "boolean", { optional: true, defaultValue: false }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
       ["hide_zero", "boolean", { optional: true, defaultValue: false }],
       ["quote_asset_id", "string"],
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
@@ -235,6 +237,7 @@ export const TOOL_DEFINITIONS = {
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
       ["compact", "boolean", { optional: true, defaultValue: false }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
       ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
@@ -878,6 +881,7 @@ export const TOOL_DEFINITIONS = {
       ["date", "string", { nullable: true, optional: true, defaultValue: null }],
       ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
       ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }

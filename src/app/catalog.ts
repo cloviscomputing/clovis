@@ -121,6 +121,40 @@ function transactionAsset(ledger: Ledger, fromAccountId: string, toAccountId: st
   return fromAsset;
 }
 
+function rootAccountIds(ledger: Ledger, types: string[]): string[] {
+  const accounts = ledger.listAccounts();
+  const byId = new Map(accounts.map((row) => [row.id, row]));
+  return accounts
+    .filter((row) => types.includes(row.account_type))
+    .filter((row) => !row.parent_id || byId.get(row.parent_id)?.account_type !== row.account_type)
+    .map((row) => row.id);
+}
+
+function nonOverlappingAccounts(ledger: Ledger, refs: string[], allowedTypes?: string[]): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    const accountId = account(ledger, ref);
+    const row = ledger.getAccount(accountId);
+    if (!row) throw new Error(`Account '${accountId}' not found`);
+    if (allowedTypes && !allowedTypes.includes(row.account_type)) {
+      throw new Error(`Account '${row.name}' must be ${allowedTypes.join(" or ")}`);
+    }
+    if (!seen.has(accountId)) {
+      ids.push(accountId);
+      seen.add(accountId);
+    }
+  }
+  return ids.filter((accountId) => {
+    const row = ledger.getAccount(accountId);
+    return !ids.some((otherId) => {
+      if (otherId === accountId) return false;
+      const other = ledger.getAccount(otherId);
+      return other?.account_type === row?.account_type && ledger.descendants(otherId).has(accountId);
+    });
+  });
+}
+
 function assetScale(ledger: Ledger, assetId?: string | null): number {
   return ledger.getAsset(assetId || "")?.scale ?? 2;
 }
@@ -194,6 +228,13 @@ function statuses(status?: string | null, includePending = false): Set<string> |
   if (status === "active") return new Set(["posted", "pending"]);
   if (status === "combined") return new Set(["posted", "pending", "planned"]);
   return new Set([status]);
+}
+
+function reportStatus(args: Args, fallback: string): string {
+  if (args.status != null && args.status !== "") return String(args.status);
+  if (args.include_pending === true) return "active";
+  if (args.include_pending === false) return "posted";
+  return fallback;
 }
 
 function iterTransactions(ledger: Ledger, args: { status?: string | null; includePending?: boolean; date_from?: string | null; date_to?: string | null } = {}): Journal[] {
@@ -732,7 +773,7 @@ const handlers: Record<ToolName, Handler> = {
   },
   balance_sheet: (ledger, args) => {
     unsupportedArguments({ branch: args.branch, account_ids: args.account_ids, entity_id: args.entity_id });
-    const status = args.status ?? "posted";
+    const status = reportStatus(args, "posted");
     const report = ledger.balanceSheet(args.date ?? null, reportAsset(ledger, args.quote_asset_id), status);
     if (args.hide_zero) {
       report.assets = (report.assets as Row[]).filter((row) => row.balance !== 0n);
@@ -743,7 +784,7 @@ const handlers: Record<ToolName, Handler> = {
   },
   net_worth: (ledger, args) => {
     unsupportedArguments({ branch: args.branch });
-    const status = args.status ?? "posted";
+    const status = reportStatus(args, "posted");
     return ledger.netWorthReport(args.date ?? "9999-12-31", reportAsset(ledger, args.quote_asset_id), status);
   },
   spending: (ledger, args) => {
@@ -753,7 +794,7 @@ const handlers: Record<ToolName, Handler> = {
   },
   cash_flow: (ledger, args) => {
     unsupportedArguments({ branch: args.branch });
-    const status = args.status ?? "posted";
+    const status = reportStatus(args, "posted");
     const report = ledger.cashFlow(Number(args.year), Number(args.month), reportAsset(ledger, args.quote_asset_id), status);
     return args.compact ? { year: report.year, month: report.month, operating_total: report.operating_total, investing_total: report.investing_total, financing_total: report.financing_total, net_change: report.net_change } : report;
   },
@@ -770,14 +811,24 @@ const handlers: Record<ToolName, Handler> = {
     unsupportedArguments({ branch: args.branch });
     return ledger.trialBalance(explicitAsset(ledger, args.asset_id, "asset_id"), args.status ? parseTxStatus(args.status) : "posted");
   },
-  financial_overview: (ledger, args) => ({ current_snapshot: handlers.balance_sheet(ledger, { quote_asset_id: args.quote_asset_id }), monthly_activity: handlers.income_statement(ledger, { year: args.year ?? new Date().getUTCFullYear(), month: args.month ?? new Date().getUTCMonth() + 1, quote_asset_id: args.quote_asset_id, status: args.status ?? "active" }), budget_position: handlers.budget_summary(ledger, args) }),
-  financial_picture: (ledger, args) => handlers.financial_overview(ledger, args),
+  financial_overview: (ledger, args) => {
+    const status = reportStatus(args, "active");
+    return {
+      current_snapshot: handlers.balance_sheet(ledger, { quote_asset_id: args.quote_asset_id, status }),
+      monthly_activity: handlers.income_statement(ledger, { year: args.year ?? new Date().getUTCFullYear(), month: args.month ?? new Date().getUTCMonth() + 1, quote_asset_id: args.quote_asset_id, status }),
+      budget_position: handlers.budget_summary(ledger, { ...args, status })
+    };
+  },
+  financial_picture: (ledger, args) => {
+    const status = reportStatus(args, "combined");
+    return handlers.financial_overview(ledger, { ...args, status });
+  },
   cash_projection: (ledger, args) => {
     const quote = reportAsset(ledger, args.quote_asset_id);
     const [periodStart, asOf] = monthBounds(args.year, args.month);
     const plannedAfter = previousDate(periodStart);
-    const assetAccounts = args.asset_account_ids ?? ledger.listAccounts().filter((row) => row.account_type === "asset").map((row) => row.id);
-    const liabilityAccounts = args.liability_account_ids ?? [];
+    const assetAccounts = nonOverlappingAccounts(ledger, args.asset_account_ids ?? rootAccountIds(ledger, ["asset"]), ["asset"]);
+    const liabilityAccounts = nonOverlappingAccounts(ledger, args.liability_account_ids ?? [], ["liability"]);
     const missing: Row[] = [];
 
     const quoted = (accountId: string, status: TxStatus | string, dateFrom?: string | null): bigint => {
@@ -861,13 +912,21 @@ const handlers: Record<ToolName, Handler> = {
     const spending = new Map((spendingRows(ledger, year, month, args.status ?? "posted", quote) as Row[]).map((row) => [row.account_id, row]));
     const missing: Row[] = [];
     const effective = effectiveBudgetRows(ledger, acct, year, month);
+    const spentForBudget = (accountId: string): bigint => {
+      if (!args.rollup) return BigInt(spending.get(accountId)?.amount_cents ?? 0);
+      const budgetAccount = ledger.getAccount(accountId);
+      if (!budgetAccount) return 0n;
+      return [...ledger.descendants(accountId)]
+        .filter((id) => ledger.getAccount(id)?.account_type === budgetAccount.account_type)
+        .reduce((sum, id) => sum + BigInt(spending.get(id)?.amount_cents ?? 0), 0n);
+    };
     const rows = effective.rows.flatMap((budget) => {
       const [budgeted, error] = ledger.tryConvertQuantity(BigInt(budget.quantity), String(budget.asset_id), quote);
       if (budgeted == null) {
         missing.push({ account_id: budget.account_id, asset_id: budget.asset_id, quote_asset_id: quote, quantity: budget.quantity, error });
         return [];
       }
-      const spent = BigInt(spending.get(budget.account_id)?.amount_cents ?? 0);
+      const spent = spentForBudget(String(budget.account_id));
       return [{ account_id: budget.account_id, asset_id: quote, source_budget_id: budget.id, budgeted_cents: budgeted, spent_cents: spent, remaining_cents: budgeted - spent, percent_used: budgeted ? Number(spent) / Number(budgeted) * 100 : 0 }];
     });
     return {
@@ -1213,7 +1272,7 @@ const handlers: Record<ToolName, Handler> = {
     return { affected_accounts: rows, total_accounts: rows.length };
   },
   project_month_end: (ledger, args) => {
-    const projection = handlers.cash_projection(ledger, args) as Row;
+    const projection = handlers.cash_projection(ledger, { ...args, asset_account_ids: args.asset_account_ids ?? args.account_ids }) as Row;
     const quote = reportAsset(ledger, args.quote_asset_id);
     const inflows = [...(args.expected_inflows ?? []), ...(args.expected_paychecks ?? [])].reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
     const outflows = (args.expected_outflows ?? []).reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
@@ -1222,9 +1281,22 @@ const handlers: Record<ToolName, Handler> = {
   project_balances: (ledger, args) => {
     unsupportedArguments({ branch: args.branch });
     const quote = reportAsset(ledger, args.quote_asset_id);
-    const accounts = args.account_ids ? args.account_ids.map((ref: string) => account(ledger, ref)) : ledger.listAccounts().filter((row) => ["asset", "liability"].includes(row.account_type)).map((row) => row.id);
-    const rows = accounts.map((accountId: string) => ({ account_id: accountId, balance_cents: ledger.balanceTree(accountId, quote, args.through, null) }));
-    return { through: args.through, accounts: rows, net_worth_cents: rows.reduce((sum: bigint, row: Row) => sum + BigInt(row.balance_cents), 0n), goals: args.include_goals ? handlers.list_goals(ledger, {}) : undefined };
+    const accounts = nonOverlappingAccounts(ledger, args.account_ids ?? rootAccountIds(ledger, ["asset", "liability"]));
+    const missing: Row[] = [];
+    const rows = accounts.map((accountId: string) => {
+      const result = ledger.quotedBalanceTree(accountId, quote, args.through, null);
+      missing.push(...result.missing);
+      return { account_id: accountId, balance_cents: result.total };
+    });
+    return {
+      through: args.through,
+      accounts: rows,
+      net_worth_cents: rows.reduce((sum: bigint, row: Row) => sum + BigInt(row.balance_cents), 0n),
+      quote_asset_id: quote,
+      valuation_complete: missing.length === 0,
+      missing_conversions: missing,
+      goals: args.include_goals ? handlers.list_goals(ledger, {}) : undefined
+    };
   },
 
   create_branch: (ledger, args) => {

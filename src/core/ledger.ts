@@ -1020,8 +1020,13 @@ export class Ledger {
   }
 
   balanceTree(accountId: string, assetId: string, asOf?: string | null, status: TxStatus | string | null = "posted", dateFrom?: string | null): bigint {
+    const root = this.getAccount(accountId);
+    if (!root) throw new Error(`Account ${accountId} not found`);
     let total = 0n;
-    for (const id of this.descendants(accountId)) total += this.balance(id, assetId, asOf, status, dateFrom);
+    for (const id of this.descendants(accountId)) {
+      const account = this.getAccount(id);
+      if (account?.account_type === root.account_type) total += this.balance(id, assetId, asOf, status, dateFrom);
+    }
     return total;
   }
 
@@ -1344,6 +1349,7 @@ export class Ledger {
     const [dateFrom, dateTo] = monthBounds(year, month);
     const accounts = new Map(this.listAccounts().map((a) => [a.id, a]));
     const scale = this.getAsset(quoteAssetId)?.scale ?? 2;
+    const missing: Row[] = [];
     const totals = {
       income: new Map<string, bigint>(),
       expense: new Map<string, bigint>(),
@@ -1353,8 +1359,13 @@ export class Ledger {
       for (const entry of this.getEntries(tx.id)) {
         const account = accounts.get(entry.account_id);
         if (account?.account_type === "income" || account?.account_type === "expense" || account?.account_type === "liability") {
+          const [converted, error] = this.tryConvertQuantity(entry.quantity, entry.asset_id, quoteAssetId, tx.date);
+          if (converted == null) {
+            missing.push({ tx_id: tx.id, account_id: entry.account_id, asset_id: entry.asset_id, quote_asset_id: quoteAssetId, quantity: entry.quantity, error });
+            continue;
+          }
           const bucket = totals[account.account_type];
-          bucket.set(account.id, (bucket.get(account.id) ?? 0n) + entry.quantity);
+          bucket.set(account.id, (bucket.get(account.id) ?? 0n) + converted);
         }
       }
     }
@@ -1399,8 +1410,8 @@ export class Ledger {
       financing_total: financingTotal,
       net_change: -operatingTotal - financingTotal,
       quote_asset_id: quoteAssetId,
-      valuation_complete: true,
-      missing_conversions: []
+      valuation_complete: missing.length === 0,
+      missing_conversions: missing
     };
   }
 
