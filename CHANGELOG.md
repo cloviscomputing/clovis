@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.9
+
+SQLite oracle and workflow audit release.
+
+- Add raw SQLite oracle coverage for every read-only MCP tool and generic CLI parity for those tools.
+- Add synthetic CFO workflow regression coverage for statement processing, reconciliation, pending card imports, pending refresh, and batch commit/discard.
+- Add exhaustive write-capable tool coverage across direct app calls, CLI `clovis tool`, and MCP stdio, including explicit write-mode coverage for dry-run mutators.
+- Fix report projection bugs in balance sheet, net worth, cash flow, financial picture, budget status, cash projection, project balances, project month end, and holdings.
+- Fix statement import/reconciliation bugs around duplicate rows, posted-vs-pending expected balances, non-cent assets, and amount conventions.
+- Fix pending card expense direction so pending card charges reduce available cash.
+- Fix transfer matching so valid pending transfer pairs are not missed due to random transaction ID ordering.
+- Fix MCP signature/input validation drift for `apply_rollover`, `reconcile_statement`, and inline `import_ledger` data.
+
 ## 0.1.8
 
 Capability gate removal release.
