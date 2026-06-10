@@ -427,6 +427,21 @@ describe("MCP contract matrix", () => {
     assertCaseResult(name, row, ctx, callTool(name, args, ctx.ledger), before);
   });
 
+  it("rejects invalid MCP tool arguments before dispatch", async () => {
+    const ctx = createContext();
+    await withMcpClient(ctx, async (client) => {
+      for (const [name, args] of [
+        ["list_transactions", { limit: 1, unexpected: "x" }],
+        ["account_balances", { as_of: "2026-99-99" }]
+      ] as const) {
+        const result = await client.callTool({ name, arguments: args });
+        const content = result.content as Array<{ type: string; text?: string }>;
+        expect((result as any).isError).toBe(true);
+        expect(content[0]?.text).toMatch(/Invalid arguments|Unrecognized key|valid YYYY-MM-DD/);
+      }
+    });
+  });
+
   it.each(WRITE_TOOL_NAMES)("%s write-capable tool runs through the CLI surface", (name) => {
     const row = CASES[name];
     const { ctx, args, before } = prepareCase(name, row);

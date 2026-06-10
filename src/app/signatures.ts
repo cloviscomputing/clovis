@@ -194,7 +194,8 @@ export const TOOL_DEFINITIONS = {
   "budget_rollover_preview": {
     parameters: [
       ["year", "integer"],
-      ["month", "integer"]
+      ["month", "integer"],
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -588,7 +589,10 @@ export const TOOL_DEFINITIONS = {
   },
   "get_balance": {
     parameters: [
-      ["account_id", "string"]
+      ["account_id", "string"],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { optional: true, defaultValue: "posted" }]
     ],
     returns: { type: "object" }
   },

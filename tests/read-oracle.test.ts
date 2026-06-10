@@ -361,7 +361,14 @@ const READ_CASES: ReadCase[] = [
   {
     name: "budget_rollover_preview",
     args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }),
-    oracle: (result) => expect(result.total_rollover_cents).toBeGreaterThan(0)
+    oracle: (result) => {
+      if (result.valuation_complete === false) {
+        expect(result.total_rollover_cents).toBe(0);
+        expect(result.missing_conversions.length).toBeGreaterThan(0);
+      } else {
+        expect(result.total_rollover_cents).toBeGreaterThan(0);
+      }
+    }
   },
   {
     name: "budget_status",

@@ -12,6 +12,12 @@ const MAX_STRING_LENGTH = 4096;
 const MAX_DATA_STRING_LENGTH = 10 * 1024 * 1024;
 const MAX_ARRAY_LENGTH = 1000;
 
+function isValidDateString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 function isMonthParameter(name: string): boolean {
   return name === "month" || name.endsWith("_month");
 }
@@ -26,7 +32,7 @@ function schemaForParameter(parameter: ToolParameterDefinition): ZodTypeAny {
   switch (parameter[1]) {
     case "string":
       if (name === "data") schema = z.string().max(MAX_DATA_STRING_LENGTH);
-      else if (isDateParameter(name)) schema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, `${name} must be YYYY-MM-DD`);
+      else if (isDateParameter(name)) schema = z.string().refine(isValidDateString, `${name} must be a valid YYYY-MM-DD date`);
       else schema = z.string().max(MAX_STRING_LENGTH);
       break;
     case "number":
@@ -70,12 +76,22 @@ export function inputShapeFromDefinition(definition: ToolDefinition): Shape {
   return shape;
 }
 
+export function inputSchemaFromDefinition(definition: ToolDefinition): z.ZodObject<Shape> {
+  return z.object(inputShapeFromDefinition(definition)).strict();
+}
+
+export function parseToolInput(name: string, input: Record<string, unknown> = {}): Record<string, unknown> {
+  const definition = TOOL_DEFINITIONS[name as keyof typeof TOOL_DEFINITIONS];
+  if (!definition) throw new Error(`Unknown tool: ${name}`);
+  return inputSchemaFromDefinition(definition).parse(input);
+}
+
 export function createClovisMcpServer(): McpServer {
   const server = new McpServer({ name: "clovis", version: VERSION });
   for (const [name, definition] of Object.entries(TOOL_DEFINITIONS)) {
-    (server as any).tool(
+    (server as any).registerTool(
       name,
-      inputShapeFromDefinition(definition),
+      { inputSchema: inputSchemaFromDefinition(definition) },
       async (input: Record<string, unknown>) => {
         const result = callTool(name, input ?? {});
         return {

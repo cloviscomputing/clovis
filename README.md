@@ -305,6 +305,9 @@ Support tables keep workflow concerns out of the journal core:
 - `lots`: investment lots and cost basis.
 - `meta`: schema version and database metadata.
 
+For the complete SQLite schema, persistence flow, and design rationale, see
+[docs/sqlite-schema.md](docs/sqlite-schema.md).
+
 ## License
 
 Clovis is licensed under AGPL-3.0-or-later. See [LICENSE](LICENSE).

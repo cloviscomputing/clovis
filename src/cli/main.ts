@@ -8,6 +8,7 @@ import { callTool, TOOL_NAMES } from "../app/catalog.js";
 import { stringifyPublic, publicize } from "../app/json.js";
 import { TOOL_SIGNATURES } from "../app/signatures.js";
 import type { Ledger } from "../core/ledger.js";
+import { parseToolInput } from "../mcp/tools.js";
 import { VERSION } from "../version.js";
 
 type GlobalOptions = { format?: "json" | "table"; db?: string };
@@ -30,15 +31,15 @@ function notes(lines: string[]): string {
 function withLedger(program: Command, fn: (ledger: Ledger, format: "json" | "table") => unknown): void {
   const opts = program.optsWithGlobals<GlobalOptions>();
   const format = opts.format ?? (process.stdout.isTTY ? "table" : "json");
-  const ledger = openLedger(opts.db);
+  let ledger: Ledger | null = null;
   try {
+    ledger = openLedger(opts.db);
     const result = fn(ledger, format);
     output(result, format);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    outputError(error, format);
   } finally {
-    ledger.close();
+    ledger?.close();
   }
 }
 
@@ -62,14 +63,20 @@ function output(value: unknown, format: "json" | "table"): void {
   console.log(String(json));
 }
 
+function outputError(error: unknown, format: "json" | "table"): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (format === "json") console.log(stringifyPublic({ ok: false, error: message }));
+  else console.error(message);
+  process.exitCode = 1;
+}
+
 function withOutput(program: Command, fn: (format: "json" | "table") => unknown): void {
   const opts = program.optsWithGlobals<GlobalOptions>();
   const format = opts.format ?? (process.stdout.isTTY ? "table" : "json");
   try {
     output(fn(format), format);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    outputError(error, format);
   }
 }
 
@@ -145,7 +152,7 @@ program.command("tool")
     ])
   ].join("\n"))
   .action((name: string, opts: ToolOptions) => withLedger(program, (ledger) => {
-    const args = parseToolArgs(opts);
+    const args = parseToolInput(name, parseToolArgs(opts));
     return callTool(name, args, ledger);
   }));
 
@@ -164,7 +171,7 @@ account.command("add")
   .option("--parent <id>", "Parent account id")
   .option("--color <hex>", "Account color", "#888888")
   .addHelpText("after", examples([
-    "clovis account add --name \"RBC Chequing\" --type asset --code 1204",
+    "clovis account add --name \"Operating Cash\" --type asset --code 1000",
     "clovis account add --name \"Dining Out\" --type expense --color '#7c3aed'"
   ]))
   .action((opts) => withLedger(program, (ledger) => callTool("create_account", { name: opts.name, type: opts.type, code: opts.code, parent_id: opts.parent, color_hex: opts.color }, ledger)));

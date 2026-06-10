@@ -1900,6 +1900,11 @@ export class Ledger {
       return "";
     };
     const tagValue = (tag: any): string => String(tag?.value ?? tag?.val ?? "");
+    const mappedTxTagValue = (key: string, value: string): string => {
+      if (key === "import_batch") return sourceMap.get(value) ?? value;
+      if (key === "recategorize_from" || key === "recategorize_to") return accountMap.get(value) ?? value;
+      return value;
+    };
 
     assets.forEach((asset, index) => {
       const assetId = requireId("assets", asset, index);
@@ -2313,7 +2318,8 @@ export class Ledger {
           );
         });
         for (const tag of tx.tags ?? []) {
-          this.createAnnotation(tag.entity_type ?? "tx", txId, tag.key, tag.val ?? tag.value ?? "");
+          const key = String(tag.key ?? "");
+          this.createAnnotation(tag.entity_type ?? "tx", txId, key, mappedTxTagValue(key, tagValue(tag)));
         }
         result.inserted.transactions += 1;
       }
