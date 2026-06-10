@@ -660,6 +660,10 @@ describe("app and package surface", () => {
       expect(base.liability_effect_cents).toBe(-5000);
       expect(base.available_cash_cents).toBe(95000);
 
+      const noLiability = callTool("cash_projection", { year: 2026, month: 6, asset_account_ids: [checking], include_pending: false, include_planned: false, quote_asset_id: usd }, ledger) as any;
+      expect(noLiability.liability_effect_cents).toBe(0);
+      expect(noLiability.available_cash_cents).toBe(100000);
+
       const full = callTool("cash_projection", { year: 2026, month: 6, asset_account_ids: [checking], liability_account_ids: [visa], include_pending: true, include_planned: true, quote_asset_id: usd }, ledger) as any;
       expect(full.pending_cash_cents).toBe(-10000);
       expect(full.planned_cash_cents).toBe(324343);

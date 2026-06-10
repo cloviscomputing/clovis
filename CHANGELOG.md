@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7
+
+Cash projection compatibility release.
+
+- Keep liability subtraction explicit: `cash_projection` subtracts `liability_account_ids` when passed, but does not default to every liability account.
+
 ## 0.1.6
 
 CFO projection correctness release.

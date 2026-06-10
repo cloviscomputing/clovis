@@ -820,7 +820,7 @@ const handlers: Record<ToolName, Handler> = {
     const [periodStart, asOf] = monthBounds(args.year, args.month);
     const plannedAfter = previousDate(periodStart);
     const assetAccounts = args.asset_account_ids ?? ledger.listAccounts().filter((row) => row.account_type === "asset").map((row) => row.id);
-    const liabilityAccounts = args.liability_account_ids ?? ledger.listAccounts().filter((row) => row.account_type === "liability").map((row) => row.id);
+    const liabilityAccounts = args.liability_account_ids ?? [];
     const missing: Row[] = [];
 
     const quoted = (accountId: string, status: TxStatus | string, dateFrom?: string | null): bigint => {
