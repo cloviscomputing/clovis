@@ -1,1087 +1,1189 @@
-# Clovis SQLite Schema And Persistence Internals
+# Clovis SQLite Schema, Explained Simply
 
-This document describes the SQLite database format created by the Clovis ledger
-engine. It is technical on purpose: the database is one of the public surfaces
-of the package while Clovis is in the `0.x` line.
+This is the Feynman-style version of the Clovis SQLite schema.
+
+The goal is not to memorize table definitions. The goal is to understand the
+shape of the data so the raw database stops looking mysterious.
+
+The one-sentence model:
+
+> Clovis stores accounting facts, not balances. A balance is calculated later by
+> adding up the facts.
 
 Source of truth:
 
 - Schema constants: [`src/core/schema.ts`](../src/core/schema.ts)
 - Ledger storage engine: [`src/core/ledger.ts`](../src/core/ledger.ts)
-- Money scaling helpers: [`src/core/money.ts`](../src/core/money.ts)
+- Money helpers: [`src/core/money.ts`](../src/core/money.ts)
 - Accounting sign helpers: [`src/core/accounting.ts`](../src/core/accounting.ts)
-- CLI/MCP app layer: [`src/app/catalog.ts`](../src/app/catalog.ts)
+- CLI/MCP tool layer: [`src/app/catalog.ts`](../src/app/catalog.ts)
 
-Current constants:
+Current database format:
 
 ```ts
 export const DEFAULT_BOOK_ID = "book_default";
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 ```
 
-Fresh databases are created directly at schema version 1. There is no migration
-runner in this package version. `Ledger.initialize()` runs the full `DDL`,
-inserts `meta('schema_version')`, and inserts the default actual book if it does
-not already exist.
+Fresh databases are created directly at schema version 2. Opening a ledger also
+migrates schema version 1 files to version 2, records the migration in
+`migration_history`, and creates the default `Actual` book if it is missing.
 
-## Runtime Model
+## Start Here
 
-Clovis uses Node's built-in `node:sqlite` module:
+Imagine a paper bookkeeping notebook.
 
-```ts
-this.db = new DatabaseSync(this.path, { readBigInts: true });
-this.db.exec("PRAGMA foreign_keys = ON");
-this.initialize();
+Every transaction gets one header:
+
+```text
+2026-06-10  Lunch  posted
 ```
 
-The important consequences are:
+Then the transaction gets lines:
 
-- SQLite is the durable local store. A ledger is a single database file.
-- Foreign keys are enabled on every `Ledger` connection. Without this pragma,
-  SQLite accepts foreign key declarations but does not enforce them.
-- `readBigInts: true` means SQLite `INTEGER` values are read as JavaScript
-  `bigint`. This is necessary because money, share quantities, and exchange
-  rates are stored as integers and may exceed JavaScript's safe `number` range.
-- Multi-row writes use explicit `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` in
-  the engine where atomicity matters.
-- The schema uses no triggers and no views. Accounting invariants are enforced
-  by `Ledger` before writes and audited by `integrityCheck()`.
+```text
+Checking     CAD   -1200
+Dining Out   CAD   +1200
+```
 
-CLI and MCP open the same `Ledger` class. The CLI defaults to
-`~/.clovis/clovis.db`; MCP requires `CLOVIS_DB` so an agent host does not
-accidentally open a developer's personal default ledger.
+That is the database.
 
-## Object Inventory
+The header is a row in `journals`.
 
-The schema has fourteen application tables:
+The lines are rows in `journal_lines`.
 
-| Table | Role |
+The account names come from `accounts`.
+
+The currency/unit comes from `assets`.
+
+The transaction is valid because the lines add to zero:
+
+```text
+-1200 + 1200 = 0
+```
+
+Clovis does not store "Checking has $500" as a permanent balance row. It stores
+every fact that changed Checking. When you ask for the Checking balance, Clovis
+sums the relevant finalized `journal_lines`.
+
+## The Tiny Core
+
+If you understand this diagram, you understand the heart of the database:
+
+```text
+journals
+  |
+  | one transaction has many lines
+  v
+journal_lines
+  |              |
+  | belongs to   | measured in
+  v              v
+accounts       assets
+```
+
+In plain English:
+
+| Table | What it means |
 | --- | --- |
-| `meta` | Key/value database metadata, currently the schema version. |
-| `books` | Actual and scenario book identities. |
-| `assets` | Currencies, commodities, custom units, and securities. |
-| `accounts` | Chart of accounts for a book. |
-| `sources` | Import batches and other external source metadata. |
-| `journals` | Transaction headers. |
-| `journal_lines` | Balanced transaction legs. |
-| `prices` | Time-stamped exchange/conversion rates. |
-| `annotations` | Polymorphic tags and flexible metadata. |
-| `rules` | Categorization/matching rules. |
-| `targets` | Budgets and savings goals. |
-| `recurrences` | Scheduled transactions. |
-| `period_closes` | Closed accounting period checkpoints. |
-| `lots` | Investment lot and cost-basis records. |
+| `journals` | The transaction header: date, description, status. |
+| `journal_lines` | The legs of the transaction: account, asset, quantity. |
+| `accounts` | The buckets: Checking, Credit Card, Salary, Groceries. |
+| `assets` | The units: CAD, USD, MSFT shares, custom units. |
 
-There are seven explicit indexes:
+Everything else supports that center.
 
-| Index | Definition | Purpose |
-| --- | --- | --- |
-| `idx_journals_book_date` | `journals(book_id, date, id)` | Chronological reads within a book. |
-| `idx_journals_status` | `journals(status, date)` | Status-filtered transaction lists and reports. |
-| `idx_lines_journal` | `journal_lines(journal_id)` | Load all lines for a transaction. |
-| `idx_lines_account_asset` | `journal_lines(account_id, asset_id)` | Account/asset balance and register scans. |
-| `idx_prices_pair_time` | `prices(book_id, asset_id, quote_asset_id, time)` | Latest price lookup by pair and time. |
-| `idx_annotations_entity` | `annotations(entity_type, entity_id, key)` | Tag lookup by entity and key. |
-| `idx_rules_type_status` | `rules(type, status, priority)` | Active rule evaluation in priority order. |
+## The Whole ERD
 
-There are also two partial unique indexes on `targets`, documented in the
-`targets` section.
-
-## Relationship Map
-
-The core accounting chain is:
+This is the useful mental picture:
 
 ```text
 books
-  |-- accounts
-  |     `-- journal_lines -- journals -- sources
-  |              |
-  |              `-- assets
+  |-- accounts -------.
+  |-- journals --.    |
+  |              v    v
+  |         journal_lines --- assets
   |
-  |-- targets
-  |-- recurrences -- accounts
+  |-- sources ------- journals
+  |-- prices -------- assets
+  |-- targets ------- accounts + assets
+  |-- recurrences --- accounts + assets
   |-- period_closes
-  |-- lots -- assets
-  `-- prices -- assets
+  `-- lots ---------- accounts + assets + journals
 
-annotations(entity_type, entity_id)
-rules -- accounts
-meta
+annotations can point at many entity types
+rules point at accounts
+meta stands alone
 ```
 
-`assets` are global rather than book-scoped. Most other business rows carry a
-`book_id`. The current engine almost always writes to `DEFAULT_BOOK_ID`; scenario
-books exist as named book records and branch tags, but report APIs explicitly
-reject branch filters rather than pretending there is a separate scenario data
-copy.
+Same idea as a Mermaid ERD:
 
-## Type And Value Conventions
+```mermaid
+erDiagram
+  BOOKS ||--o{ ACCOUNTS : owns
+  BOOKS ||--o{ SOURCES : owns
+  BOOKS ||--o{ JOURNALS : owns
+  BOOKS ||--o{ TARGETS : owns
+  BOOKS ||--o{ RECURRENCES : owns
+  BOOKS ||--o{ PERIOD_CLOSES : owns
+  BOOKS ||--o{ LOTS : owns
+  BOOKS ||--o{ PRICES : owns
 
-SQLite has a simple type system, so Clovis relies on explicit conventions.
+  ACCOUNTS ||--o{ ACCOUNTS : parent_of
+  ACCOUNTS ||--o{ JOURNAL_LINES : receives
+  JOURNALS ||--o{ JOURNAL_LINES : contains
+  SOURCES ||--o{ JOURNALS : produced
+  ASSETS ||--o{ JOURNAL_LINES : denominates
+  ASSETS ||--o{ PRICES : priced_asset
+  ASSETS ||--o{ PRICES : quote_asset
+  ACCOUNTS ||--o{ TARGETS : planned_for
+  ASSETS ||--o{ TARGETS : denominates
+  ACCOUNTS ||--o{ RECURRENCES : from_account
+  ACCOUNTS ||--o{ RECURRENCES : to_account
+  ASSETS ||--o{ RECURRENCES : denominates
+  ACCOUNTS ||--o{ LOTS : holds
+  ASSETS ||--o{ LOTS : held_asset
+  JOURNALS ||--o{ LOTS : opened_or_closed_by
+  ACCOUNTS ||--o{ RULES : categorizes_to
+```
 
-### Identifiers
+The schema has fifteen application tables:
 
-Primary keys are `TEXT`. The engine generates IDs by prefixing a shortened UUID:
+| Family | Tables | Job |
+| --- | --- | --- |
+| Identity | `meta`, `migration_history`, `books` | Say what database this is, how it was upgraded, and which book rows belong to. |
+| Accounting core | `assets`, `accounts`, `journals`, `journal_lines` | Store durable accounting facts. |
+| Workflow memory | `sources`, `annotations`, `rules` | Remember imports, tags, and categorization rules. |
+| Planning and control | `targets`, `recurrences`, `period_closes` | Store budgets, goals, schedules, and closed periods. |
+| Valuation and investments | `prices`, `lots` | Convert assets and track investment cost basis. |
+
+## The Most Important Rule
+
+Every transaction must balance per asset.
+
+That means this is valid:
 
 ```text
-asset_...
-acct_...
-batch_...
-source_...
-tx_...
-line_...
-price_...
-ann_...
-rule_...
-budget_...
-goal_...
-sched_...
-period_...
-lot_...
+Checking     CAD   -1200
+Dining Out   CAD   +1200
 ```
 
-The prefix is operationally useful when reading raw rows. It is not a foreign
-key target by itself; the actual constraints use the full ID columns.
+CAD sums to zero.
 
-### Dates And Times
+This is also valid:
 
-Dates are stored as `TEXT`.
+```text
+Checking      CAD   -10000
+FX Clearing   CAD   +10000
+FX Clearing   USD   -7300
+Brokerage     USD   +7300
+```
 
-- Transaction dates, recurrence dates, target dates, lot dates, and period close
-  dates are `YYYY-MM-DD`.
-- `created_at` and `posted_at` values are ISO timestamps such as
-  `2026-06-10T14:23:11Z`.
-- SQLite does not check date formats. The engine's `dateOnly()` and app
-  validation functions check `YYYY-MM-DD` before writes.
+CAD sums to zero. USD sums to zero.
 
-The format is lexicographically sortable, which is why plain `ORDER BY date`
-works for chronological reads.
+This is not valid:
 
-### Money, Shares, And Quantities
+```text
+Checking     CAD   -1200
+Dining Out   CAD   +1100
+```
 
-All durable quantities are integers. A decimal value is converted to atomic
-units using the related asset's `scale`.
+CAD sums to `-100`, so something disappeared. Clovis rejects that before it is
+written.
+
+SQLite enforces foreign keys, simple checks, and finalization triggers. The
+TypeScript engine enforces the same rules before it writes, so normal API calls
+get clear errors before SQLite has to reject anything.
+
+## Why Money Is Stored As Integers
+
+SQLite does not have a true fixed-precision money type.
+
+So Clovis does not store `12.34` as a floating point number. It stores `1234`.
+
+The asset tells Clovis how many decimal places to use:
+
+| Asset | Scale | Human value | Stored value |
+| --- | ---: | ---: | ---: |
+| CAD | `2` | `12.34` | `1234` |
+| JPY | `0` | `500` | `500` |
+| MSFT shares | `8` | `1.25` | `125000000` |
+
+This is why the database can add money exactly. No floating point drift. No
+rounding surprise when summing many rows.
+
+## Table Tour
+
+This section walks through every table in the schema.
+
+The pattern is:
+
+- what the table is
+- how to think about it
+- what it connects to
+- the important columns
+
+The exact SQL is at the bottom in [Full Canonical DDL](#full-canonical-ddl).
+
+## `meta`
+
+Think of `meta` as a label stuck to the database file.
+
+It stores tiny database-level facts.
+
+Current important row:
+
+```text
+key = schema_version
+value = 2
+```
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `key` | Metadata name. Primary key. |
+| `value` | Metadata value, stored as text. |
+
+Why it exists:
+
+The code can open a database and ask, "What format is this file?" Right now the
+answer is schema version 2.
+
+## `migration_history`
+
+Think of `migration_history` as the upgrade receipt.
+
+When Clovis opens an older database and changes its shape, it records which
+migration ran and when.
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `version` | Schema version that was applied. Primary key. |
+| `name` | Short migration name. |
+| `applied_at` | Timestamp when the migration ran. |
+
+Why it exists:
+
+`meta.schema_version` says where the file is now. `migration_history` says how
+it got there. That is useful when debugging old local ledgers years later.
+
+## `books`
+
+Think of a book as a ledger container.
+
+The default book is:
+
+```text
+id = book_default
+name = Actual
+type = actual
+```
+
+Most real data belongs to this default book.
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Book ID. |
+| `name` | Human name. Unique. |
+| `type` | Either `actual` or `scenario`. |
+| `parent_id` | Optional parent book. |
+| `created_at` | Creation timestamp. |
+| `closed_at` | Scenario close/discard timestamp. |
+
+Connects to:
+
+- `accounts`
+- `sources`
+- `journals`
+- `prices`
+- `annotations`
+- `rules`
+- `targets`
+- `recurrences`
+- `period_closes`
+- `lots`
+
+Why it exists:
+
+The default book is the real ledger. A scenario book is a copied ledger used for
+what-if work.
+
+When Clovis creates a scenario, it clones the current book into a new book:
+
+- accounts, transactions, sources, prices, budgets, goals, schedules, closes,
+  lots, rules, and annotations get new IDs in the scenario book
+- assets stay global, because `USD` or `MSFT` means the same unit everywhere
+- later writes to the scenario do not change the default book
+
+That is why nearly every table has `book_id`.
+
+## `assets`
+
+Assets are the units used by transactions.
 
 Examples:
 
-| Asset scale | Human amount | Stored integer |
-| --- | ---: | ---: |
-| CAD scale `2` | `12.34` | `1234` |
-| JPY scale `0` | `500` | `500` |
-| MSFT scale `8` | `1.25` shares | `125000000` |
+```text
+CAD
+USD
+JPY
+MSFT
+```
 
-`toAtomicUnits(value, scale)` parses decimal text/number input, pads or rounds
-half-up at the asset scale, and returns `bigint`. `fromAtomicUnits(quantity,
-scale)` renders a stored integer back to a decimal string.
+An asset is not always money. A stock share is also an asset. A custom unit can
+also be an asset.
 
-The reason this design matters: floating point decimals are not stable enough
-for a ledger. Storing atomic integers makes sums exact, makes balance checks
-exact, and keeps all SQL aggregation deterministic.
+Columns:
 
-### Sign Convention
+| Column | Meaning |
+| --- | --- |
+| `id` | Asset ID. |
+| `symbol` | Unique uppercase symbol, like `CAD` or `MSFT`. |
+| `type` | `currency`, `commodity`, `custom`, or `security`. |
+| `scale` | Decimal places used for integer storage. |
+| `name` | Human name. |
 
-`journal_lines.quantity` is signed. The engine treats positive values as an
-increase in that account's raw ledger balance and negative values as a decrease.
+Connects to:
 
-Accounting presentation is separate:
+- `journal_lines.asset_id`
+- `prices.asset_id`
+- `prices.quote_asset_id`
+- `targets.asset_id`
+- `recurrences.asset_id`
+- `lots.asset_id`
+- `lots.cost_asset_id`
 
-- Asset and expense accounts have normal debit balances.
-- Liability, equity, and income accounts have normal credit balances.
-- `normalAmount(accountType, raw)` flips credit-normal accounts for reports.
+Why it exists:
 
-This is why storage can stay simple while reports still show proper accounting
-debit/credit semantics.
+Clovis refuses to guess a global currency. Every amount is measured in an asset.
+That is what lets one ledger hold CAD, USD, securities, and custom units without
+mixing them up.
 
-## Table Specifications
+## `accounts`
 
-### `meta`
+Accounts are the buckets.
 
-Purpose: database-level metadata.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `key` | `TEXT` | `PRIMARY KEY` | Metadata key. |
-| `value` | `TEXT` | `NOT NULL` | Metadata value. |
-
-Current row:
+Examples:
 
 ```text
-key = 'schema_version'
-value = '1'
+Checking
+Savings
+Credit Card
+Salary
+Groceries
+Dining Out
+Opening Balances
 ```
 
-`value` is text even when it represents a number so future metadata can stay in
-one small key/value table.
+Columns:
 
-### `books`
+| Column | Meaning |
+| --- | --- |
+| `id` | Account ID. |
+| `book_id` | Owning book. |
+| `name` | Account name, unique inside the book. |
+| `type` | `asset`, `liability`, `equity`, `income`, or `expense`. |
+| `parent_id` | Optional parent account. |
+| `default_asset_id` | Optional default asset/currency for tools that need an asset. |
+| `code` | Optional chart-of-accounts code. |
+| `color_hex` | Display color. |
+| `status` | Lifecycle marker, default `active`. |
 
-Purpose: identify the actual ledger and scenario/branch records.
+Connects to:
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Book ID. Default actual book is `book_default`. |
-| `name` | `TEXT` | `NOT NULL UNIQUE` | Human name. Default actual book is `Actual`. |
-| `type` | `TEXT` | `NOT NULL CHECK(type IN ('actual', 'scenario'))` | Book kind. |
-| `parent_id` | `TEXT` | `REFERENCES books(id)` | Parent book for scenarios. |
-| `created_at` | `TEXT` | `NOT NULL` | Creation timestamp. |
-| `closed_at` | `TEXT` | nullable | Scenario discard/close timestamp. |
+- `journal_lines.account_id`
+- `targets.account_id`
+- `recurrences.from_account_id`
+- `recurrences.to_account_id`
+- `rules.account_id`
+- `lots.account_id`
 
-Initialization inserts:
+Why it exists:
+
+Every line needs to say which bucket changed.
+
+Account type matters because it tells reports how to present the value:
+
+| Type | Normal side | Statement |
+| --- | --- | --- |
+| `asset` | debit | balance sheet |
+| `expense` | debit | income statement |
+| `liability` | credit | balance sheet |
+| `equity` | credit | balance sheet |
+| `income` | credit | income statement |
+
+Default currency is a column now:
 
 ```text
-id = 'book_default'
-name = 'Actual'
-type = 'actual'
-parent_id = NULL
-created_at = '1970-01-01T00:00:00Z'
+accounts.default_asset_id = <asset id>
 ```
 
-Scenario books are currently lightweight metadata. `create_branch` inserts a
-`books(type = 'scenario')` row. `merge_branch` records a `book` annotation with
-key `merged_at`. `discard_branch` sets `closed_at`.
+Older v1 ledgers stored this as an account annotation with
+`key = default_asset`. The v2 migration copies that tag into
+`accounts.default_asset_id`. The app still reads old tags as a fallback, but new
+writes use the column.
 
-### `assets`
+## `journals`
 
-Purpose: define units of measure for money, commodities, custom units, and
-securities.
+`journals` are transaction headers.
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Asset ID. |
-| `symbol` | `TEXT` | `NOT NULL UNIQUE` | Normalized uppercase symbol, such as `CAD` or `MSFT`. |
-| `type` | `TEXT` | `NOT NULL CHECK(type IN ('currency', 'commodity', 'custom', 'security'))` | Asset class. |
-| `scale` | `INTEGER` | `NOT NULL CHECK(scale >= 0 AND scale <= 18 AND scale = CAST(scale AS INTEGER))` | Decimal places for atomic-unit conversion. |
-| `name` | `TEXT` | `NOT NULL DEFAULT ''` | Human name. |
-
-Assets are global because the same unit can appear in more than one book. The
-engine normalizes symbols to uppercase and makes `createAsset()` idempotent by
-symbol: asking for an existing symbol returns the existing asset ID.
-
-### `accounts`
-
-Purpose: chart of accounts inside a book.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Account ID. |
-| `book_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(book_id) REFERENCES books(id)` | Owning book. |
-| `name` | `TEXT` | `NOT NULL` | Human account name. |
-| `type` | `TEXT` | `NOT NULL CHECK(type IN ('asset', 'liability', 'equity', 'income', 'expense'))` | Accounting type. |
-| `parent_id` | `TEXT` | `FOREIGN KEY(parent_id, book_id) REFERENCES accounts(id, book_id)` | Parent account in the same book. |
-| `code` | `TEXT` | `NOT NULL DEFAULT ''` | Optional chart code. |
-| `color_hex` | `TEXT` | `NOT NULL DEFAULT '#888888'` | UI/display color. |
-| `status` | `TEXT` | `NOT NULL DEFAULT 'active'` | Lifecycle marker. |
-
-Additional constraints:
-
-```sql
-UNIQUE(id, book_id)
-UNIQUE(book_id, name)
-```
-
-The composite `UNIQUE(id, book_id)` exists so other tables can reference an
-account and the book together. This prevents a line in one book from pointing at
-an account in another book.
-
-SQLite does not prevent account parent cycles. The engine checks cycles in
-`assertValidAccountParent()` during updates and reports cycles in
-`integrityCheck()`.
-
-Account default currency is not a column. It is stored as an annotation:
+One row says:
 
 ```text
-entity_type = 'account'
-entity_id = <account id>
-key = 'default_asset'
-value = <asset id>
+There was a transaction on this date, with this description, in this state.
 ```
 
-This avoids forcing every account to have a currency while still allowing
-currency inference when both sides of a transaction have the same default asset.
+Example:
 
-### `sources`
-
-Purpose: import batches and external source metadata.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Source ID. Import batches use the `batch_` prefix. |
-| `book_id` | `TEXT` | `NOT NULL REFERENCES books(id)` | Owning book. |
-| `type` | `TEXT` | `NOT NULL` | Source type, for example `import`. |
-| `label` | `TEXT` | `NOT NULL DEFAULT ''` | Human label. |
-| `status` | `TEXT` | `NOT NULL DEFAULT 'open'` | Workflow status, such as `open`, `committed`, `rolled_back`, or `discarded`. |
-| `created_at` | `TEXT` | `NOT NULL` | Creation timestamp. |
-| `metadata_json` | `TEXT` | `NOT NULL DEFAULT '{}'` | JSON metadata string. |
-
-Additional constraint:
-
-```sql
-UNIQUE(id, book_id)
+```text
+id = tx_abc
+date = 2026-06-10
+status = posted
+description = Lunch
 ```
 
-`journals.source_id` can point to a source. Imports also tag transactions with
-an `annotations` row keyed `import_batch`; `listTransactionIdsForSource()`
-checks both places so older or alternate import paths can still be found.
+Columns:
 
-### `journals`
+| Column | Meaning |
+| --- | --- |
+| `id` | Transaction ID. |
+| `book_id` | Owning book. |
+| `source_id` | Optional import/source batch. |
+| `date` | Economic date, `YYYY-MM-DD`. |
+| `posted_at` | Time the row was inserted. |
+| `finalized_at` | Time the journal became part of the public ledger. Null means draft. |
+| `status` | `posted`, `pending`, `planned`, or `void`. |
+| `description` | Payee/memo text. |
+| `external_id` | Optional external source row ID. |
 
-Purpose: transaction header.
+Connects to:
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Transaction ID. |
-| `book_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(book_id) REFERENCES books(id)` | Owning book. |
-| `source_id` | `TEXT` | `FOREIGN KEY(source_id, book_id) REFERENCES sources(id, book_id)` | Optional import/source batch. |
-| `date` | `TEXT` | `NOT NULL` | Economic transaction date, `YYYY-MM-DD`. |
-| `posted_at` | `TEXT` | `NOT NULL` | Insertion timestamp, even for pending/planned rows. |
-| `status` | `TEXT` | `NOT NULL CHECK(status IN ('posted', 'pending', 'planned', 'void'))` | Transaction lifecycle. |
-| `description` | `TEXT` | `NOT NULL DEFAULT ''` | Payee/memo text. |
-| `external_id` | `TEXT` | nullable | Optional source-provided row ID. |
+- `journal_lines.journal_id`
+- `sources.id`
+- `lots.opened_journal_id`
+- `lots.closed_journal_id`
 
-Additional constraint:
-
-```sql
-UNIQUE(id, book_id)
-```
-
-Indexes:
-
-```sql
-CREATE INDEX idx_journals_book_date ON journals(book_id, date, id);
-CREATE INDEX idx_journals_status ON journals(status, date);
-```
-
-Status semantics:
+Status meaning:
 
 | Status | Meaning |
 | --- | --- |
-| `posted` | Accepted ledger transaction. Default for most reports. |
-| `pending` | Imported or staged transaction awaiting review. |
-| `planned` | Forecast or future transaction. |
-| `void` | Soft-deleted transaction retained for audit/history. |
+| `posted` | Accepted transaction. Most reports default to this. |
+| `pending` | Imported or staged, waiting for review. |
+| `planned` | Future/forecast transaction. |
+| `void` | Soft-deleted but retained for history. |
 
-Most report helpers default to `posted`. Some app workflows use `active` to mean
-`posted + pending`, and `combined` to mean `posted + pending + planned`. Direct
-ledger reads can pass `status: null` to include every status except where a
-method explicitly filters.
+Why it exists:
 
-### `journal_lines`
+The header keeps transaction-level facts separate from accounting lines. This
+lets one transaction have two lines, four lines, or many lines.
 
-Purpose: transaction legs. These rows are the actual accounting entries.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Line ID. |
-| `book_id` | `TEXT` | `NOT NULL` | Owning book. |
-| `journal_id` | `TEXT` | `NOT NULL` | Parent transaction. |
-| `line_no` | `INTEGER` | `NOT NULL` | 1-based line number within the transaction. |
-| `account_id` | `TEXT` | `NOT NULL` | Account affected by the line. |
-| `asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Unit of the line quantity. |
-| `quantity` | `INTEGER` | `NOT NULL` | Signed integer atomic units. |
-| `memo` | `TEXT` | `NOT NULL DEFAULT ''` | Optional line memo. |
-
-Additional constraints:
-
-```sql
-UNIQUE(journal_id, line_no)
-FOREIGN KEY(journal_id, book_id)
-  REFERENCES journals(id, book_id)
-  ON DELETE CASCADE
-FOREIGN KEY(account_id, book_id)
-  REFERENCES accounts(id, book_id)
-```
-
-Indexes:
-
-```sql
-CREATE INDEX idx_lines_journal ON journal_lines(journal_id);
-CREATE INDEX idx_lines_account_asset ON journal_lines(account_id, asset_id);
-```
-
-The key invariant is not expressible as a normal SQLite `CHECK`: every
-transaction must sum to zero per `asset_id`.
-
-The engine enforces it before insert:
+The important v2 idea:
 
 ```text
-for each journal:
-  group lines by asset_id
-  sum quantity within each asset
-  every asset total must equal 0
+draft journal = header and lines may still be edited
+finalized journal = visible accounting fact
 ```
 
-This lets Clovis support multi-asset transactions without requiring all assets
-to net together. For example, an FX transfer can have CAD lines that sum to zero
-and USD lines that sum to zero in the same journal.
+Normal Clovis writes insert the journal as a draft, insert the lines, then set
+`finalized_at`. Reports and list APIs ignore draft journals.
 
-Hard-deleting a journal cascades to its lines. Voiding a journal only changes
-`journals.status`; the lines remain durable.
+## `journal_lines`
 
-### `prices`
+`journal_lines` are the actual accounting facts.
 
-Purpose: conversion rates between assets.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Price ID. |
-| `book_id` | `TEXT` | `NOT NULL REFERENCES books(id)` | Owning book. |
-| `asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Source asset. |
-| `quote_asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Quote asset. |
-| `rate_value` | `INTEGER` | `NOT NULL CHECK(rate_value > 0)` | Integer rate coefficient. |
-| `rate_scale` | `INTEGER` | `NOT NULL CHECK(rate_scale >= 0 AND rate_scale <= 18 AND rate_scale = CAST(rate_scale AS INTEGER))` | Decimal places for `rate_value`. |
-| `time` | `TEXT` | `NOT NULL` | Effective time/date string. |
-
-Additional constraint:
-
-```sql
-UNIQUE(id, book_id)
-```
-
-Index:
-
-```sql
-CREATE INDEX idx_prices_pair_time
-  ON prices(book_id, asset_id, quote_asset_id, time);
-```
-
-`rate_value` and `rate_scale` encode a decimal rate. A stored pair
-`rate_value = 135`, `rate_scale = 2` means rate `1.35`.
-
-When converting atomic source quantity to atomic quote quantity, the engine
-accounts for both asset scales:
+Each row says:
 
 ```text
-quote_atomic =
-  round(source_atomic * rate_value * 10^quote_scale
-        / 10^(source_scale + rate_scale))
+This account changed by this quantity of this asset.
 ```
 
-`queryPrice()` returns the latest direct price where `time <= as_of`.
-`convertQuantity()` builds an in-memory graph of the latest price per pair,
-adds inverse edges, and breadth-first searches for a conversion path. If no path
-exists, reporting APIs return a missing conversion warning instead of silently
-pretending the value is zero.
+Example:
 
-### `annotations`
-
-Purpose: flexible metadata without schema churn.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Annotation ID. |
-| `book_id` | `TEXT` | `NOT NULL REFERENCES books(id)` | Owning book. |
-| `entity_type` | `TEXT` | `NOT NULL` | Entity namespace, such as `account`, `tx`, `book`, or `source`. |
-| `entity_id` | `TEXT` | `NOT NULL` | Referenced entity ID. |
-| `key` | `TEXT` | `NOT NULL` | Metadata key. |
-| `value` | `TEXT` | `NOT NULL` | Metadata value. |
-
-Index:
-
-```sql
-CREATE INDEX idx_annotations_entity
-  ON annotations(entity_type, entity_id, key);
+```text
+journal_id = tx_abc
+account_id = Checking
+asset_id = CAD
+quantity = -1200
 ```
 
-There is intentionally no foreign key on `entity_id` because the table is
-polymorphic. This keeps tags generic, but it means SQLite cannot enforce that a
-tag points at a real row. `integrityCheck()` knows the current entity namespaces
-and reports orphan annotations.
+Columns:
 
-Common keys:
+| Column | Meaning |
+| --- | --- |
+| `id` | Line ID. |
+| `book_id` | Owning book. |
+| `journal_id` | Parent transaction. |
+| `line_no` | 1-based order within the transaction. |
+| `account_id` | Account that changed. |
+| `asset_id` | Unit/currency of the quantity. |
+| `quantity` | Signed integer atomic units. |
+| `memo` | Optional line memo. |
 
-| Entity | Key | Meaning |
-| --- | --- | --- |
-| `account` | `default_asset` | Default asset/currency for transaction inference and reports. |
-| `tx` | `import_batch` | Import source/batch ID. |
-| `tx` | `branch` | Scenario label attached to a transaction. |
-| `tx` | `transfer` | Transfer matching state, such as `matched` or `unmatched`. |
-| `tx` | `recategorize_batch` | Bulk recategorization batch ID. |
-| `tx` | `recategorize_from` | Previous account for rollback. |
-| `book` | `merged_at` | Scenario merge marker. |
+Connects to:
 
-Annotations are multi-valued. For singleton semantics, app helpers delete old
-rows before writing replacements.
+- `journals`
+- `accounts`
+- `assets`
 
-### `rules`
+Why it exists:
 
-Purpose: categorization and matching rules.
+This is the fact table. If you want a balance, report, register, trial balance,
+or income statement, the answer begins by summing `journal_lines`.
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Rule ID. |
-| `book_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(book_id) REFERENCES books(id)` | Owning book. |
-| `type` | `TEXT` | `NOT NULL` | Rule namespace, currently commonly `match`. |
-| `account_id` | `TEXT` | `FOREIGN KEY(account_id, book_id) REFERENCES accounts(id, book_id)` | Target account for matching rules. |
-| `pattern` | `TEXT` | `NOT NULL` | Pattern text. |
-| `priority` | `INTEGER` | `NOT NULL DEFAULT 100` | Evaluation order. Lower numbers sort first. |
-| `status` | `TEXT` | `NOT NULL DEFAULT 'active'` | Lifecycle marker. Deleted rules are soft-deleted. |
-| `created_at` | `TEXT` | `NOT NULL` | Creation timestamp. |
+Important detail:
 
-Additional constraint:
+Hard-deleting a journal deletes its lines through `ON DELETE CASCADE`. Voiding a
+journal does not delete its lines. It only changes `journals.status`.
 
-```sql
-UNIQUE(id, book_id)
+## `sources`
+
+Sources remember where transactions came from.
+
+The most common source is an import batch.
+
+Example:
+
+```text
+id = batch_abc
+type = import
+label = June card CSV
+status = open
+metadata_json = {"statement_type":"credit_card"}
 ```
 
-Index:
+Columns:
 
-```sql
-CREATE INDEX idx_rules_type_status
-  ON rules(type, status, priority);
+| Column | Meaning |
+| --- | --- |
+| `id` | Source ID. Import batches usually use `batch_...`. |
+| `book_id` | Owning book. |
+| `type` | Source type, often `import`. |
+| `label` | Human label. |
+| `status` | Workflow status. |
+| `created_at` | Creation timestamp. |
+| `metadata_json` | JSON metadata string. |
+
+Connects to:
+
+- `journals.source_id`
+- transaction annotations like `import_batch`
+
+Why it exists:
+
+Imports are workflows, not just transactions. You may want to commit, roll back,
+or inspect an import batch. `sources` gives that workflow a durable identity.
+
+## `prices`
+
+Prices tell Clovis how to convert one asset into another.
+
+Example:
+
+```text
+1 USD = 1.36 CAD
 ```
 
-The engine prevents duplicate active `type/account_id/pattern` rules by checking
-before insert, but there is no unique index for that logical rule key. Deleting
-a rule updates `status = 'deleted'`.
+That could be stored as:
 
-### `targets`
-
-Purpose: store budgets and goals in one table.
-
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Target ID. |
-| `book_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(book_id) REFERENCES books(id)` | Owning book. |
-| `type` | `TEXT` | `NOT NULL CHECK(type IN ('budget', 'goal'))` | Target kind. |
-| `account_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(account_id, book_id) REFERENCES accounts(id, book_id)` | Account being budgeted or targeted. |
-| `asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Unit of `quantity`. |
-| `quantity` | `INTEGER` | `NOT NULL CHECK((type = 'budget' AND quantity >= 0) OR (type = 'goal' AND quantity > 0))` | Budget amount or goal target in atomic units. |
-| `period` | `TEXT` | `CHECK(period IS NULL OR period IN ('monthly', 'yearly'))` | Budget period. Usually null for goals. |
-| `year` | `INTEGER` | nullable | Optional year-specific budget. |
-| `month` | `INTEGER` | `CHECK(month IS NULL OR (month >= 1 AND month <= 12))` | Optional month-specific budget. |
-| `rollover_rule` | `TEXT` | `NOT NULL DEFAULT ''` | Budget rollover marker, such as `full`. |
-| `name` | `TEXT` | `NOT NULL DEFAULT ''` | Goal name. |
-| `target_date` | `TEXT` | nullable | Goal target date. |
-| `priority` | `INTEGER` | `NOT NULL DEFAULT 1` | Goal ordering. |
-| `status` | `TEXT` | `NOT NULL DEFAULT 'active'` | Lifecycle marker. |
-
-Additional constraint:
-
-```sql
-UNIQUE(id, book_id)
+```text
+asset_id = USD
+quote_asset_id = CAD
+rate_value = 136
+rate_scale = 2
 ```
 
-Partial unique indexes:
+Columns:
 
-```sql
-CREATE UNIQUE INDEX idx_targets_budget
-  ON targets(
-    book_id,
-    type,
-    account_id,
-    asset_id,
-    period,
-    coalesce(year, -1),
-    coalesce(month, -1)
-  )
-  WHERE type = 'budget';
+| Column | Meaning |
+| --- | --- |
+| `id` | Price ID. |
+| `book_id` | Owning book. |
+| `asset_id` | Asset being priced. |
+| `quote_asset_id` | Asset used as the quote. |
+| `rate_value` | Positive integer rate coefficient. |
+| `rate_scale` | Decimal places for `rate_value`. |
+| `time` | Effective date/time. |
 
-CREATE UNIQUE INDEX idx_targets_goal
-  ON targets(book_id, type, account_id, asset_id)
-  WHERE type = 'goal';
+Connects to:
+
+- two `assets` rows: source asset and quote asset
+
+Why it exists:
+
+Storage does not mix assets. CAD, USD, and shares stay separate in
+`journal_lines`. Reports use `prices` when they need to value everything in one
+quote asset.
+
+If Clovis cannot find a conversion path, reports return `valuation_complete:
+false` with `missing_conversions`. They do not silently guess.
+
+## `annotations`
+
+Annotations are sticky notes.
+
+They can attach small pieces of metadata to different kinds of entities.
+
+Examples:
+
+```text
+account default currency
+transaction import batch
+transaction branch tag
+transfer matched/unmatched marker
+recategorization batch marker
+book merged_at marker
 ```
 
-The table is shared because budgets and goals have the same durable core:
-`account_id`, `asset_id`, and `quantity`. Type-specific fields are nullable or
-ignored depending on `type`.
+Columns:
 
-Budgets:
+| Column | Meaning |
+| --- | --- |
+| `id` | Annotation ID. |
+| `book_id` | Owning book. |
+| `entity_type` | What kind of thing is tagged: `account`, `tx`, `book`, etc. |
+| `entity_id` | ID of the thing being tagged. |
+| `key` | Tag key. |
+| `value` | Tag value. |
 
-- `quantity >= 0`.
-- Unique by account, asset, period, year, and month.
-- `year` and `month` may be null for generic budgets.
-- The app layer computes the effective budget by choosing the most specific row
-  and reporting shadowed rows.
+Connects to:
 
-Goals:
+- many entity types by convention
 
-- `quantity > 0`.
-- Unique by account and asset.
-- App helpers restrict goals to asset accounts.
+Why it exists:
 
-SQLite enforces the amount sign rules. The app layer enforces domain placement,
-such as budgets belonging to expense accounts and goals belonging to asset
-accounts.
+Some facts are useful but not important enough to become permanent columns.
+Annotations let Clovis add metadata without changing the schema every time.
 
-### `recurrences`
+Tradeoff:
 
-Purpose: scheduled transaction templates.
+Because annotations can point at many table types, SQLite cannot enforce every
+`entity_id` with a normal foreign key. `integrityCheck()` detects orphan
+annotations.
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Recurrence ID. |
-| `book_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(book_id) REFERENCES books(id)` | Owning book. |
-| `next_date` | `TEXT` | `NOT NULL` | Next scheduled date, `YYYY-MM-DD`. |
-| `quantity` | `INTEGER` | `NOT NULL CHECK(quantity > 0)` | Positive atomic amount. |
-| `from_account_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(from_account_id, book_id) REFERENCES accounts(id, book_id)` | Source account. |
-| `to_account_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(to_account_id, book_id) REFERENCES accounts(id, book_id)` | Destination account. |
-| `description` | `TEXT` | `NOT NULL DEFAULT ''` | Transaction description. |
-| `frequency` | `TEXT` | `NOT NULL CHECK(frequency IN ('daily', 'weekly', 'monthly', 'yearly'))` | Schedule step. |
-| `end_date` | `TEXT` | nullable | Optional stored end date. |
-| `asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Transaction asset. |
-| `status` | `TEXT` | `NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused', 'deleted'))` | Recurrence lifecycle. |
+## `rules`
 
-Additional constraint:
+Rules help categorize transactions.
 
-```sql
-UNIQUE(id, book_id)
+Example:
+
+```text
+If description contains "Loblaws", use Groceries.
 ```
 
-`process_scheduled` posts active recurrences whose `next_date` is on or before
-the requested through date, then advances `next_date` by frequency. In the
-current implementation, `end_date` is validated and stored but is not used as a
-stop condition by `process_scheduled`.
+Columns:
 
-### `period_closes`
+| Column | Meaning |
+| --- | --- |
+| `id` | Rule ID. |
+| `book_id` | Owning book. |
+| `type` | Rule kind, commonly `match`. |
+| `account_id` | Target account. |
+| `pattern` | Text pattern to match. |
+| `priority` | Evaluation order. |
+| `status` | `active` or soft-deleted state. |
+| `created_at` | Creation timestamp. |
 
-Purpose: close accounting periods against mutation.
+Connects to:
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Period close ID. |
-| `book_id` | `TEXT` | `NOT NULL REFERENCES books(id)` | Owning book. |
-| `name` | `TEXT` | `NOT NULL` | Human checkpoint name. |
-| `as_of` | `TEXT` | `NOT NULL` | Closed-through date, `YYYY-MM-DD`. |
-| `description` | `TEXT` | nullable | Optional description. |
-| `created_at` | `TEXT` | `NOT NULL` | Creation timestamp. |
-| `reopened_at` | `TEXT` | nullable | Reopen timestamp. Null means still closed. |
+- `accounts`
 
-Additional constraint:
+Why it exists:
 
-```sql
-UNIQUE(id, book_id)
+Rules are workflow memory. They do not change the core transaction model. They
+help app tools decide how to recategorize or import transactions.
+
+## `targets`
+
+Targets store budgets and goals.
+
+They share one table because both mean:
+
+```text
+This account has a planned quantity of this asset.
 ```
 
-Index:
+Budget example:
 
-```sql
-CREATE INDEX idx_period_closes_book_as_of
-  ON period_closes(book_id, as_of);
+```text
+Groceries should spend 60000 CAD atomic units monthly.
 ```
 
-Before mutating a transaction dated `txDate`, the engine checks for an
-unreopened close where `as_of >= txDate`. If such a row exists, the mutation is
-rejected. This protects closed periods from transaction creation, voiding,
-deletion, status changes, recategorization, entry flips, account-entry moves,
-asset migrations, and JSON import.
+Goal example:
+
+```text
+Savings should reach 500000 CAD atomic units.
+```
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Target ID. |
+| `book_id` | Owning book. |
+| `type` | `budget` or `goal`. |
+| `account_id` | Account being planned for. |
+| `asset_id` | Unit/currency. |
+| `quantity` | Budget or goal amount in atomic units. |
+| `period` | `monthly`, `yearly`, or null. Mostly for budgets. |
+| `year` | Optional budget year. |
+| `month` | Optional budget month. |
+| `rollover_rule` | Budget rollover marker. |
+| `name` | Goal name. |
+| `target_date` | Goal date. |
+| `priority` | Goal ordering. |
+| `status` | Lifecycle marker. |
+
+Connects to:
+
+- `accounts`
+- `assets`
+
+Why it exists:
+
+Budgets and goals are planning data. They should not pollute transaction rows.
+A budget is not a transaction. It is a target that reports compare against
+actual `journal_lines`.
+
+Important uniqueness rules:
+
+- One budget per book/account/asset/period/year/month.
+- One goal per book/account/asset.
+
+## `recurrences`
+
+Recurrences are scheduled transaction templates.
+
+Example:
+
+```text
+Every month, move 2500 CAD from Checking to Rent.
+```
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Recurrence ID. |
+| `book_id` | Owning book. |
+| `next_date` | Next scheduled date. |
+| `quantity` | Positive atomic amount. |
+| `from_account_id` | Source account. |
+| `to_account_id` | Destination account. |
+| `description` | Transaction description. |
+| `frequency` | `daily`, `weekly`, `monthly`, or `yearly`. |
+| `end_date` | Optional end date. |
+| `asset_id` | Unit/currency. |
+| `status` | `active`, `paused`, or `deleted`. |
+
+Connects to:
+
+- `accounts`
+- `assets`
+
+Why it exists:
+
+A recurring bill is not itself a posted transaction. It is a recipe for creating
+future transactions. When `process_scheduled` runs, it creates normal
+`journals` and `journal_lines`, then advances `next_date`.
+
+Current detail:
+
+`end_date` is validated and stored. In the current implementation,
+`process_scheduled` does not use it as a stop condition.
+
+## `period_closes`
+
+Period closes are locks on old accounting periods.
+
+Example:
+
+```text
+June 2026 is closed through 2026-06-30.
+```
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Period close ID. |
+| `book_id` | Owning book. |
+| `name` | Human checkpoint name. |
+| `as_of` | Closed-through date. |
+| `description` | Optional note. |
+| `created_at` | Creation timestamp. |
+| `reopened_at` | Reopen timestamp, null while still closed. |
+
+Connects to:
+
+- `books`
+
+Why it exists:
+
+Once a period is reconciled, you do not want a later import or edit quietly
+changing old numbers. Before mutating a transaction, the engine checks whether
+the transaction date is inside a still-closed period.
 
 Reopening does not delete the close row. It sets `reopened_at`, preserving the
-history of the close and reopen.
+history.
 
-### `lots`
+## `lots`
 
-Purpose: investment lot and cost basis records.
+Lots track investment cost basis.
 
-| Column | Type | Constraint | Meaning |
-| --- | --- | --- | --- |
-| `id` | `TEXT` | `PRIMARY KEY` | Lot ID. |
-| `book_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(book_id) REFERENCES books(id)` | Owning book. |
-| `account_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(account_id, book_id) REFERENCES accounts(id, book_id)` | Holding account. |
-| `asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Held security/asset. |
-| `quantity` | `INTEGER` | `NOT NULL CHECK(quantity > 0)` | Lot quantity in asset atomic units. |
-| `cost_asset_id` | `TEXT` | `NOT NULL REFERENCES assets(id)` | Cost currency/asset. |
-| `cost_quantity` | `INTEGER` | `NOT NULL CHECK(cost_quantity > 0)` | Cost basis in cost-asset atomic units. |
-| `opened_journal_id` | `TEXT` | `NOT NULL`, `FOREIGN KEY(opened_journal_id, book_id) REFERENCES journals(id, book_id)` | Opening transaction. |
-| `closed_journal_id` | `TEXT` | `FOREIGN KEY(closed_journal_id, book_id) REFERENCES journals(id, book_id)` | Closing transaction. |
-| `opened_at` | `TEXT` | `NOT NULL` | Opening date. |
-| `closed_at` | `TEXT` | nullable | Closing date. |
-| `status` | `TEXT` | `NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'closed'))` | Lot lifecycle. |
-| `metadata_json` | `TEXT` | `NOT NULL DEFAULT '{}'` | JSON metadata string. |
+When you buy a security, you need to remember:
 
-Additional constraint:
-
-```sql
-UNIQUE(id, book_id)
+```text
+what you bought
+how many units
+what it cost
+which transaction opened the lot
+whether the lot is still open
 ```
 
-`recordSecurityPurchase()` creates:
+Columns:
 
-- a security asset with scale `8`
-- a holding account named `<SYMBOL> Holdings`
-- an expense account named `Investment Cost`
-- a four-line balanced journal
-- an open lot linked to that journal
+| Column | Meaning |
+| --- | --- |
+| `id` | Lot ID. |
+| `book_id` | Owning book. |
+| `account_id` | Holding account. |
+| `asset_id` | Held asset/security. |
+| `quantity` | Positive held quantity. |
+| `cost_asset_id` | Asset used to measure cost. |
+| `cost_quantity` | Positive cost amount. |
+| `opened_journal_id` | Transaction that opened the lot. |
+| `closed_journal_id` | Transaction that closed the lot, if any. |
+| `opened_at` | Open date. |
+| `closed_at` | Close date. |
+| `status` | `open` or `closed`. |
+| `metadata_json` | JSON metadata string. |
 
-The engine rejects generic transaction/account/asset mutations that would
-invalidate linked lot history. `integrityCheck()` also verifies that open lot
-totals match the current account/asset balance.
+Connects to:
 
-## Write Path Details
+- `accounts`
+- `assets`
+- `journals`
 
-### Initialization
+Why it exists:
 
-Opening a ledger performs these steps:
+Investment accounting has extra memory beyond simple cash movement. The journal
+records the accounting facts. The lot remembers cost basis and lifecycle.
 
-1. Resolve the database path. If a directory is provided, use `clovis.db` inside
-   it.
+The engine blocks generic mutations that would break linked lots.
+
+## How Writes Work
+
+The database is not edited randomly. Most writes flow through the `Ledger`
+engine.
+
+## Opening A Ledger
+
+When code opens a ledger:
+
+1. Resolve the path. If the path is a directory, use `clovis.db` inside it.
 2. Create the parent directory.
 3. Open SQLite with `readBigInts: true`.
 4. Enable foreign keys.
-5. Execute the full DDL.
-6. Insert `meta.schema_version = '1'` if absent.
-7. Insert the default actual book if absent.
+5. Detect the current schema version.
+6. If the file is v1, migrate it to v2.
+7. Execute the schema DDL.
+8. Insert `schema_version = 2` if missing.
+9. Insert the default `Actual` book if missing.
 
-This makes opening an existing v1 database idempotent and makes opening a new
-path create a usable empty ledger.
+That means opening a new file creates a usable empty ledger. Opening an existing
+file is idempotent.
 
-### Asset And Account Creation
+## Creating A Transaction
 
-Assets are created before accounts when a ledger is initialized through the app
-layer. `init_defaults` requires an explicit currency or asset ID. Clovis does
-not infer a default currency globally.
+The transaction write path is:
 
-Default templates create common accounts and tag each account with
-`default_asset`. That tag is later used by `transactionAsset()`:
+1. Validate the date.
+2. Check the date is not inside a closed period.
+3. Validate the status.
+4. Convert quantities to `bigint`.
+5. Check every quantity fits SQLite's signed integer range.
+6. Require lines to balance per asset.
+7. Check referenced accounts and assets exist.
+8. Start `BEGIN IMMEDIATE`.
+9. Insert one draft `journals` row.
+10. Insert all `journal_lines`.
+11. Set `journals.finalized_at`.
+12. Commit, or roll back on error.
 
-```text
-if asset_id is explicit:
-  use it
-else:
-  read default_asset from both accounts
-  require both to exist and match
-```
-
-If the two accounts have different defaults, the app rejects the transaction and
-directs callers to use `fx_transfer`.
-
-### Transaction Creation
-
-The core transaction primitive is `postTx(date, status, description, lines)`.
-
-For every transaction:
-
-1. Validate `date` as `YYYY-MM-DD`.
-2. Reject writes into closed periods.
-3. Validate status as `posted`, `pending`, `planned`, or `void`.
-4. Convert every line quantity to `bigint`.
-5. Ensure every quantity is within SQLite signed 64-bit integer range.
-6. Group by `asset_id` and require each asset's sum to equal zero.
-7. Check every referenced account and asset exists.
-8. `BEGIN IMMEDIATE`.
-9. Insert one `journals` row.
-10. Insert all `journal_lines` rows with 1-based `line_no`.
-11. `COMMIT`, or `ROLLBACK` on error.
-
-`recordTransaction()` is the common two-sided helper:
+The important lesson:
 
 ```text
-from account: -absolute_amount
-to account:   +absolute_amount
+One transaction write is all-or-nothing.
 ```
 
-`post_journal_entry` and `recordMultiAssetJournalEntry()` allow arbitrary
-balanced multi-line entries.
+You should not end up with a journal header but only half its lines. If you are
+writing direct SQL, use the same pattern: insert a draft journal, insert lines,
+then finalize.
 
-`fx_transfer` is represented as a normal multi-asset journal. For example:
+## Importing Transactions
 
-```text
-Checking CAD       -100 CAD
-FX Clearing CAD    +100 CAD
-FX Clearing USD    -73 USD
-Brokerage USD      +73 USD
-```
+Imports do not create a separate kind of transaction.
 
-Each asset balances separately. The FX account is the bridge, not a special SQL
-construct.
+They create normal `journals` and `journal_lines`, then add source metadata.
 
-### Transaction Mutation
+Import flow:
 
-Mutation policy lives in the engine, not in triggers:
+1. Parse CSV rows.
+2. Resolve the statement account, counterpart account, and asset.
+3. Turn each amount into a signed quantity from the statement account's point of
+   view.
+4. Skip duplicates unless disabled.
+5. Write normal balanced transactions.
+6. Create a `sources` batch.
+7. Attach the batch through `journals.source_id` and `annotations`.
 
-- `voidTx()` sets `journals.status = 'void'`.
-- `deleteTx()` deletes related transaction annotations, then deletes the
-  journal. Lines cascade through `ON DELETE CASCADE`.
-- `updateTxStatus()` changes lifecycle status.
-- `recategorizeTransaction()` updates matching `journal_lines.account_id`.
-- `flipEntries()` multiplies all line quantities in selected transactions by
-  `-1`.
-- `moveEntriesBetweenAccounts()` rewrites all lines from one account to another.
-- `migrateAssetEntries()` rewrites all lines from one asset to another.
+This is why imported transactions can later be committed, voided,
+recategorized, exported, or reported exactly like manually entered
+transactions.
 
-Before sensitive mutations, the engine checks period closes and lot links. This
-centralizes audit and safety behavior in one code path instead of scattering it
-across SQL triggers.
+## Reading Balances
 
-### Balance Reads
+A balance is a sum.
 
-Balances are sums over `journal_lines` joined to `journals`:
+Conceptually:
 
 ```sql
-SELECT coalesce(sum(l.quantity), 0) AS total
-FROM journal_lines l
-JOIN journals t ON t.id = l.journal_id
-WHERE l.account_id = ?
-  AND l.asset_id = ?
-  AND <status/date filters>
-```
-
-`balanceTree()` walks the account hierarchy and includes descendants only when
-they have the same account type as the root. This avoids rolling an expense
-child into an asset parent if a malformed hierarchy exists.
-
-Reports then decide how to interpret the raw sum:
-
-- Register and holdings views usually show raw quantities.
-- Trial balance shows debit/credit splits.
-- Balance sheet and income statement normalize credit-normal account types for
-  accounting presentation.
-- Quote-currency reports convert each asset independently and report missing
-  conversion paths.
-
-### Price Reads And Conversion
-
-Price lookup is time-aware. For each pair, the engine uses the latest price at
-or before the report date:
-
-```sql
-SELECT *
-FROM prices
-WHERE book_id = ?
+SELECT sum(quantity)
+FROM journal_lines
+JOIN journals
+  ON journals.book_id = journal_lines.book_id
+ AND journals.id = journal_lines.journal_id
+WHERE journal_lines.book_id = ?
+  AND journals.finalized_at IS NOT NULL
+  AND account_id = ?
   AND asset_id = ?
-  AND quote_asset_id = ?
-  AND time <= ?
-ORDER BY time DESC, id DESC
-LIMIT 1
+  AND status = 'posted';
 ```
 
-For multi-hop conversion, the engine builds a graph from latest available pair
-prices. It adds both forward and inverse edges, then breadth-first searches from
-the source asset to the quote asset.
-
-This gives useful behavior without storing every possible pair:
+The real code adds date filters, status options, rollups, and account-tree
+logic, but the core idea is still this:
 
 ```text
-EUR -> USD
-USD -> CAD
-
-can value EUR in CAD if both rates exist as of the report date.
+balance = sum of matching line quantities
 ```
 
-If no path exists, the report returns `valuation_complete: false` and includes a
-`missing_conversions` row. It does not silently substitute zero or one.
+## Converting Assets
 
-### Imports
+Storage never adds CAD and USD together.
 
-Statement import lives in the app layer and writes normal ledger rows.
+Reports can convert them when you ask for a quote asset.
 
-CSV flow:
-
-1. Resolve the input path through the app filesystem sandbox.
-2. Parse CSV with row and column limits.
-3. Map date, amount, description, optional counterpart, and tags.
-4. Resolve the statement account, counterpart account, and asset.
-5. Compute a signed amount relative to the statement account.
-6. Skip duplicates unless disabled.
-7. Write normal two-line transactions.
-8. Create a source batch if any rows were imported.
-9. Attach the batch through both `journals.source_id` and an `import_batch`
-   transaction annotation.
-
-Duplicate detection uses this fingerprint:
+Example:
 
 ```text
-date | signed amount for statement account | lower(description)
+Report net worth in CAD.
 ```
 
-Batch lifecycle:
+Clovis:
 
-- `commit_batch` changes selected pending transactions to posted.
-- `rollback_import` voids transactions and marks the source `rolled_back`.
-- `discard_batch` hard-deletes selected transactions only when `dry_run:false`.
+1. Sums raw balances per asset.
+2. Finds prices at or before the report date.
+3. Converts each asset into CAD.
+4. Returns missing conversion warnings if any path is unavailable.
 
-### JSON Export And Import
+That keeps storage honest and makes reporting explicit.
 
-`export_ledger` calls `Ledger.exportDocument()` and emits a JSON document with:
+## Backups
 
-```text
-format = "clovis-ledger-v1"
-assets
-accounts
-sources
-transactions
-account_tags
-prices
-budgets
-goals
-branches
-checkpoints
-lots
-scheduled_transactions
-```
-
-`import_ledger` validates the whole document before writing:
-
-- supported format
-- required IDs
-- duplicate IDs within the document
-- existing ID conflicts when preserving IDs
-- account name conflicts
-- account parent references and cycles
-- asset/account/source/transaction references
-- balanced transaction entries
-- date formats
-- quantity ranges
-- default asset availability
-- budget and goal uniqueness
-- recurrence status/frequency
-- lot references and positive quantities
-
-Only after validation succeeds does it open one `BEGIN IMMEDIATE` transaction and
-insert all sections. `dry_run:true` returns validation results without writing.
-
-### Backups
-
-`backup_now` uses SQLite's `VACUUM INTO ?`:
+Backups use SQLite's own copy mechanism:
 
 ```sql
 VACUUM INTO ?
 ```
 
-This creates a compact, consistent copy of the current database file. By
-default, backups are written under a `backups` directory next to the ledger.
+By default, backups go into a `backups` folder next to the ledger database.
 
-## SQL Constraints Vs Engine Invariants
+## What SQLite Enforces Vs What The Engine Enforces
 
-The schema deliberately splits responsibilities.
+SQLite is good at simple durable facts:
 
-SQLite enforces:
-
-| Area | Enforcement |
+| SQLite enforces | Example |
 | --- | --- |
-| Primary keys | Every table has a primary key. |
-| Basic enums | `CHECK` constraints on asset type, account type, journal status, target type, recurrence frequency/status, lot status. |
-| Basic sign rules | Positive prices, positive recurrence quantities, target type-specific quantity signs, positive lot quantities. |
-| Book-scoped references | Composite foreign keys for accounts, sources, journals, lines, rules, recurrences, and lots. |
-| Journal line cleanup | `journal_lines` cascade when a journal is hard-deleted. |
-| Target uniqueness | Partial unique indexes for budgets and goals. |
+| Primary keys | Every row has a stable ID. |
+| Foreign keys | A line must point at an existing journal/account/asset. |
+| Simple enums | Journal status must be `posted`, `pending`, `planned`, or `void`. |
+| Simple sign checks | Price rates and lot quantities must be positive. |
+| Cascade deletes | Deleting a journal deletes its lines. |
+| Target uniqueness | Duplicate budget/goal rows are blocked by indexes. |
+| Finalized journal immutability | Lines cannot be inserted, updated, or deleted after finalization. |
+| Finalized journal balancing | A journal cannot be finalized unless its lines balance per asset. |
+| Closed-period protection | A journal cannot be finalized or reopened inside an active closed period. |
 
-The TypeScript engine enforces:
+The engine is good at accounting policy:
 
-| Area | Enforcement |
+| Engine enforces | Why it is not just a SQL column check |
 | --- | --- |
-| Balanced journals | Every transaction sums to zero per asset before insert/import. |
-| Date format | `YYYY-MM-DD` validation for business dates. |
-| Period locks | Mutating transactions in closed periods is rejected. |
-| Parent cycles | Account hierarchy cycle checks. |
-| Default asset policy | No global inferred currency; transaction asset inference requires matching account defaults. |
-| Lot safety | Generic mutations are blocked when they would break investment lots. |
-| Import safety | Dry runs, duplicate detection, full-document validation, and atomic inserts. |
-| Report warnings | Missing price paths are surfaced as warnings instead of hidden. |
-| Polymorphic tag integrity | Orphan annotations are detected and repairable. |
+| Balanced journal errors | Gives clearer errors before SQLite rejects finalization. |
+| Date format | SQLite text dates need application validation. |
+| Period-lock workflow | Explains which close blocks a mutation. |
+| Account parent cycles | Requires walking the hierarchy. |
+| Default asset inference | Requires account defaults and app policy. |
+| Lot safety | Requires understanding investment workflows. |
+| Import validation | Requires checking a whole document before writing. |
+| Missing conversion warnings | Requires graph search through prices. |
 
-This split is intentional. SQLite is excellent at durable relational constraints.
-The engine is better at domain rules that require grouping, graph walks, precise
-error messages, dry-run behavior, or compatibility with imports.
+This split is intentional.
 
-## Why The Schema Is Shaped This Way
+SQLite keeps the relational skeleton solid. The TypeScript engine keeps the
+accounting behavior correct and explainable.
 
-### `journals` And `journal_lines` Instead Of One Transaction Table
+## Why The Schema Looks This Way
 
-A single transaction can have more than two legs, and a single economic event can
-touch more than one asset. A header/lines model is the standard durable shape
-for double-entry ledgers because it supports:
+## Why `journals` And `journal_lines` Are Separate
 
-- simple two-sided transfers
-- split transactions
-- imported statement rows
-- opening balances
-- FX transfers
-- investment purchases
-- future multi-leg workflows
+Because transactions are not always two lines.
 
-The transaction header stores lifecycle and source metadata. The lines store the
-accounting facts.
+A simple lunch has two lines.
 
-### Integer Quantities Instead Of Decimal Columns
+An FX transfer has four lines.
 
-SQLite has no fixed-precision decimal type. Storing money as `REAL` would make
-balances vulnerable to floating-point error. Storing money as integer atomic
-units means all ledger sums are exact.
+A split transaction might have many lines.
 
-The `assets.scale` column moves decimal interpretation to the asset definition.
-That is why the same schema can store CAD cents, JPY whole units, securities
-with 8 decimal places, and custom units.
+The header/lines design handles all of those with one model.
 
-### Per-Asset Balancing
+## Why Balances Are Not Stored
 
-The engine requires each asset to balance independently because adding different
-assets together is meaningless at storage time. A transaction containing CAD and
-USD is valid only if the CAD lines sum to zero and the USD lines sum to zero.
-Valuation into a quote currency is a reporting concern handled through `prices`.
+Stored balances go stale.
 
-### Book IDs Everywhere, But One Default Book Today
+Facts do not.
 
-Most domain tables include `book_id` so the format can isolate actual and
-scenario data. The current engine writes normal operations to `book_default`.
-Scenario support currently records scenario identities and tags rather than
-maintaining a full branch copy of every table.
+If Clovis stored a balance row, every transaction edit would need to update that
+balance perfectly. Instead, the durable data is the transaction line history.
+Reports calculate balances from that history.
 
-This keeps the v1 schema future-capable without pretending the current app has
-full branch accounting semantics.
+## Why `book_id` Appears Everywhere
 
-### Global Assets
+Rows belong to books because Clovis supports an actual book and scenario books.
+Normal activity uses `book_default`. A scenario is a cloned book with its own
+accounts and journals. The shape prevents cross-book references where it
+matters, because many foreign keys include both the entity ID and `book_id`.
 
-Assets are global because units like `CAD`, `USD`, or `MSFT` are not owned by a
-particular book. Book-scoped rows reference those shared assets. This avoids
-duplicate asset definitions and makes conversion rates reusable inside the file.
+## Why `annotations` Exist
 
-### Polymorphic Annotations
+Not every useful bit of metadata deserves a new column.
 
-Annotations are the escape hatch for metadata that should not become a schema
-column yet. Examples include account default assets, import batch tags, transfer
-matching markers, and branch tags.
+Import batch tags are useful. Transfer matching tags are useful.
+Recategorization history is useful. Book workflow markers are useful.
 
-The tradeoff is real: SQLite cannot foreign-key `annotations.entity_id` to
-multiple tables. Clovis accepts that tradeoff and provides `integrityCheck()` and
-`repair_integrity` for orphan detection and cleanup.
+Annotations let Clovis store these without turning the schema into a wide table
+full of nullable columns.
 
-### Shared `targets` Table
+Account default currency used to live here too. In v2 it is promoted to
+`accounts.default_asset_id` because tools need it constantly and it is part of
+the account's identity.
 
-Budgets and goals both mean "an account should be associated with an asset
-quantity under some planning semantics." Keeping them in one table reduces
-duplicate schema while partial unique indexes preserve each target type's real
-uniqueness rule.
+## Why There Are Triggers
 
-### Period Closes As Rows, Not Flags
+The database has a few triggers for the facts that must remain true even when a
+human or agent writes SQL directly:
 
-Closing a period creates an append-style checkpoint row. Reopening sets
-`reopened_at` rather than deleting the row. That gives the ledger an audit trail
-of close/reopen events while keeping mutation checks simple.
+- a journal must be inserted as a draft
+- a journal cannot be finalized until it has lines
+- a finalized journal must balance per asset
+- finalized journal lines cannot be edited
+- closed periods block finalization and reopening
+- lot-linked journals cannot be reopened by generic edits
 
-### No Triggers
+The engine still owns higher-level behavior: dry runs, import validation,
+friendly errors, account cycle checks, report conversion warnings, and
+investment-specific workflows.
 
-The database does not contain triggers for balance, period, or annotation
-cleanup rules. The engine owns those policies so:
+## Direct SQL Write Protocol
 
-- errors can be precise and user-facing
-- dry-run workflows can validate without writing
-- JSON import can validate all rows before changing the database
-- tests can exercise the same rules the CLI and MCP use
+If you write transactions directly, use this exact shape:
 
-The cost is that direct SQL writes can bypass domain invariants. If you modify a
-Clovis database outside the `Ledger` API, run `integrity_check` afterward and
-expect the application to reject or misreport invalid data.
+```sql
+BEGIN IMMEDIATE;
 
-## Integrity And Repair
+INSERT INTO journals(id, book_id, date, posted_at, status, description)
+VALUES ('tx_example', 'book_default', '2026-06-10', '2026-06-10T12:00:00Z', 'posted', 'Lunch');
 
-`integrityCheck()` returns `ok` plus structured problem lists:
+INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity)
+VALUES
+  ('line_1', 'book_default', 'tx_example', 1, 'acct_checking', 'asset_cad', -1200),
+  ('line_2', 'book_default', 'tx_example', 2, 'acct_dining', 'asset_cad', 1200);
 
-| Field | Checks |
+UPDATE journals
+SET finalized_at = '2026-06-10T12:00:01Z'
+WHERE book_id = 'book_default'
+  AND id = 'tx_example';
+
+COMMIT;
+```
+
+The last `UPDATE` is the gate. If the journal has no lines, does not balance, or
+falls inside a closed period, SQLite rejects it.
+
+## Integrity Check
+
+`integrityCheck()` asks:
+
+```text
+Does the database still make accounting sense?
+```
+
+It checks:
+
+| Field | What it catches |
 | --- | --- |
-| `schema_version` | Reads `meta.schema_version`. |
-| `imbalanced_transactions` | Re-runs per-asset journal balance checks. |
-| `account_cycles` | Detects cycles in account parent links. |
-| `orphan_annotations` | Detects known annotation entity types that point to missing rows. |
-| `invalid_default_assets` | Detects account default-asset tags that point to missing accounts/assets. |
-| `invalid_prices` | Checks positive rate values and valid rate scales. |
-| `invalid_targets` | Checks budget/goal signs, periods, months, and goal target dates. |
-| `duplicate_budgets` | Checks budget logical uniqueness. |
-| `invalid_recurrences` | Checks quantities, frequencies, statuses, and dates. |
-| `invalid_lots` | Checks lot references, signs, statuses, and open lot totals. |
+| `imbalanced_transactions` | Transactions whose lines do not sum to zero per asset. |
+| `account_cycles` | Parent loops in the account tree. |
+| `orphan_annotations` | Sticky notes pointing at missing rows. |
+| `invalid_default_assets` | Old account default-asset tags pointing at missing assets. |
+| `invalid_prices` | Bad price rates or scales. |
+| `invalid_targets` | Bad budget/goal signs, periods, months, or dates. |
+| `duplicate_budgets` | Duplicate budget identities. |
+| `invalid_recurrences` | Bad recurrence quantities, dates, statuses, or frequencies. |
+| `invalid_lots` | Broken lot links or open lot totals that do not match balances. |
 
-`repair_integrity` currently repairs only orphan annotations and invalid
-default-asset annotations. If run with `dry_run:false`, it creates a backup
-first unless backup is explicitly disabled.
+`repair_integrity` currently repairs orphan annotations and invalid default
+asset annotations. When it actually repairs, it creates a backup first unless
+backup is explicitly disabled.
+
+## How To Read The Raw Database
+
+If you open the SQLite file manually, start here:
+
+1. Look at `assets` so you know the currencies/units and scales.
+2. Look at `accounts` so you know the buckets.
+3. Look at `journals` for transaction headers.
+4. Look at `journal_lines` for the real accounting facts.
+5. Join lines to accounts and assets.
+
+Useful query shape:
+
+```sql
+SELECT
+  j.date,
+  j.status,
+  j.description,
+  a.name AS account_name,
+  ast.symbol AS asset,
+  l.quantity
+FROM journal_lines l
+JOIN journals j
+  ON j.book_id = l.book_id
+ AND j.id = l.journal_id
+JOIN accounts a
+  ON a.book_id = l.book_id
+ AND a.id = l.account_id
+JOIN assets ast ON ast.id = l.asset_id
+WHERE l.book_id = 'book_default'
+  AND j.finalized_at IS NOT NULL
+ORDER BY j.date, j.id, l.line_no;
+```
+
+That query is the ledger in human-readable form.
 
 ## Full Canonical DDL
 
@@ -1092,6 +1194,11 @@ the source ever disagree, the TypeScript source is authoritative.
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS migration_history (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS books (
   id TEXT PRIMARY KEY,
@@ -1114,6 +1221,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK(type IN ('asset', 'liability', 'equity', 'income', 'expense')),
   parent_id TEXT,
+  default_asset_id TEXT REFERENCES assets(id),
   code TEXT NOT NULL DEFAULT '',
   color_hex TEXT NOT NULL DEFAULT '#888888',
   status TEXT NOT NULL DEFAULT 'active',
@@ -1138,6 +1246,7 @@ CREATE TABLE IF NOT EXISTS journals (
   source_id TEXT,
   date TEXT NOT NULL,
   posted_at TEXT NOT NULL,
+  finalized_at TEXT,
   status TEXT NOT NULL CHECK(status IN ('posted', 'pending', 'planned', 'void')),
   description TEXT NOT NULL DEFAULT '',
   external_id TEXT,
@@ -1267,4 +1376,102 @@ CREATE TABLE IF NOT EXISTS lots (
   FOREIGN KEY(opened_journal_id, book_id) REFERENCES journals(id, book_id),
   FOREIGN KEY(closed_journal_id, book_id) REFERENCES journals(id, book_id)
 );
+CREATE TRIGGER IF NOT EXISTS trg_journals_no_finalized_insert
+BEFORE INSERT ON journals
+WHEN NEW.finalized_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'insert journal as draft, then finalize');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_journals_finalize_requires_lines
+BEFORE UPDATE OF finalized_at ON journals
+WHEN OLD.finalized_at IS NULL AND NEW.finalized_at IS NOT NULL
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM journal_lines
+      WHERE book_id = NEW.book_id AND journal_id = NEW.id
+    )
+    THEN RAISE(ABORT, 'finalized journal must have lines')
+  END;
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM (
+        SELECT asset_id, sum(quantity) AS total
+        FROM journal_lines
+        WHERE book_id = NEW.book_id AND journal_id = NEW.id
+        GROUP BY asset_id
+        HAVING total != 0
+      )
+    )
+    THEN RAISE(ABORT, 'finalized journal must balance per asset')
+  END;
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM period_closes
+      WHERE book_id = NEW.book_id
+        AND reopened_at IS NULL
+        AND as_of >= NEW.date
+      LIMIT 1
+    )
+    THEN RAISE(ABORT, 'journal date is in a closed period')
+  END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_journals_reopen_guard
+BEFORE UPDATE OF finalized_at ON journals
+WHEN OLD.finalized_at IS NOT NULL AND NEW.finalized_at IS NULL
+BEGIN
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM period_closes
+      WHERE book_id = OLD.book_id
+        AND reopened_at IS NULL
+        AND as_of >= OLD.date
+      LIMIT 1
+    )
+    THEN RAISE(ABORT, 'cannot reopen journal in a closed period')
+  END;
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM lots
+      WHERE book_id = OLD.book_id
+        AND (opened_journal_id = OLD.id OR closed_journal_id = OLD.id)
+      LIMIT 1
+    )
+    THEN RAISE(ABORT, 'cannot reopen journal linked to investment lots')
+  END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lines_no_insert_finalized
+BEFORE INSERT ON journal_lines
+WHEN EXISTS (
+  SELECT 1 FROM journals
+  WHERE book_id = NEW.book_id
+    AND id = NEW.journal_id
+    AND finalized_at IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT, 'cannot insert lines on finalized journal');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lines_no_update_finalized
+BEFORE UPDATE ON journal_lines
+WHEN EXISTS (
+  SELECT 1 FROM journals
+  WHERE book_id = OLD.book_id
+    AND id = OLD.journal_id
+    AND finalized_at IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT, 'cannot update lines on finalized journal');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lines_no_delete_finalized
+BEFORE DELETE ON journal_lines
+WHEN EXISTS (
+  SELECT 1 FROM journals
+  WHERE book_id = OLD.book_id
+    AND id = OLD.journal_id
+    AND finalized_at IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT, 'cannot delete lines on finalized journal');
+END;
 ```

@@ -78,7 +78,7 @@ describe("release smoke", () => {
       "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, version: VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
     ].join("\n"), "utf8");
     const api = JSON.parse(execFileSync(process.execPath, [apiCheck], { cwd: dir, encoding: "utf8" }));
-    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: 1, version: packageVersion, server: true, deepImportBlocked: true });
+    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: 2, version: packageVersion, server: true, deepImportBlocked: true });
 
     const binDir = join(dir, "node_modules", ".bin");
     expect(execFileSync(join(binDir, "clovis"), ["--version"], { cwd: dir, encoding: "utf8" }).trim()).toBe(packageVersion);

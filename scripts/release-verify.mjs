@@ -39,7 +39,7 @@ try {
     "import { createClovisMcpServer } from 'clovis/mcp';",
     "if (TopLevelLedger !== Ledger) throw new Error('top-level Ledger export drifted');",
     `if (VERSION !== ${JSON.stringify(version)}) throw new Error(\`unexpected package version ${"${VERSION}"}\`);`,
-    "if (SCHEMA_VERSION !== 1) throw new Error(`unexpected schema version ${SCHEMA_VERSION}`);",
+    "if (SCHEMA_VERSION !== 2) throw new Error(`unexpected schema version ${SCHEMA_VERSION}`);",
     "if (TOOL_NAMES.length < 134) throw new Error(`unexpected MCP tool count ${TOOL_NAMES.length}`);",
     "if (Object.keys(TOOL_SIGNATURES).length !== TOOL_NAMES.length) throw new Error('tool signature count drift');",
     "let deepImportBlocked = false;",
@@ -55,7 +55,7 @@ try {
 
   const api = JSON.parse(run(process.execPath, [apiCheck], { cwd: dir }));
   if (api.version !== version) fail(`installed API version mismatch: expected ${version}, got ${api.version}`);
-  if (api.schemaVersion !== 1) fail(`unexpected schema version ${api.schemaVersion}`);
+  if (api.schemaVersion !== 2) fail(`unexpected schema version ${api.schemaVersion}`);
   if (api.tools < 134 || api.signatures !== api.tools) fail(`unexpected MCP surface: ${JSON.stringify(api)}`);
   if (!api.server || !api.deepImportBlocked) fail(`public API smoke failed: ${JSON.stringify(api)}`);
 

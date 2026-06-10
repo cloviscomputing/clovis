@@ -1,10 +1,15 @@
 export const DEFAULT_BOOK_ID = "book_default";
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS migration_history (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS books (
   id TEXT PRIMARY KEY,
@@ -27,6 +32,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   name TEXT NOT NULL,
   type TEXT NOT NULL CHECK(type IN ('asset', 'liability', 'equity', 'income', 'expense')),
   parent_id TEXT,
+  default_asset_id TEXT REFERENCES assets(id),
   code TEXT NOT NULL DEFAULT '',
   color_hex TEXT NOT NULL DEFAULT '#888888',
   status TEXT NOT NULL DEFAULT 'active',
@@ -51,6 +57,7 @@ CREATE TABLE IF NOT EXISTS journals (
   source_id TEXT,
   date TEXT NOT NULL,
   posted_at TEXT NOT NULL,
+  finalized_at TEXT,
   status TEXT NOT NULL CHECK(status IN ('posted', 'pending', 'planned', 'void')),
   description TEXT NOT NULL DEFAULT '',
   external_id TEXT,
@@ -180,4 +187,102 @@ CREATE TABLE IF NOT EXISTS lots (
   FOREIGN KEY(opened_journal_id, book_id) REFERENCES journals(id, book_id),
   FOREIGN KEY(closed_journal_id, book_id) REFERENCES journals(id, book_id)
 );
+CREATE TRIGGER IF NOT EXISTS trg_journals_no_finalized_insert
+BEFORE INSERT ON journals
+WHEN NEW.finalized_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'insert journal as draft, then finalize');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_journals_finalize_requires_lines
+BEFORE UPDATE OF finalized_at ON journals
+WHEN OLD.finalized_at IS NULL AND NEW.finalized_at IS NOT NULL
+BEGIN
+  SELECT CASE
+    WHEN NOT EXISTS (
+      SELECT 1 FROM journal_lines
+      WHERE book_id = NEW.book_id AND journal_id = NEW.id
+    )
+    THEN RAISE(ABORT, 'finalized journal must have lines')
+  END;
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM (
+        SELECT asset_id, sum(quantity) AS total
+        FROM journal_lines
+        WHERE book_id = NEW.book_id AND journal_id = NEW.id
+        GROUP BY asset_id
+        HAVING total != 0
+      )
+    )
+    THEN RAISE(ABORT, 'finalized journal must balance per asset')
+  END;
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM period_closes
+      WHERE book_id = NEW.book_id
+        AND reopened_at IS NULL
+        AND as_of >= NEW.date
+      LIMIT 1
+    )
+    THEN RAISE(ABORT, 'journal date is in a closed period')
+  END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_journals_reopen_guard
+BEFORE UPDATE OF finalized_at ON journals
+WHEN OLD.finalized_at IS NOT NULL AND NEW.finalized_at IS NULL
+BEGIN
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM period_closes
+      WHERE book_id = OLD.book_id
+        AND reopened_at IS NULL
+        AND as_of >= OLD.date
+      LIMIT 1
+    )
+    THEN RAISE(ABORT, 'cannot reopen journal in a closed period')
+  END;
+  SELECT CASE
+    WHEN EXISTS (
+      SELECT 1 FROM lots
+      WHERE book_id = OLD.book_id
+        AND (opened_journal_id = OLD.id OR closed_journal_id = OLD.id)
+      LIMIT 1
+    )
+    THEN RAISE(ABORT, 'cannot reopen journal linked to investment lots')
+  END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lines_no_insert_finalized
+BEFORE INSERT ON journal_lines
+WHEN EXISTS (
+  SELECT 1 FROM journals
+  WHERE book_id = NEW.book_id
+    AND id = NEW.journal_id
+    AND finalized_at IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT, 'cannot insert lines on finalized journal');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lines_no_update_finalized
+BEFORE UPDATE ON journal_lines
+WHEN EXISTS (
+  SELECT 1 FROM journals
+  WHERE book_id = OLD.book_id
+    AND id = OLD.journal_id
+    AND finalized_at IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT, 'cannot update lines on finalized journal');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lines_no_delete_finalized
+BEFORE DELETE ON journal_lines
+WHEN EXISTS (
+  SELECT 1 FROM journals
+  WHERE book_id = OLD.book_id
+    AND id = OLD.journal_id
+    AND finalized_at IS NOT NULL
+)
+BEGIN
+  SELECT RAISE(ABORT, 'cannot delete lines on finalized journal');
+END;
 `;

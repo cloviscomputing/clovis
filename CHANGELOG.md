@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+Schema v2 hardening release.
+
+- Add schema version 2 with migration history, finalized journals, account default assets, and SQLite finalization triggers.
+- Migrate schema v1 ledgers on open, preserving posted journals and old account `default_asset` annotations.
+- Require direct SQL transaction writes to stage draft journals, insert balanced lines, then finalize.
+- Make finalized journal lines immutable and block finalization/reopening across active closed periods.
+- Clone scenario books into isolated active books with remapped accounts, journals, sources, rules, targets, recurrences, closes, lots, and annotations.
+- Document the schema, ERD, persistence model, and direct SQL write protocol in Feynman-style language.
+- Expand migration, direct-SQL, scenario, release smoke, and raw SQLite oracle coverage for the schema v2 contract.
+
 ## 0.1.9
 
 SQLite oracle and workflow audit release.

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "../src/core/index.js";
 import { callTool, TOOL_NAMES } from "../src/app/index.js";
@@ -39,16 +40,19 @@ describe("ledger core", () => {
     expect(debitCredit(-1200n)).toEqual({ debit: 0n, credit: 1200n });
   });
 
-  it("creates schema v1 and default book", () => {
+  it("creates schema v2 and default book", () => {
     const ledger = tempLedger();
     try {
       const tables = new Set((ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
-      for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences"]) {
+      for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences", "migration_history"]) {
         expect(tables.has(table)).toBe(true);
       }
       const columns = (table: string) => new Set((ledger.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
+      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("2");
       expect(columns("journal_lines").has("quantity")).toBe(true);
       expect(columns("journal_lines").has("book_id")).toBe(true);
+      expect(columns("journals").has("finalized_at")).toBe(true);
+      expect(columns("accounts").has("default_asset_id")).toBe(true);
       expect(columns("assets").has("scale")).toBe(true);
       expect(columns("prices").has("quote_asset_id")).toBe(true);
       expect(columns("sources").has("book_id")).toBe(true);
@@ -57,6 +61,231 @@ describe("ledger core", () => {
       expect(columns("recurrences").has("quantity")).toBe(true);
       expect(columns("lots").has("opened_journal_id")).toBe(true);
       expect(columns("lots").has("status")).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("lets direct SQL stage draft journals and finalizes them under SQLite invariants", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+
+      expect(() => ledger.db.prepare(
+        "INSERT INTO journals(id, book_id, date, posted_at, finalized_at, status, description) VALUES ('tx_bad_insert', ?, '2026-06-01', '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z', 'posted', 'bad')"
+      ).run(ledger.bookId)).toThrow(/draft/);
+
+      ledger.db.prepare("INSERT INTO journals(id, book_id, date, posted_at, status, description) VALUES ('tx_sql', ?, '2026-06-01', '2026-06-01T00:00:00Z', 'posted', 'direct sql')").run(ledger.bookId);
+      ledger.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES ('line_sql_1', ?, 'tx_sql', 1, ?, ?, 100)").run(ledger.bookId, checking, usd);
+      ledger.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES ('line_sql_2', ?, 'tx_sql', 2, ?, ?, -100)").run(ledger.bookId, equity, usd);
+
+      expect(ledger.listTransactions({ status: null }).map((tx) => tx.id)).not.toContain("tx_sql");
+      ledger.db.prepare("UPDATE journals SET finalized_at = '2026-06-01T00:00:01Z' WHERE book_id = ? AND id = 'tx_sql'").run(ledger.bookId);
+      expect(ledger.listTransactions({ status: null }).map((tx) => tx.id)).toContain("tx_sql");
+      expect(ledger.balance(checking, usd)).toBe(100n);
+
+      expect(() => ledger.db.prepare("UPDATE journal_lines SET quantity = 200 WHERE id = 'line_sql_1'").run()).toThrow(/finalized/);
+      expect(() => ledger.db.prepare("DELETE FROM journal_lines WHERE id = 'line_sql_1'").run()).toThrow(/finalized/);
+      expect(() => ledger.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES ('line_sql_3', ?, 'tx_sql', 3, ?, ?, 0)").run(ledger.bookId, checking, usd)).toThrow(/finalized/);
+
+      ledger.db.prepare("INSERT INTO journals(id, book_id, date, posted_at, status, description) VALUES ('tx_unbalanced', ?, '2026-06-02', '2026-06-02T00:00:00Z', 'posted', 'bad')").run(ledger.bookId);
+      ledger.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES ('line_bad_1', ?, 'tx_unbalanced', 1, ?, ?, 1)").run(ledger.bookId, checking, usd);
+      expect(() => ledger.db.prepare("UPDATE journals SET finalized_at = '2026-06-02T00:00:01Z' WHERE book_id = ? AND id = 'tx_unbalanced'").run(ledger.bookId)).toThrow(/balance/);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("enforces closed periods in direct SQL finalization and reopening", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      const posted = ledger.recordTransaction("2026-06-01", 100n, equity, checking, usd, "Posted before close", "posted");
+      ledger.closePeriod("June close", "2026-06-30");
+
+      ledger.db.prepare("INSERT INTO journals(id, book_id, date, posted_at, status, description) VALUES ('tx_closed_sql', ?, '2026-06-15', '2026-06-15T00:00:00Z', 'posted', 'closed draft')").run(ledger.bookId);
+      ledger.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES ('line_closed_1', ?, 'tx_closed_sql', 1, ?, ?, 50)").run(ledger.bookId, checking, usd);
+      ledger.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES ('line_closed_2', ?, 'tx_closed_sql', 2, ?, ?, -50)").run(ledger.bookId, equity, usd);
+
+      expect(() => ledger.db.prepare("UPDATE journals SET finalized_at = '2026-06-15T00:00:01Z' WHERE book_id = ? AND id = 'tx_closed_sql'").run(ledger.bookId)).toThrow(/closed period/);
+      expect(() => ledger.db.prepare("UPDATE journals SET finalized_at = NULL WHERE book_id = ? AND id = ?").run(ledger.bookId, posted.id)).toThrow(/closed period/);
+      expect(ledger.listTransactions({ status: null }).map((tx) => tx.id)).not.toContain("tx_closed_sql");
+      expect(ledger.getTx(posted.id)?.status).toBe("posted");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("migrates a fully populated schema v1 ledger to v2 without losing data", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-npm-v1-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "legacy.db");
+    const db = new DatabaseSync(dbPath, { readBigInts: true });
+    try {
+      db.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO meta(key, value) VALUES ('schema_version', '1');
+        CREATE TABLE books(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL, parent_id TEXT, created_at TEXT NOT NULL, closed_at TEXT);
+        INSERT INTO books(id, name, type, parent_id, created_at) VALUES ('book_default', 'Actual', 'actual', NULL, '1970-01-01T00:00:00Z');
+        CREATE TABLE assets(id TEXT PRIMARY KEY, symbol TEXT NOT NULL UNIQUE, type TEXT NOT NULL, scale INTEGER NOT NULL, name TEXT NOT NULL DEFAULT '');
+        INSERT INTO assets(id, symbol, type, scale, name) VALUES ('asset_usd', 'USD', 'currency', 2, 'US Dollar');
+        INSERT INTO assets(id, symbol, type, scale, name) VALUES ('asset_aapl', 'AAPL', 'security', 8, 'AAPL');
+        CREATE TABLE accounts(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, parent_id TEXT, code TEXT NOT NULL DEFAULT '', color_hex TEXT NOT NULL DEFAULT '#888888', status TEXT NOT NULL DEFAULT 'active', UNIQUE(id, book_id), UNIQUE(book_id, name));
+        INSERT INTO accounts(id, book_id, name, type) VALUES
+          ('acct_checking', 'book_default', 'Checking', 'asset'),
+          ('acct_equity', 'book_default', 'Equity', 'equity'),
+          ('acct_holding', 'book_default', 'AAPL Holdings', 'asset'),
+          ('acct_cost', 'book_default', 'Investment Cost', 'expense');
+        CREATE TABLE annotations(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL);
+        INSERT INTO annotations(id, book_id, entity_type, entity_id, key, value) VALUES ('ann_default', 'book_default', 'account', 'acct_checking', 'default_asset', 'asset_usd');
+        CREATE TABLE sources(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, type TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}', UNIQUE(id, book_id));
+        INSERT INTO sources(id, book_id, type, label, status, created_at, metadata_json) VALUES ('batch_legacy', 'book_default', 'import', 'Legacy batch', 'open', '2026-06-01T00:00:00Z', '{"fixture":true}');
+        CREATE TABLE journals(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, source_id TEXT, date TEXT NOT NULL, posted_at TEXT NOT NULL, status TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', external_id TEXT, UNIQUE(id, book_id));
+        INSERT INTO journals(id, book_id, source_id, date, posted_at, status, description) VALUES
+          ('tx_legacy', 'book_default', 'batch_legacy', '2026-06-01', '2026-06-01T00:00:00Z', 'posted', 'legacy'),
+          ('tx_buy', 'book_default', NULL, '2026-06-02', '2026-06-02T00:00:00Z', 'posted', 'Buy AAPL');
+        CREATE TABLE journal_lines(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, journal_id TEXT NOT NULL, line_no INTEGER NOT NULL, account_id TEXT NOT NULL, asset_id TEXT NOT NULL, quantity INTEGER NOT NULL, memo TEXT NOT NULL DEFAULT '', UNIQUE(journal_id, line_no));
+        INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES
+          ('line_1', 'book_default', 'tx_legacy', 1, 'acct_checking', 'asset_usd', 500),
+          ('line_2', 'book_default', 'tx_legacy', 2, 'acct_equity', 'asset_usd', -500),
+          ('line_3', 'book_default', 'tx_buy', 1, 'acct_checking', 'asset_usd', -1000),
+          ('line_4', 'book_default', 'tx_buy', 2, 'acct_cost', 'asset_usd', 1000),
+          ('line_5', 'book_default', 'tx_buy', 3, 'acct_cost', 'asset_aapl', -100000000),
+          ('line_6', 'book_default', 'tx_buy', 4, 'acct_holding', 'asset_aapl', 100000000);
+        CREATE TABLE prices(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, asset_id TEXT NOT NULL, quote_asset_id TEXT NOT NULL, rate_value INTEGER NOT NULL, rate_scale INTEGER NOT NULL, time TEXT NOT NULL, UNIQUE(id, book_id));
+        INSERT INTO prices(id, book_id, asset_id, quote_asset_id, rate_value, rate_scale, time) VALUES ('price_legacy', 'book_default', 'asset_aapl', 'asset_usd', 1000, 2, '2026-06-02');
+        CREATE TABLE rules(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, type TEXT NOT NULL, account_id TEXT, pattern TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 100, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, UNIQUE(id, book_id));
+        INSERT INTO rules(id, book_id, type, account_id, pattern, created_at) VALUES ('rule_legacy', 'book_default', 'match', 'acct_cost', 'AAPL', '2026-06-01T00:00:00Z');
+        CREATE TABLE targets(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, type TEXT NOT NULL, account_id TEXT NOT NULL, asset_id TEXT NOT NULL, quantity INTEGER NOT NULL, period TEXT, year INTEGER, month INTEGER, rollover_rule TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', target_date TEXT, priority INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'active', UNIQUE(id, book_id));
+        INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, period, year, month, rollover_rule, name, target_date, priority) VALUES
+          ('budget_legacy', 'book_default', 'budget', 'acct_cost', 'asset_usd', 1000, 'monthly', 2026, 6, '', '', NULL, 1),
+          ('goal_legacy', 'book_default', 'goal', 'acct_checking', 'asset_usd', 2000, NULL, NULL, NULL, '', 'Reserve', NULL, 1);
+        CREATE TABLE recurrences(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, next_date TEXT NOT NULL, quantity INTEGER NOT NULL, from_account_id TEXT NOT NULL, to_account_id TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', frequency TEXT NOT NULL, end_date TEXT, asset_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', UNIQUE(id, book_id));
+        INSERT INTO recurrences(id, book_id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id, status) VALUES ('sched_legacy', 'book_default', '2026-07-01', 100, 'acct_equity', 'acct_checking', 'Legacy scheduled', 'monthly', NULL, 'asset_usd', 'active');
+        CREATE TABLE period_closes(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, name TEXT NOT NULL, as_of TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL, reopened_at TEXT, UNIQUE(id, book_id));
+        INSERT INTO period_closes(id, book_id, name, as_of, description, created_at, reopened_at) VALUES ('period_legacy', 'book_default', 'May close', '2026-05-31', NULL, '2026-06-01T00:00:00Z', NULL);
+        CREATE TABLE lots(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, account_id TEXT NOT NULL, asset_id TEXT NOT NULL, quantity INTEGER NOT NULL, cost_asset_id TEXT NOT NULL, cost_quantity INTEGER NOT NULL, opened_journal_id TEXT NOT NULL, closed_journal_id TEXT, opened_at TEXT NOT NULL, closed_at TEXT, status TEXT NOT NULL DEFAULT 'open', metadata_json TEXT NOT NULL DEFAULT '{}', UNIQUE(id, book_id));
+        INSERT INTO lots(id, book_id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_journal_id, opened_at, status) VALUES ('lot_legacy', 'book_default', 'acct_holding', 'asset_aapl', 100000000, 'asset_usd', 1000, 'tx_buy', '2026-06-02', 'open');
+      `);
+    } finally {
+      db.close();
+    }
+
+    const ledger = new Ledger(dbPath);
+    try {
+      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("2");
+      expect(ledger.getAccount("acct_checking")?.default_asset_id).toBe("asset_usd");
+      expect((ledger.db.prepare("SELECT finalized_at FROM journals WHERE id = 'tx_legacy'").get() as any).finalized_at).toBe("2026-06-01T00:00:00Z");
+      expect(ledger.listTransactions({ status: null }).map((tx) => tx.id)).toContain("tx_legacy");
+      expect((ledger.db.prepare("SELECT count(*) AS c FROM migration_history WHERE version = 2").get() as any).c).toBe(1n);
+      expect(ledger.listSources("import", null)).toHaveLength(1);
+      expect(ledger.listPrices()).toHaveLength(1);
+      expect(ledger.listRules("match")).toHaveLength(1);
+      expect(ledger.listBudgetTargets()).toHaveLength(1);
+      expect(ledger.listGoalTargets()).toHaveLength(1);
+      expect(ledger.listRecurrences()).toHaveLength(1);
+      expect(ledger.listCheckpoints()).toHaveLength(1);
+      expect(ledger.listLots()).toHaveLength(1);
+      expect(ledger.integrityCheck().ok).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("clones scenario books into isolated active books with remapped graph data", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const cad = ledger.createAsset("CAD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const brokerage = ledger.createAccount("Brokerage", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      ledger.updateAccount(checking, { default_asset_id: usd });
+      const sourceId = ledger.createSource("import", "Scenario source", { fixture: true });
+      const seed = ledger.recordTransaction("2026-06-01", 1000n, equity, checking, usd, "Seed", "posted", { sourceId });
+      ledger.createAnnotation("tx", seed.id, "memo", "seed memo");
+      const ruleId = ledger.createRule("match", groceries, "Market");
+      const budget = ledger.setBudget(groceries, usd, 500n, "monthly", 2026, 6, false);
+      const goal = ledger.setGoal(checking, usd, 2500n, "Reserve", null, 1);
+      const recurrence = ledger.createRecurrence("2026-07-01", 100n, checking, groceries, "Scheduled groceries", "monthly", null, usd);
+      const priceId = ledger.createPrice(usd, cad, "1.25", "2026-06-01");
+      const close = ledger.closePeriod("Prior close", "2026-05-31");
+      const buy = ledger.recordSecurityPurchase({ symbol: "AAPL", shares: 150000000n, totalCost: 12345n, cashAssetId: usd, investmentAccountId: brokerage, date: "2026-06-02" });
+      const originalLot = ledger.listLots()[0];
+
+      const scenario = ledger.createScenarioBook("what-if");
+      const scenarioLedger = new Ledger(ledger.path, { bookId: String(scenario.id) });
+      try {
+        const scenarioChecking = scenarioLedger.findAccount("Checking")!;
+        const scenarioBrokerage = scenarioLedger.findAccount("Brokerage")!;
+        const scenarioEquity = scenarioLedger.findAccount("Equity")!;
+        const scenarioGroceries = scenarioLedger.findAccount("Groceries")!;
+        const scenarioHolding = scenarioLedger.findAccount("AAPL Holdings")!;
+        expect(scenarioChecking.id).not.toBe(checking);
+        expect(scenarioBrokerage.id).not.toBe(brokerage);
+        expect(scenarioChecking.default_asset_id).toBe(usd);
+        expect(scenarioLedger.balance(scenarioChecking.id, usd)).toBe(1000n);
+
+        const scenarioSource = scenarioLedger.listSources("import", null)[0];
+        expect(scenarioSource.id).not.toBe(sourceId);
+        expect(scenarioSource.label).toBe("Scenario source");
+
+        const scenarioTxs = scenarioLedger.listTransactions({ status: null });
+        const scenarioSeed = scenarioTxs.find((tx) => tx.description === "Seed")!;
+        const scenarioBuy = scenarioTxs.find((tx) => tx.description === "Buy AAPL")!;
+        expect(scenarioSeed.id).not.toBe(seed.id);
+        expect(scenarioSeed.source_id).toBe(scenarioSource.id);
+        expect(scenarioLedger.listAnnotations("tx", scenarioSeed.id)).toContainEqual(expect.objectContaining({ key: "memo", value: "seed memo" }));
+        expect(scenarioBuy.id).not.toBe(buy.id);
+
+        const scenarioRule = scenarioLedger.listRules("match")[0];
+        expect(scenarioRule.id).not.toBe(ruleId);
+        expect(scenarioRule.account_id).toBe(scenarioGroceries.id);
+        expect(scenarioRule.pattern).toBe("Market");
+
+        const scenarioBudget = scenarioLedger.listBudgetTargets({ accountId: scenarioGroceries.id })[0];
+        expect(scenarioBudget.id).not.toBe(budget.id);
+        expect(scenarioBudget.quantity).toBe(500n);
+        expect(scenarioBudget.asset_id).toBe(usd);
+
+        const scenarioGoal = scenarioLedger.getGoalTarget(scenarioChecking.id)!;
+        expect(scenarioGoal.id).not.toBe(goal.id);
+        expect(scenarioGoal.quantity).toBe(2500n);
+
+        const scenarioRecurrence = scenarioLedger.listRecurrences()[0];
+        expect(scenarioRecurrence.id).not.toBe(recurrence.id);
+        expect(scenarioRecurrence.from_account_id).toBe(scenarioChecking.id);
+        expect(scenarioRecurrence.to_account_id).toBe(scenarioGroceries.id);
+
+        const scenarioPrice = scenarioLedger.listPrices()[0];
+        expect(scenarioPrice.id).not.toBe(priceId);
+        expect(scenarioPrice.asset_id).toBe(usd);
+        expect(scenarioPrice.quote_asset_id).toBe(cad);
+
+        const scenarioClose = scenarioLedger.listCheckpoints()[0];
+        expect(scenarioClose.id).not.toBe(close.id);
+        expect(scenarioClose.name).toBe("Prior close");
+
+        const scenarioLot = scenarioLedger.listLots()[0];
+        expect(scenarioLot.id).not.toBe(originalLot.id);
+        expect(scenarioLot.account_id).toBe(scenarioHolding.id);
+        expect(scenarioLot.opened_journal_id).toBe(scenarioBuy.id);
+        expect(scenarioLot.asset_id).toBe(originalLot.asset_id);
+
+        scenarioLedger.recordTransaction("2026-06-02", 250n, scenarioEquity.id, scenarioChecking.id, usd, "Scenario seed", "posted");
+        expect(scenarioLedger.balance(scenarioChecking.id, usd)).toBe(1250n);
+        expect(ledger.balance(checking, usd)).toBe(1000n);
+        expect(ledger.balance(brokerage, usd)).toBe(-12345n);
+        expect(scenarioLedger.balance(scenarioBrokerage.id, usd)).toBe(-12345n);
+      } finally {
+        scenarioLedger.close();
+      }
     } finally {
       ledger.close();
     }

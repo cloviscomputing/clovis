@@ -22,6 +22,7 @@ export interface Account {
   type: AccountType;
   account_type: AccountType;
   parent_id: string | null;
+  default_asset_id: string | null;
   code: string;
   color_hex: string;
   normal_balance: "debit" | "credit";

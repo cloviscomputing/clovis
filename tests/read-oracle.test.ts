@@ -104,7 +104,7 @@ function createOracleContext(): OracleContext {
   ledger.setGoal(accounts.Savings, usd, 200000n, "Reserve", null, 1);
   ledger.createRecurrence("2026-06-01", 1500n, accounts.Checking, accounts.Utilities, "Scheduled utility", "monthly", null, usd);
   callTool("buy_security", { account_id: accounts.Brokerage, symbol: "MSFT", shares: 2, total_cost_cents: 20000, date: "2026-06-11", asset_id: usd }, ledger);
-  ledger.createScenarioBook("scenario");
+  ledger.db.prepare("INSERT INTO books(id, name, type, parent_id, created_at) VALUES ('scenario', 'scenario', 'scenario', ?, '2026-06-01T00:00:00Z')").run(ledger.bookId);
   const checkpointId = String(ledger.closePeriod("May close", "2026-05-31").id);
   callTool("backup_now", {}, ledger);
 

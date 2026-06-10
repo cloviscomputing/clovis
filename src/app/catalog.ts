@@ -103,6 +103,11 @@ function reportAsset(ledger: Ledger, ref?: string | null): string {
 }
 
 function accountDefaultAsset(ledger: Ledger, accountId: string): string | null {
+  const account = ledger.getAccount(accountId);
+  if (account?.default_asset_id) {
+    if (!ledger.getAsset(account.default_asset_id)) throw new Error(`Account '${accountId}' has invalid default_asset '${account.default_asset_id}'`);
+    return account.default_asset_id;
+  }
   const tags = ledger.listAnnotations("account", accountId).filter((tag) => tag.key === "default_asset");
   const value = tags.at(-1)?.value ?? null;
   if (!value) return null;
@@ -111,8 +116,8 @@ function accountDefaultAsset(ledger: Ledger, accountId: string): string | null {
 }
 
 function setAccountDefaultAsset(ledger: Ledger, accountId: string, assetId?: string | null): void {
+  ledger.updateAccount(accountId, { default_asset_id: assetId ? explicitAsset(ledger, assetId) : null });
   for (const tag of ledger.listAnnotations("account", accountId).filter((row) => row.key === "default_asset")) ledger.deleteAnnotation(tag.id);
-  if (assetId) ledger.createAnnotation("account", accountId, "default_asset", explicitAsset(ledger, assetId));
 }
 
 function accountAsset(ledger: Ledger, accountId: string, label = "asset_id"): string {
@@ -173,8 +178,8 @@ function display(ledger: Ledger, quantity: bigint, assetId?: string | null): num
 }
 
 function accountPublic(row: Account, ledger?: Ledger): Row {
-  // Account rows stay normalized in SQLite; default_asset is exposed from
-  // annotations so callers can understand currency context immediately.
+  // Account rows carry default_asset_id directly; annotations remain readable
+  // for old databases imported before schema v2.
   const defaultAssetId = ledger ? accountDefaultAsset(ledger, row.id) : null;
   const defaultAsset = defaultAssetId ? ledger?.getAsset(defaultAssetId) : null;
   return { ...row, type: row.account_type, default_asset_id: defaultAssetId, default_asset_symbol: defaultAsset?.symbol ?? null };

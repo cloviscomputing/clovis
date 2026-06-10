@@ -23,17 +23,18 @@ the `0.x` line.
 
 ## Status
 
-The database format is versioned. The current schema is `SCHEMA_VERSION = 1`.
-Fresh databases are created directly with this schema. Ledger JSON snapshots can
-be exported and imported with `export_ledger` and `import_ledger`.
+The database format is versioned. The current schema is `SCHEMA_VERSION = 2`.
+Fresh databases are created directly with this schema. Schema v1 ledgers are
+migrated on open. Ledger JSON snapshots can be exported and imported with
+`export_ledger` and `import_ledger`.
 
 `0.1.0` is the first public release. Clovis is designed for long-running local
 bookkeeping workflows while the public API and database format settle during the
 `0.x` line.
 
 The schema is a versioned local data format, but the package is still pre-1.0.
-Patch releases should continue to read schema v1 databases. Minor releases may
-revise the format and should document the upgrade path.
+Patch releases should continue to read schema v1 and v2 databases. Minor
+releases may revise the format and should document the upgrade path.
 
 ## Financial Records
 
@@ -53,7 +54,7 @@ custody system, tax filing product, or substitute for professional review.
 ## Currency Model
 
 Clovis does not infer a default currency. Setup requires an explicit currency,
-and accounts created by `init_defaults` are tagged with a `default_asset`.
+and accounts created by `init_defaults` store it in `accounts.default_asset_id`.
 Account APIs expose `default_asset_id` and `default_asset_symbol`.
 
 Transactions may omit `asset_id` only when both accounts have the same
@@ -271,8 +272,9 @@ prices
 `journals` stores transaction headers. `journal_lines` stores the balanced
 legs. Every journal must sum to zero for each `asset_id`; `quantity` is stored
 in atomic units using the related asset `scale`.
-Account default currencies are stored as account `default_asset` annotations and
-exported in ledger snapshots.
+Account default currencies are stored in `accounts.default_asset_id` and
+exported in ledger snapshots. Older `default_asset` annotations are migrated and
+remain readable for compatibility.
 
 ```text
 books
@@ -304,6 +306,7 @@ Support tables keep workflow concerns out of the journal core:
 - `period_closes`: closed accounting periods.
 - `lots`: investment lots and cost basis.
 - `meta`: schema version and database metadata.
+- `migration_history`: applied schema upgrades.
 
 For the complete SQLite schema, persistence flow, and design rationale, see
 [docs/sqlite-schema.md](docs/sqlite-schema.md).

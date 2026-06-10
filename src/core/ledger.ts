@@ -15,6 +15,10 @@ type PostTxOptions = {
   externalId?: string | null;
 };
 
+type LedgerOptions = {
+  bookId?: string | null;
+};
+
 type BudgetTargetOptions = {
   accountId?: string | null;
   year?: number | null;
@@ -135,6 +139,7 @@ function toAccount(row: Row | undefined): Account | null {
     type: accountType(String(row.type)),
     account_type: accountType(String(row.type)),
     parent_id: boolDate(row.parent_id),
+    default_asset_id: boolDate(row.default_asset_id),
     code: String(row.code ?? ""),
     color_hex: String(row.color_hex ?? "#888888")
   });
@@ -208,9 +213,10 @@ function validateLines(lines: Array<[string, string, bigint]>): void {
 
 export class Ledger {
   readonly path: string;
+  readonly bookId: string;
   private readonly db: DatabaseSync;
 
-  constructor(path: string) {
+  constructor(path: string, options: LedgerOptions = {}) {
     let dbPath = path;
     if (path.endsWith(sep)) dbPath = join(path, "clovis.db");
     try {
@@ -220,6 +226,7 @@ export class Ledger {
     }
     mkdirSync(dirname(dbPath), { recursive: true });
     this.path = dbPath;
+    this.bookId = options.bookId || DEFAULT_BOOK_ID;
     this.db = new DatabaseSync(this.path, { readBigInts: true });
     this.db.exec("PRAGMA foreign_keys = ON");
     this.initialize();
@@ -230,11 +237,67 @@ export class Ledger {
   }
 
   initialize(): void {
-    this.db.exec(DDL);
-    this.db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
+    const currentVersion = this.detectSchemaVersion();
+    if (currentVersion === 0) {
+      this.db.exec(DDL);
+      this.db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
+      this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (?, ?, ?)").run(SCHEMA_VERSION, "initial schema", now());
+    } else if (currentVersion < SCHEMA_VERSION) {
+      this.migrate(currentVersion);
+      this.db.exec(DDL);
+    } else {
+      this.db.exec(DDL);
+    }
     this.db.prepare(
       "INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at) VALUES (?, 'Actual', 'actual', NULL, ?)"
     ).run(DEFAULT_BOOK_ID, "1970-01-01T00:00:00Z");
+    if (this.bookId !== DEFAULT_BOOK_ID && !this.db.prepare("SELECT id FROM books WHERE id = ?").get(this.bookId)) {
+      throw new Error(`Book ${this.bookId} not found`);
+    }
+  }
+
+  private detectSchemaVersion(): number {
+    const meta = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get() as Row | undefined;
+    if (!meta) return 0;
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as Row | undefined;
+    return Number(row?.value ?? 1);
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).some((row) => String(row.name) === column);
+  }
+
+  private migrate(currentVersion: number): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (currentVersion < 2) this.migrateToV2();
+      this.db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private migrateToV2(): void {
+    this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
+    if (!this.hasColumn("accounts", "default_asset_id")) this.db.exec("ALTER TABLE accounts ADD COLUMN default_asset_id TEXT REFERENCES assets(id)");
+    if (!this.hasColumn("journals", "finalized_at")) this.db.exec("ALTER TABLE journals ADD COLUMN finalized_at TEXT");
+    this.db.exec(`
+      UPDATE accounts
+      SET default_asset_id = (
+        SELECT value FROM annotations
+        WHERE annotations.book_id = accounts.book_id
+          AND annotations.entity_type = 'account'
+          AND annotations.entity_id = accounts.id
+          AND annotations.key = 'default_asset'
+        ORDER BY annotations.rowid DESC
+        LIMIT 1
+      )
+      WHERE default_asset_id IS NULL
+    `);
+    this.db.exec("UPDATE journals SET finalized_at = posted_at WHERE finalized_at IS NULL");
+    this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (2, 'add finalized journals and account default assets', ?)").run(now());
   }
 
   createAsset(symbol: string, type: AssetType | string = "currency", scale = 2, name = ""): string {
@@ -287,21 +350,21 @@ export class Ledger {
     const accountId = id("acct");
     this.db.prepare(
       "INSERT INTO accounts(id, book_id, name, type, parent_id, code, color_hex) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).run(accountId, DEFAULT_BOOK_ID, name, normalized, parentId || null, code, colorHex);
+    ).run(accountId, this.bookId, name, normalized, parentId || null, code, colorHex);
     return accountId;
   }
 
   findAccount(ref: string): Account | null {
     return this.getAccount(ref) ??
-      toAccount(this.db.prepare("SELECT * FROM accounts WHERE lower(name) = lower(?) ORDER BY id LIMIT 1").get(ref) as Row | undefined);
+      toAccount(this.db.prepare("SELECT * FROM accounts WHERE book_id = ? AND lower(name) = lower(?) ORDER BY id LIMIT 1").get(this.bookId, ref) as Row | undefined);
   }
 
   getAccount(accountId: string): Account | null {
-    return toAccount(this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId) as Row | undefined);
+    return toAccount(this.db.prepare("SELECT * FROM accounts WHERE book_id = ? AND id = ?").get(this.bookId, accountId) as Row | undefined);
   }
 
   listAccounts(): Account[] {
-    return (this.db.prepare("SELECT * FROM accounts ORDER BY name, id").all() as Row[]).map((row) => toAccount(row)!);
+    return (this.db.prepare("SELECT * FROM accounts WHERE book_id = ? ORDER BY name, id").all(this.bookId) as Row[]).map((row) => toAccount(row)!);
   }
 
   private assertValidAccountParent(accountId: string, parentId: string | null): void {
@@ -318,37 +381,42 @@ export class Ledger {
     name?: string | null;
     type?: AccountType | string | null;
     parent_id?: string | null;
+    default_asset_id?: string | null;
     code?: string | null;
     color_hex?: string | null;
   }): Account {
     const existingAccount = this.getAccount(accountId);
     if (!existingAccount) throw new Error(`Account ${accountId} not found`);
-    if (values.name != null) this.db.prepare("UPDATE accounts SET name = ? WHERE id = ?").run(values.name, accountId);
+    if (values.name != null) this.db.prepare("UPDATE accounts SET name = ? WHERE book_id = ? AND id = ?").run(values.name, this.bookId, accountId);
     if (values.type != null) {
       const nextType = accountType(String(values.type));
       if (nextType !== existingAccount.account_type) this.assertAccountNotLinkedToLots(accountId);
-      this.db.prepare("UPDATE accounts SET type = ? WHERE id = ?").run(nextType, accountId);
+      this.db.prepare("UPDATE accounts SET type = ? WHERE book_id = ? AND id = ?").run(nextType, this.bookId, accountId);
     }
     if (values.parent_id !== undefined) {
       if (values.parent_id && !this.getAccount(values.parent_id)) throw new Error(`Parent account ${values.parent_id} not found`);
       this.assertValidAccountParent(accountId, values.parent_id || null);
-      this.db.prepare("UPDATE accounts SET parent_id = ? WHERE id = ?").run(values.parent_id || null, accountId);
+      this.db.prepare("UPDATE accounts SET parent_id = ? WHERE book_id = ? AND id = ?").run(values.parent_id || null, this.bookId, accountId);
     }
-    if (values.code != null) this.db.prepare("UPDATE accounts SET code = ? WHERE id = ?").run(values.code, accountId);
-    if (values.color_hex != null) this.db.prepare("UPDATE accounts SET color_hex = ? WHERE id = ?").run(values.color_hex, accountId);
+    if (values.code != null) this.db.prepare("UPDATE accounts SET code = ? WHERE book_id = ? AND id = ?").run(values.code, this.bookId, accountId);
+    if (values.color_hex != null) this.db.prepare("UPDATE accounts SET color_hex = ? WHERE book_id = ? AND id = ?").run(values.color_hex, this.bookId, accountId);
+    if (values.default_asset_id !== undefined) {
+      if (values.default_asset_id && !this.getAsset(values.default_asset_id)) throw new Error(`Asset ${values.default_asset_id} not found`);
+      this.db.prepare("UPDATE accounts SET default_asset_id = ? WHERE book_id = ? AND id = ?").run(values.default_asset_id || null, this.bookId, accountId);
+    }
     return this.getAccount(accountId)!;
   }
 
   deleteAccount(accountId: string): void {
     if (!this.getAccount(accountId)) throw new Error(`Account ${accountId} not found`);
-    const children = (this.db.prepare("SELECT count(*) AS c FROM accounts WHERE parent_id = ?").get(accountId) as Row).c as bigint;
+    const children = (this.db.prepare("SELECT count(*) AS c FROM accounts WHERE book_id = ? AND parent_id = ?").get(this.bookId, accountId) as Row).c as bigint;
     if (children > 0n) throw new Error("Account has child accounts");
-    const entries = (this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE account_id = ?").get(accountId) as Row).c as bigint;
+    const entries = (this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE book_id = ? AND account_id = ?").get(this.bookId, accountId) as Row).c as bigint;
     if (entries > 0n) throw new Error("Account has entries");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
-      this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND entity_type = 'account' AND entity_id = ?").run(DEFAULT_BOOK_ID, accountId);
+      this.db.prepare("DELETE FROM accounts WHERE book_id = ? AND id = ?").run(this.bookId, accountId);
+      this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND entity_type = 'account' AND entity_id = ?").run(this.bookId, accountId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -360,7 +428,7 @@ export class Ledger {
     const annotationId = id("ann");
     this.db.prepare("INSERT INTO annotations(id, book_id, entity_type, entity_id, key, value) VALUES (?, ?, ?, ?, ?, ?)").run(
       annotationId,
-      DEFAULT_BOOK_ID,
+      this.bookId,
       entityType,
       entityId,
       key,
@@ -372,15 +440,15 @@ export class Ledger {
   listAnnotations(entityType: string, entityId: string): Array<Record<string, string>> {
     return (this.db.prepare(
       "SELECT id, book_id, entity_type, entity_id, key, value AS val, value FROM annotations WHERE book_id = ? AND entity_type = ? AND entity_id = ? ORDER BY key, id"
-    ).all(DEFAULT_BOOK_ID, entityType, entityId) as Row[]).map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, String(v)])));
+    ).all(this.bookId, entityType, entityId) as Row[]).map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, String(v)])));
   }
 
   deleteAnnotation(annotationId: string): void {
-    this.db.prepare("DELETE FROM annotations WHERE id = ?").run(annotationId);
+    this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND id = ?").run(this.bookId, annotationId);
   }
 
   listAnnotationEntityIds(entityType: string, key: string, value: string): string[] {
-    return (this.db.prepare("SELECT entity_id FROM annotations WHERE book_id = ? AND entity_type = ? AND key = ? AND value = ? ORDER BY entity_id").all(DEFAULT_BOOK_ID, entityType, key, value) as Row[])
+    return (this.db.prepare("SELECT entity_id FROM annotations WHERE book_id = ? AND entity_type = ? AND key = ? AND value = ? ORDER BY entity_id").all(this.bookId, entityType, key, value) as Row[])
       .map((row) => String(row.entity_id));
   }
 
@@ -388,7 +456,7 @@ export class Ledger {
     const sourceId = id(type === "import" ? "batch" : "source");
     this.db.prepare("INSERT INTO sources(id, book_id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
       sourceId,
-      DEFAULT_BOOK_ID,
+      this.bookId,
       type,
       label ?? "",
       status,
@@ -400,7 +468,7 @@ export class Ledger {
 
   listSources(type?: string | null, limit: number | null = 20): Row[] {
     let sql = "SELECT * FROM sources WHERE book_id = ?";
-    const params: SQLInputValue[] = [DEFAULT_BOOK_ID];
+    const params: SQLInputValue[] = [this.bookId];
     if (type) {
       sql += " AND type = ?";
       params.push(type);
@@ -414,17 +482,17 @@ export class Ledger {
   }
 
   updateSourceStatus(sourceId: string, status: string): number {
-    return Number(this.db.prepare("UPDATE sources SET status = ? WHERE id = ?").run(status, sourceId).changes);
+    return Number(this.db.prepare("UPDATE sources SET status = ? WHERE book_id = ? AND id = ?").run(status, this.bookId, sourceId).changes);
   }
 
   updateTransactionSource(txId: string, sourceId: string | null): number {
-    if (sourceId != null && !this.db.prepare("SELECT id FROM sources WHERE id = ?").get(sourceId)) throw new Error(`Source ${sourceId} not found`);
-    return Number(this.db.prepare("UPDATE journals SET source_id = ? WHERE id = ?").run(sourceId, txId).changes);
+    if (sourceId != null && !this.db.prepare("SELECT id FROM sources WHERE book_id = ? AND id = ?").get(this.bookId, sourceId)) throw new Error(`Source ${sourceId} not found`);
+    return Number(this.db.prepare("UPDATE journals SET source_id = ? WHERE book_id = ? AND id = ?").run(sourceId, this.bookId, txId).changes);
   }
 
   listTransactionIdsForSource(sourceId: string): string[] {
     const ids = new Set<string>();
-    for (const row of this.db.prepare("SELECT id FROM journals WHERE source_id = ? ORDER BY date, id").all(sourceId) as Row[]) {
+    for (const row of this.db.prepare("SELECT id FROM journals WHERE book_id = ? AND source_id = ? AND finalized_at IS NOT NULL ORDER BY date, id").all(this.bookId, sourceId) as Row[]) {
       ids.add(String(row.id));
     }
     for (const txId of this.listAnnotationEntityIds("tx", "import_batch", sourceId)) ids.add(txId);
@@ -446,43 +514,53 @@ export class Ledger {
   }
 
   countTransactions(): number {
-    return Number((this.db.prepare("SELECT count(*) AS c FROM journals").get() as Row).c);
+    return Number((this.db.prepare("SELECT count(*) AS c FROM journals WHERE book_id = ? AND finalized_at IS NOT NULL").get(this.bookId) as Row).c);
   }
 
   countEntries(): number {
-    return Number((this.db.prepare("SELECT count(*) AS c FROM journal_lines").get() as Row).c);
+    return Number((this.db.prepare(
+      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL"
+    ).get(this.bookId) as Row).c);
   }
 
   countEntriesByAsset(assetId: string): number {
-    return Number((this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE asset_id = ?").get(assetId) as Row).c);
+    return Number((this.db.prepare(
+      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.asset_id = ?"
+    ).get(this.bookId, assetId) as Row).c);
   }
 
   countEntriesByAccount(accountId: string): number {
-    return Number((this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE account_id = ?").get(accountId) as Row).c);
+    return Number((this.db.prepare(
+      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ?"
+    ).get(this.bookId, accountId) as Row).c);
   }
 
   countTransactionsByAccount(accountId: string): number {
-    return Number((this.db.prepare("SELECT count(DISTINCT journal_id) AS c FROM journal_lines WHERE account_id = ?").get(accountId) as Row).c);
+    return Number((this.db.prepare(
+      "SELECT count(DISTINCT l.journal_id) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ?"
+    ).get(this.bookId, accountId) as Row).c);
   }
 
   listEntriesByAsset(assetId: string, limit = 100, offset = 0): Row[] {
-    return this.db.prepare("SELECT * FROM journal_lines WHERE asset_id = ? ORDER BY journal_id, line_no LIMIT ? OFFSET ?").all(assetId, limit, offset) as Row[];
+    return this.db.prepare(
+      "SELECT l.* FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.asset_id = ? ORDER BY l.journal_id, l.line_no LIMIT ? OFFSET ?"
+    ).all(this.bookId, assetId, limit, offset) as Row[];
   }
 
   createRule(type: string, accountId: string, pattern: string): string {
-    const existing = this.db.prepare("SELECT id FROM rules WHERE book_id = ? AND type = ? AND account_id = ? AND pattern = ? AND status = 'active'").get(DEFAULT_BOOK_ID, type, accountId, pattern) as Row | undefined;
+    const existing = this.db.prepare("SELECT id FROM rules WHERE book_id = ? AND type = ? AND account_id = ? AND pattern = ? AND status = 'active'").get(this.bookId, type, accountId, pattern) as Row | undefined;
     if (existing) return String(existing.id);
     const ruleId = id("rule");
-    this.db.prepare("INSERT INTO rules(id, book_id, type, account_id, pattern, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(ruleId, DEFAULT_BOOK_ID, type, accountId, pattern, now());
+    this.db.prepare("INSERT INTO rules(id, book_id, type, account_id, pattern, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(ruleId, this.bookId, type, accountId, pattern, now());
     return ruleId;
   }
 
   listRules(type = "match"): Array<Record<string, unknown>> {
-    return this.db.prepare("SELECT id, account_id, pattern, priority, status FROM rules WHERE book_id = ? AND type = ? AND status = 'active' ORDER BY priority, id").all(DEFAULT_BOOK_ID, type) as Row[];
+    return this.db.prepare("SELECT id, account_id, pattern, priority, status FROM rules WHERE book_id = ? AND type = ? AND status = 'active' ORDER BY priority, id").all(this.bookId, type) as Row[];
   }
 
   deleteRule(accountId: string, pattern: string, type = "match"): number {
-    const result = this.db.prepare("UPDATE rules SET status = 'deleted' WHERE book_id = ? AND type = ? AND account_id = ? AND pattern = ? AND status = 'active'").run(DEFAULT_BOOK_ID, type, accountId, pattern);
+    const result = this.db.prepare("UPDATE rules SET status = 'deleted' WHERE book_id = ? AND type = ? AND account_id = ? AND pattern = ? AND status = 'active'").run(this.bookId, type, accountId, pattern);
     return Number(result.changes);
   }
 
@@ -496,7 +574,7 @@ export class Ledger {
 
   listBudgetTargets(options: BudgetTargetOptions = {}): Row[] {
     let sql = "SELECT * FROM targets WHERE book_id = ? AND type = 'budget'";
-    const params: SQLInputValue[] = [DEFAULT_BOOK_ID];
+    const params: SQLInputValue[] = [this.bookId];
     if (options.accountId) {
       sql += " AND account_id = ?";
       params.push(options.accountId);
@@ -523,11 +601,11 @@ export class Ledger {
     const normalizedMonth = monthValue(month);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'budget' AND account_id = ? AND asset_id = ? AND period = ? AND year IS ? AND month IS ?").run(DEFAULT_BOOK_ID, accountId, assetId, normalizedPeriod, normalizedYear, normalizedMonth);
+      this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'budget' AND account_id = ? AND asset_id = ? AND period = ? AND year IS ? AND month IS ?").run(this.bookId, accountId, assetId, normalizedPeriod, normalizedYear, normalizedMonth);
       const targetId = id("budget");
       this.db.prepare("INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, ?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
         targetId,
-        DEFAULT_BOOK_ID,
+        this.bookId,
         accountId,
         assetId,
         amount,
@@ -537,7 +615,7 @@ export class Ledger {
         rollover ? "full" : ""
       );
       this.db.exec("COMMIT");
-      return this.db.prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row;
+      return this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND id = ?").get(this.bookId, targetId) as Row;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -546,7 +624,7 @@ export class Ledger {
 
   deleteBudget(accountId: string, year?: number | null, month?: number | null): number {
     let sql = "DELETE FROM targets WHERE book_id = ? AND type = 'budget' AND account_id = ?";
-    const params: SQLInputValue[] = [DEFAULT_BOOK_ID, accountId];
+    const params: SQLInputValue[] = [this.bookId, accountId];
     if (year != null) {
       sql += " AND year = ?";
       params.push(year);
@@ -559,7 +637,7 @@ export class Ledger {
   }
 
   deleteAllBudgets(): number {
-    return Number(this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'budget'").run(DEFAULT_BOOK_ID).changes);
+    return Number(this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'budget'").run(this.bookId).changes);
   }
 
   setGoal(accountId: string, assetId: string, quantity: bigint | number, name: string, targetDate?: string | null, priority = 1): Row {
@@ -569,11 +647,11 @@ export class Ledger {
     const normalizedDate = targetDate == null || targetDate === "" ? null : dateOnly(targetDate);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ? AND asset_id = ?").run(DEFAULT_BOOK_ID, accountId, assetId);
+      this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ? AND asset_id = ?").run(this.bookId, accountId, assetId);
       const targetId = id("goal");
       this.db.prepare("INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, ?, 'goal', ?, ?, ?, ?, ?, ?)").run(
         targetId,
-        DEFAULT_BOOK_ID,
+        this.bookId,
         accountId,
         assetId,
         amount,
@@ -582,7 +660,7 @@ export class Ledger {
         priority
       );
       this.db.exec("COMMIT");
-      return this.db.prepare("SELECT * FROM targets WHERE id = ?").get(targetId) as Row;
+      return this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND id = ?").get(this.bookId, targetId) as Row;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -590,15 +668,15 @@ export class Ledger {
   }
 
   listGoalTargets(): Row[] {
-    return this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal' ORDER BY priority, name").all(DEFAULT_BOOK_ID) as Row[];
+    return this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal' ORDER BY priority, name").all(this.bookId) as Row[];
   }
 
   getGoalTarget(accountId: string): Row | null {
-    return (this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ? ORDER BY priority, name LIMIT 1").get(DEFAULT_BOOK_ID, accountId) as Row | undefined) ?? null;
+    return (this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ? ORDER BY priority, name LIMIT 1").get(this.bookId, accountId) as Row | undefined) ?? null;
   }
 
   deleteGoal(accountId: string): number {
-    return Number(this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ?").run(DEFAULT_BOOK_ID, accountId).changes);
+    return Number(this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ?").run(this.bookId, accountId).changes);
   }
 
   createRecurrence(date: string, quantity: bigint | number, fromAccountId: string, toAccountId: string, description: string, frequency: string, endDate: string | null, assetId: string): Row {
@@ -610,7 +688,7 @@ export class Ledger {
     const recurrenceId = id("sched");
     this.db.prepare("INSERT INTO recurrences(id, book_id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
       recurrenceId,
-      DEFAULT_BOOK_ID,
+      this.bookId,
       dateOnly(date),
       amount,
       fromAccountId,
@@ -620,33 +698,277 @@ export class Ledger {
       normalizedEndDate,
       assetId
     );
-    return this.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences WHERE id = ?").get(recurrenceId) as Row;
+    return this.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences WHERE book_id = ? AND id = ?").get(this.bookId, recurrenceId) as Row;
   }
 
   listRecurrences(): Row[] {
-    return this.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences WHERE book_id = ? ORDER BY next_date, id").all(DEFAULT_BOOK_ID) as Row[];
+    return this.db.prepare("SELECT *, quantity AS amount_cents FROM recurrences WHERE book_id = ? ORDER BY next_date, id").all(this.bookId) as Row[];
   }
 
   updateRecurrenceNextDate(recurrenceId: string, nextDate: string): number {
-    return Number(this.db.prepare("UPDATE recurrences SET next_date = ? WHERE id = ?").run(dateOnly(nextDate), recurrenceId).changes);
+    return Number(this.db.prepare("UPDATE recurrences SET next_date = ? WHERE book_id = ? AND id = ?").run(dateOnly(nextDate), this.bookId, recurrenceId).changes);
   }
 
   createScenarioBook(name: string): Row {
-    this.db.prepare("INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at) VALUES (?, ?, 'scenario', ?, ?)").run(name, name, DEFAULT_BOOK_ID, now());
-    return this.db.prepare("SELECT name, created_at, closed_at FROM books WHERE id = ?").get(name) as Row;
+    const scenarioId = String(name ?? "").trim();
+    if (!scenarioId) throw new Error("Scenario name is required");
+    const existing = this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE id = ? OR lower(name) = lower(?) LIMIT 1").get(scenarioId, scenarioId) as Row | undefined;
+    if (existing) return existing;
+
+    const createdAt = now();
+    const accountMap = new Map<string, string>();
+    const sourceMap = new Map<string, string>();
+    const txMap = new Map<string, string>();
+    const priceMap = new Map<string, string>();
+    const ruleMap = new Map<string, string>();
+    const targetMap = new Map<string, string>();
+    const recurrenceMap = new Map<string, string>();
+    const periodMap = new Map<string, string>();
+    const lotMap = new Map<string, string>();
+    const sqlValue = (value: unknown): SQLInputValue => value == null ? null : value as SQLInputValue;
+    const requiredMapped = (map: Map<string, string>, value: unknown, label: string): string => {
+      const mapped = map.get(String(value));
+      if (!mapped) throw new Error(`Scenario clone missing ${label} mapping for ${String(value)}`);
+      return mapped;
+    };
+    const mappedEntityId = (entityType: string, entityId: string): string => {
+      if (entityType === "account") return accountMap.get(entityId) ?? entityId;
+      if (entityType === "source") return sourceMap.get(entityId) ?? entityId;
+      if (entityType === "tx" || entityType === "journal") return txMap.get(entityId) ?? entityId;
+      if (entityType === "price") return priceMap.get(entityId) ?? entityId;
+      if (entityType === "rule") return ruleMap.get(entityId) ?? entityId;
+      if (entityType === "target") return targetMap.get(entityId) ?? entityId;
+      if (entityType === "recurrence") return recurrenceMap.get(entityId) ?? entityId;
+      if (entityType === "period_close") return periodMap.get(entityId) ?? entityId;
+      if (entityType === "lot") return lotMap.get(entityId) ?? entityId;
+      if (entityType === "book" && entityId === this.bookId) return scenarioId;
+      return entityId;
+    };
+    const mappedAnnotationValue = (key: string, value: string): string => {
+      if (key === "import_batch") return sourceMap.get(value) ?? value;
+      if (key === "recategorize_from" || key === "recategorize_to") return accountMap.get(value) ?? value;
+      if (key === "branch" && value === this.bookId) return scenarioId;
+      return value;
+    };
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO books(id, name, type, parent_id, created_at) VALUES (?, ?, 'scenario', ?, ?)").run(scenarioId, scenarioId, this.bookId, createdAt);
+
+      const accounts = this.db.prepare("SELECT * FROM accounts WHERE book_id = ? ORDER BY name, id").all(this.bookId) as Row[];
+      for (const account of accounts) {
+        const nextId = id("acct");
+        accountMap.set(String(account.id), nextId);
+        this.db.prepare(
+          "INSERT INTO accounts(id, book_id, name, type, parent_id, default_asset_id, code, color_hex, status) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)"
+        ).run(
+          nextId,
+          scenarioId,
+          sqlValue(account.name),
+          sqlValue(account.type),
+          sqlValue(account.default_asset_id),
+          sqlValue(account.code ?? ""),
+          sqlValue(account.color_hex ?? "#888888"),
+          sqlValue(account.status ?? "active")
+        );
+      }
+      for (const account of accounts) {
+        if (!account.parent_id) continue;
+        this.db.prepare("UPDATE accounts SET parent_id = ? WHERE book_id = ? AND id = ?").run(
+          requiredMapped(accountMap, account.parent_id, "account parent"),
+          scenarioId,
+          requiredMapped(accountMap, account.id, "account")
+        );
+      }
+
+      for (const source of this.db.prepare("SELECT * FROM sources WHERE book_id = ? ORDER BY created_at, id").all(this.bookId) as Row[]) {
+        const nextId = id(String(source.type) === "import" ? "batch" : "source");
+        sourceMap.set(String(source.id), nextId);
+        this.db.prepare("INSERT INTO sources(id, book_id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+          nextId,
+          scenarioId,
+          sqlValue(source.type),
+          sqlValue(source.label ?? ""),
+          sqlValue(source.status ?? "open"),
+          sqlValue(source.created_at ?? createdAt),
+          sqlValue(source.metadata_json ?? "{}")
+        );
+      }
+
+      const journals = this.db.prepare("SELECT * FROM journals WHERE book_id = ? AND finalized_at IS NOT NULL ORDER BY date, id").all(this.bookId) as Row[];
+      for (const journal of journals) {
+        const nextId = id("tx");
+        txMap.set(String(journal.id), nextId);
+        this.db.prepare("INSERT INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+          nextId,
+          scenarioId,
+          journal.source_id == null ? null : sourceMap.get(String(journal.source_id)) ?? null,
+          sqlValue(journal.date),
+          sqlValue(journal.posted_at),
+          sqlValue(journal.status),
+          sqlValue(journal.description ?? ""),
+          sqlValue(journal.external_id)
+        );
+      }
+      for (const line of this.db.prepare(
+        `SELECT l.* FROM journal_lines l
+         JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id
+         WHERE l.book_id = ? AND t.finalized_at IS NOT NULL
+         ORDER BY l.journal_id, l.line_no, l.id`
+      ).all(this.bookId) as Row[]) {
+        this.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity, memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+          id("line"),
+          scenarioId,
+          requiredMapped(txMap, line.journal_id, "journal"),
+          sqlValue(line.line_no),
+          requiredMapped(accountMap, line.account_id, "line account"),
+          sqlValue(line.asset_id),
+          sqlValue(line.quantity),
+          sqlValue(line.memo ?? "")
+        );
+      }
+      for (const journal of journals) {
+        this.db.prepare("UPDATE journals SET finalized_at = ? WHERE book_id = ? AND id = ?").run(sqlValue(journal.finalized_at), scenarioId, requiredMapped(txMap, journal.id, "journal"));
+      }
+
+      for (const price of this.db.prepare("SELECT * FROM prices WHERE book_id = ? ORDER BY time, id").all(this.bookId) as Row[]) {
+        const nextId = id("price");
+        priceMap.set(String(price.id), nextId);
+        this.db.prepare("INSERT INTO prices(id, book_id, asset_id, quote_asset_id, rate_value, rate_scale, time) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+          nextId,
+          scenarioId,
+          sqlValue(price.asset_id),
+          sqlValue(price.quote_asset_id),
+          sqlValue(price.rate_value),
+          sqlValue(price.rate_scale),
+          sqlValue(price.time)
+        );
+      }
+
+      for (const rule of this.db.prepare("SELECT * FROM rules WHERE book_id = ? ORDER BY priority, id").all(this.bookId) as Row[]) {
+        const nextId = id("rule");
+        ruleMap.set(String(rule.id), nextId);
+        this.db.prepare("INSERT INTO rules(id, book_id, type, account_id, pattern, priority, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+          nextId,
+          scenarioId,
+          sqlValue(rule.type),
+          rule.account_id == null ? null : requiredMapped(accountMap, rule.account_id, "rule account"),
+          sqlValue(rule.pattern),
+          sqlValue(rule.priority ?? 100),
+          sqlValue(rule.status ?? "active"),
+          sqlValue(rule.created_at ?? createdAt)
+        );
+      }
+
+      for (const target of this.db.prepare("SELECT * FROM targets WHERE book_id = ? ORDER BY type, id").all(this.bookId) as Row[]) {
+        const nextId = id(String(target.type) === "budget" ? "budget" : "goal");
+        targetMap.set(String(target.id), nextId);
+        this.db.prepare(
+          "INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, period, year, month, rollover_rule, name, target_date, priority, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(
+          nextId,
+          scenarioId,
+          sqlValue(target.type),
+          requiredMapped(accountMap, target.account_id, "target account"),
+          sqlValue(target.asset_id),
+          sqlValue(target.quantity),
+          sqlValue(target.period),
+          sqlValue(target.year),
+          sqlValue(target.month),
+          sqlValue(target.rollover_rule ?? ""),
+          sqlValue(target.name ?? ""),
+          sqlValue(target.target_date),
+          sqlValue(target.priority ?? 1),
+          sqlValue(target.status ?? "active")
+        );
+      }
+
+      for (const recurrence of this.db.prepare("SELECT * FROM recurrences WHERE book_id = ? ORDER BY next_date, id").all(this.bookId) as Row[]) {
+        const nextId = id("sched");
+        recurrenceMap.set(String(recurrence.id), nextId);
+        this.db.prepare(
+          "INSERT INTO recurrences(id, book_id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(
+          nextId,
+          scenarioId,
+          sqlValue(recurrence.next_date),
+          sqlValue(recurrence.quantity),
+          requiredMapped(accountMap, recurrence.from_account_id, "recurrence from_account"),
+          requiredMapped(accountMap, recurrence.to_account_id, "recurrence to_account"),
+          sqlValue(recurrence.description ?? ""),
+          sqlValue(recurrence.frequency),
+          sqlValue(recurrence.end_date),
+          sqlValue(recurrence.asset_id),
+          sqlValue(recurrence.status ?? "active")
+        );
+      }
+
+      for (const period of this.db.prepare("SELECT * FROM period_closes WHERE book_id = ? ORDER BY as_of, id").all(this.bookId) as Row[]) {
+        const nextId = id("period");
+        periodMap.set(String(period.id), nextId);
+        this.db.prepare("INSERT INTO period_closes(id, book_id, name, as_of, description, created_at, reopened_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+          nextId,
+          scenarioId,
+          sqlValue(period.name),
+          sqlValue(period.as_of),
+          sqlValue(period.description),
+          sqlValue(period.created_at ?? createdAt),
+          sqlValue(period.reopened_at)
+        );
+      }
+
+      for (const lot of this.db.prepare("SELECT * FROM lots WHERE book_id = ? ORDER BY opened_at, id").all(this.bookId) as Row[]) {
+        const nextId = id("lot");
+        lotMap.set(String(lot.id), nextId);
+        this.db.prepare("INSERT INTO lots(id, book_id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_journal_id, closed_journal_id, opened_at, closed_at, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+          nextId,
+          scenarioId,
+          requiredMapped(accountMap, lot.account_id, "lot account"),
+          sqlValue(lot.asset_id),
+          sqlValue(lot.quantity),
+          sqlValue(lot.cost_asset_id),
+          sqlValue(lot.cost_quantity),
+          requiredMapped(txMap, lot.opened_journal_id, "lot opened journal"),
+          lot.closed_journal_id == null ? null : requiredMapped(txMap, lot.closed_journal_id, "lot closed journal"),
+          sqlValue(lot.opened_at),
+          sqlValue(lot.closed_at),
+          sqlValue(lot.status ?? "open"),
+          sqlValue(lot.metadata_json ?? "{}")
+        );
+      }
+
+      for (const annotation of this.db.prepare("SELECT * FROM annotations WHERE book_id = ? ORDER BY entity_type, entity_id, key, id").all(this.bookId) as Row[]) {
+        const entityType = String(annotation.entity_type);
+        const key = String(annotation.key);
+        this.db.prepare("INSERT INTO annotations(id, book_id, entity_type, entity_id, key, value) VALUES (?, ?, ?, ?, ?, ?)").run(
+          id("ann"),
+          scenarioId,
+          entityType,
+          mappedEntityId(entityType, String(annotation.entity_id)),
+          key,
+          mappedAnnotationValue(key, String(annotation.value))
+        );
+      }
+
+      this.db.exec("COMMIT");
+      return this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE id = ?").get(scenarioId) as Row;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   listScenarioBooks(): Row[] {
-    return this.db.prepare("SELECT name, created_at, closed_at FROM books WHERE type = 'scenario' ORDER BY name").all() as Row[];
+    return this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE type = 'scenario' AND parent_id = ? ORDER BY name").all(this.bookId) as Row[];
   }
 
   discardScenarioBook(name: string): number {
     this.createScenarioBook(name);
-    return Number(this.db.prepare("UPDATE books SET closed_at = ? WHERE id = ?").run(now(), name).changes);
+    return Number(this.db.prepare("UPDATE books SET closed_at = ? WHERE type = 'scenario' AND parent_id = ? AND (id = ? OR name = ?)").run(now(), this.bookId, name, name).changes);
   }
 
   listLots(): Row[] {
-    return this.db.prepare("SELECT * FROM lots WHERE book_id = ? ORDER BY opened_at, id").all(DEFAULT_BOOK_ID) as Row[];
+    return this.db.prepare("SELECT * FROM lots WHERE book_id = ? ORDER BY opened_at, id").all(this.bookId) as Row[];
   }
 
   createPrice(assetId: string, quoteId: string, rate: number | string | bigint, time: string, rateScale?: number): string {
@@ -658,25 +980,25 @@ export class Ledger {
     const priceId = id("price");
     this.db.prepare(
       "INSERT INTO prices(id, book_id, asset_id, quote_asset_id, rate_value, rate_scale, time) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).run(priceId, DEFAULT_BOOK_ID, assetId, quoteId, scaled.value, scaled.scale, time);
+    ).run(priceId, this.bookId, assetId, quoteId, scaled.value, scaled.scale, time);
     return priceId;
   }
 
   listPrices(): Price[] {
-    return (this.db.prepare("SELECT * FROM prices WHERE book_id = ? ORDER BY time DESC, id DESC").all(DEFAULT_BOOK_ID) as Row[]).map((row) => toPrice(row)!);
+    return (this.db.prepare("SELECT * FROM prices WHERE book_id = ? ORDER BY time DESC, id DESC").all(this.bookId) as Row[]).map((row) => toPrice(row)!);
   }
 
   queryPrice(assetId: string, quoteId: string, asOf: string): Price | null {
     return toPrice(this.db.prepare(
       "SELECT * FROM prices WHERE book_id = ? AND asset_id = ? AND quote_asset_id = ? AND time <= ? ORDER BY time DESC, id DESC LIMIT 1"
-    ).get(DEFAULT_BOOK_ID, assetId, quoteId, asOf) as Row | undefined);
+    ).get(this.bookId, assetId, quoteId, asOf) as Row | undefined);
   }
 
   private priceGraph(asOf: string): Map<string, Array<{ to: string; numerator: bigint; denominator: bigint }>> {
     const assets = new Map(this.listAssets().map((asset) => [asset.id, asset]));
     const graph = new Map<string, Array<{ to: string; numerator: bigint; denominator: bigint }>>();
     const seen = new Set<string>();
-    const rows = this.db.prepare("SELECT * FROM prices WHERE book_id = ? AND time <= ? ORDER BY time DESC, id DESC").all(DEFAULT_BOOK_ID, asOf) as Row[];
+    const rows = this.db.prepare("SELECT * FROM prices WHERE book_id = ? AND time <= ? ORDER BY time DESC, id DESC").all(this.bookId, asOf) as Row[];
     for (const raw of rows) {
       const price = toPrice(raw)!;
       const key = `${price.asset_id}:${price.quote_asset_id}`;
@@ -726,7 +1048,7 @@ export class Ledger {
   private assertPeriodOpen(txDate: string): void {
     const row = this.db.prepare(
       "SELECT id, name, as_of FROM period_closes WHERE book_id = ? AND reopened_at IS NULL AND as_of >= ? ORDER BY as_of DESC, created_at DESC LIMIT 1"
-    ).get(DEFAULT_BOOK_ID, txDate) as Row | undefined;
+    ).get(this.bookId, txDate) as Row | undefined;
     if (row) throw new Error(`Period '${String(row.name)}' is closed through ${String(row.as_of)}; transaction date ${txDate} cannot be modified`);
   }
 
@@ -741,7 +1063,7 @@ export class Ledger {
     const txId = id("tx");
     this.db.prepare("INSERT INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
       txId,
-      DEFAULT_BOOK_ID,
+      this.bookId,
       options.sourceId ?? null,
       txDate,
       now(),
@@ -752,7 +1074,7 @@ export class Ledger {
     lines.forEach(([accountId, assetId, quantity], index) => {
       this.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
         id("line"),
-        DEFAULT_BOOK_ID,
+        this.bookId,
         txId,
         index + 1,
         accountId,
@@ -760,11 +1082,20 @@ export class Ledger {
         quantity
       );
     });
+    this.finalizeTx(txId);
     return txId;
   }
 
+  private finalizeTx(txId: string): void {
+    this.db.prepare("UPDATE journals SET finalized_at = ? WHERE book_id = ? AND id = ?").run(now(), this.bookId, txId);
+  }
+
+  private reopenTx(txId: string): void {
+    this.db.prepare("UPDATE journals SET finalized_at = NULL WHERE book_id = ? AND id = ?").run(this.bookId, txId);
+  }
+
   private assertTxNotLinkedToLots(txId: string): void {
-    const row = this.db.prepare("SELECT id FROM lots WHERE book_id = ? AND (opened_journal_id = ? OR closed_journal_id = ?) LIMIT 1").get(DEFAULT_BOOK_ID, txId, txId) as Row | undefined;
+    const row = this.db.prepare("SELECT id FROM lots WHERE book_id = ? AND (opened_journal_id = ? OR closed_journal_id = ?) LIMIT 1").get(this.bookId, txId, txId) as Row | undefined;
     if (row) throw new Error("Transaction has linked investment lots; use an investment reversal workflow");
   }
 
@@ -820,7 +1151,7 @@ export class Ledger {
     if (!tx) throw new Error(`Transaction ${txId} not found`);
     this.assertPeriodOpen(tx.date);
     this.assertTxNotLinkedToLots(txId);
-    this.db.prepare("UPDATE journals SET status = 'void' WHERE id = ?").run(txId);
+    this.db.prepare("UPDATE journals SET status = 'void' WHERE book_id = ? AND id = ?").run(this.bookId, txId);
   }
 
   updateTxStatus(txId: string, status: TxStatus | string): boolean {
@@ -829,7 +1160,7 @@ export class Ledger {
     this.assertPeriodOpen(tx.date);
     const statusValue = txStatus(String(status));
     if (statusValue === "void") this.assertTxNotLinkedToLots(txId);
-    const result = this.db.prepare("UPDATE journals SET status = ? WHERE id = ?").run(statusValue, txId);
+    const result = this.db.prepare("UPDATE journals SET status = ? WHERE book_id = ? AND id = ?").run(statusValue, this.bookId, txId);
     return Number(result.changes) > 0;
   }
 
@@ -840,8 +1171,9 @@ export class Ledger {
     this.assertTxNotLinkedToLots(txId);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND entity_type = 'tx' AND entity_id = ?").run(DEFAULT_BOOK_ID, txId);
-      this.db.prepare("DELETE FROM journals WHERE id = ?").run(txId);
+      this.reopenTx(txId);
+      this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND entity_type = 'tx' AND entity_id = ?").run(this.bookId, txId);
+      this.db.prepare("DELETE FROM journals WHERE book_id = ? AND id = ?").run(this.bookId, txId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -850,12 +1182,12 @@ export class Ledger {
   }
 
   getTx(txId: string): Journal | null {
-    return toJournal(this.db.prepare("SELECT * FROM journals WHERE id = ?").get(txId) as Row | undefined);
+    return toJournal(this.db.prepare("SELECT * FROM journals WHERE book_id = ? AND id = ?").get(this.bookId, txId) as Row | undefined);
   }
 
   listTransactions(options: { status?: TxStatus | string | null; dateFrom?: string | null; dateTo?: string | null; sort?: "date_asc" | "date_desc" } = {}): Journal[] {
-    let sql = "SELECT * FROM journals WHERE 1 = 1";
-    const params: SQLInputValue[] = [];
+    let sql = "SELECT * FROM journals WHERE book_id = ? AND finalized_at IS NOT NULL";
+    const params: SQLInputValue[] = [this.bookId];
     if (options.status != null) {
       if (options.status === "active") sql += " AND status IN ('posted', 'pending')";
       else if (options.status === "combined") sql += " AND status IN ('posted', 'pending', 'planned')";
@@ -877,7 +1209,7 @@ export class Ledger {
   }
 
   getEntries(txId: string): JournalLine[] {
-    return (this.db.prepare("SELECT * FROM journal_lines WHERE journal_id = ? ORDER BY line_no, id").all(txId) as Row[]).map((row) => toLine(row)!);
+    return (this.db.prepare("SELECT * FROM journal_lines WHERE book_id = ? AND journal_id = ? ORDER BY line_no, id").all(this.bookId, txId) as Row[]).map((row) => toLine(row)!);
   }
 
   txWithEntries(txId: string): Journal & { entries: JournalLine[] } {
@@ -887,12 +1219,12 @@ export class Ledger {
   }
 
   private assertAccountNotLinkedToLots(accountId: string): void {
-    const row = this.db.prepare("SELECT id FROM lots WHERE book_id = ? AND account_id = ? LIMIT 1").get(DEFAULT_BOOK_ID, accountId) as Row | undefined;
+    const row = this.db.prepare("SELECT id FROM lots WHERE book_id = ? AND account_id = ? LIMIT 1").get(this.bookId, accountId) as Row | undefined;
     if (row) throw new Error("Account has linked investment lots; use an investment-specific workflow");
   }
 
   private assertAssetNotLinkedToLots(assetId: string): void {
-    const row = this.db.prepare("SELECT id FROM lots WHERE book_id = ? AND (asset_id = ? OR cost_asset_id = ?) LIMIT 1").get(DEFAULT_BOOK_ID, assetId, assetId) as Row | undefined;
+    const row = this.db.prepare("SELECT id FROM lots WHERE book_id = ? AND (asset_id = ? OR cost_asset_id = ?) LIMIT 1").get(this.bookId, assetId, assetId) as Row | undefined;
     if (row) throw new Error("Asset has linked investment lots; use an investment-specific workflow");
   }
 
@@ -902,8 +1234,17 @@ export class Ledger {
     this.assertPeriodOpen(tx.date);
     this.assertTxNotLinkedToLots(txId);
     if (!this.getAccount(newAccountId)) throw new Error(`Account ${newAccountId} not found`);
-    const result = this.db.prepare("UPDATE journal_lines SET account_id = ? WHERE journal_id = ? AND account_id = ?").run(newAccountId, txId, oldAccountId);
-    if (Number(result.changes) === 0) throw new Error(`Account ${oldAccountId} is not on transaction ${txId}`);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.reopenTx(txId);
+      const result = this.db.prepare("UPDATE journal_lines SET account_id = ? WHERE book_id = ? AND journal_id = ? AND account_id = ?").run(newAccountId, this.bookId, txId, oldAccountId);
+      if (Number(result.changes) === 0) throw new Error(`Account ${oldAccountId} is not on transaction ${txId}`);
+      this.finalizeTx(txId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return { tx_id: txId, from_account_id: oldAccountId, to_account_id: newAccountId };
   }
 
@@ -917,7 +1258,9 @@ export class Ledger {
         this.assertPeriodOpen(tx.date);
         this.assertTxNotLinkedToLots(txId);
         if (tx.status === "void") continue;
-        this.db.prepare("UPDATE journal_lines SET quantity = -quantity WHERE journal_id = ?").run(txId);
+        this.reopenTx(txId);
+        this.db.prepare("UPDATE journal_lines SET quantity = -quantity WHERE book_id = ? AND journal_id = ?").run(this.bookId, txId);
+        this.finalizeTx(txId);
         flipped.push(txId);
       }
       this.db.exec("COMMIT");
@@ -933,11 +1276,23 @@ export class Ledger {
     this.assertAccountNotLinkedToLots(sourceAccountId);
     this.assertAccountNotLinkedToLots(targetAccountId);
     const rows = this.db.prepare(
-      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.journal_id = t.id WHERE l.account_id = ?"
-    ).all(sourceAccountId) as Row[];
+      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id WHERE t.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ?"
+    ).all(this.bookId, sourceAccountId) as Row[];
     rows.forEach((row) => this.assertPeriodOpen(String(row.date)));
-    const count = (this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE account_id = ?").get(sourceAccountId) as Row).c as bigint;
-    this.db.prepare("UPDATE journal_lines SET account_id = ? WHERE account_id = ?").run(targetAccountId, sourceAccountId);
+    if (rows.length === 0) return 0;
+    const txIds = rows.map((row) => String(row.id));
+    const placeholders = txIds.map(() => "?").join(", ");
+    const count = (this.db.prepare(`SELECT count(*) AS c FROM journal_lines WHERE book_id = ? AND account_id = ? AND journal_id IN (${placeholders})`).get(this.bookId, sourceAccountId, ...txIds) as Row).c as bigint;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) this.reopenTx(String(row.id));
+      this.db.prepare(`UPDATE journal_lines SET account_id = ? WHERE book_id = ? AND account_id = ? AND journal_id IN (${placeholders})`).run(targetAccountId, this.bookId, sourceAccountId, ...txIds);
+      for (const row of rows) this.finalizeTx(String(row.id));
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return Number(count);
   }
 
@@ -946,11 +1301,23 @@ export class Ledger {
     this.assertAssetNotLinkedToLots(fromAssetId);
     this.assertAssetNotLinkedToLots(toAssetId);
     const rows = this.db.prepare(
-      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.journal_id = t.id WHERE l.asset_id = ?"
-    ).all(fromAssetId) as Row[];
+      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id WHERE t.book_id = ? AND t.finalized_at IS NOT NULL AND l.asset_id = ?"
+    ).all(this.bookId, fromAssetId) as Row[];
     rows.forEach((row) => this.assertPeriodOpen(String(row.date)));
-    const count = (this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE asset_id = ?").get(fromAssetId) as Row).c as bigint;
-    this.db.prepare("UPDATE journal_lines SET asset_id = ? WHERE asset_id = ?").run(toAssetId, fromAssetId);
+    if (rows.length === 0) return 0;
+    const txIds = rows.map((row) => String(row.id));
+    const placeholders = txIds.map(() => "?").join(", ");
+    const count = (this.db.prepare(`SELECT count(*) AS c FROM journal_lines WHERE book_id = ? AND asset_id = ? AND journal_id IN (${placeholders})`).get(this.bookId, fromAssetId, ...txIds) as Row).c as bigint;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) this.reopenTx(String(row.id));
+      this.db.prepare(`UPDATE journal_lines SET asset_id = ? WHERE book_id = ? AND asset_id = ? AND journal_id IN (${placeholders})`).run(toAssetId, this.bookId, fromAssetId, ...txIds);
+      for (const row of rows) this.finalizeTx(String(row.id));
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return Number(count);
   }
 
@@ -959,7 +1326,7 @@ export class Ledger {
     const date = dateOnly(asOf);
     this.db.prepare("INSERT INTO period_closes(id, book_id, name, as_of, description, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
       periodId,
-      DEFAULT_BOOK_ID,
+      this.bookId,
       name,
       date,
       description ?? null,
@@ -969,11 +1336,11 @@ export class Ledger {
   }
 
   listCheckpoints(): Row[] {
-    return this.db.prepare("SELECT * FROM period_closes ORDER BY as_of, id").all() as Row[];
+    return this.db.prepare("SELECT * FROM period_closes WHERE book_id = ? ORDER BY as_of, id").all(this.bookId) as Row[];
   }
 
   reopenPeriod(periodId: string): Record<string, string> {
-    const result = this.db.prepare("UPDATE period_closes SET reopened_at = ? WHERE id = ?").run(now(), periodId);
+    const result = this.db.prepare("UPDATE period_closes SET reopened_at = ? WHERE book_id = ? AND id = ?").run(now(), this.bookId, periodId);
     if (Number(result.changes) === 0) throw new Error(`Checkpoint ${periodId} not found`);
     return { reopened: periodId };
   }
@@ -988,9 +1355,9 @@ export class Ledger {
   balance(accountId: string, assetId: string, asOf?: string | null, status: TxStatus | string | null = "posted", dateFrom?: string | null): bigint {
     const clause = this.statusClause(status);
     let sql = `SELECT coalesce(sum(l.quantity), 0) AS total
-      FROM journal_lines l JOIN journals t ON t.id = l.journal_id
-      WHERE l.account_id = ? AND l.asset_id = ? ${clause.sql}`;
-    const params: SQLInputValue[] = [accountId, assetId, ...clause.params as SQLInputValue[]];
+      FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id
+      WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ? AND l.asset_id = ? ${clause.sql}`;
+    const params: SQLInputValue[] = [this.bookId, accountId, assetId, ...clause.params as SQLInputValue[]];
     if (asOf) {
       sql += " AND t.date <= ?";
       params.push(asOf);
@@ -1007,7 +1374,7 @@ export class Ledger {
     const queue = [accountId];
     while (queue.length) {
       const current = queue.pop()!;
-      const rows = this.db.prepare("SELECT id FROM accounts WHERE parent_id = ?").all(current) as Row[];
+      const rows = this.db.prepare("SELECT id FROM accounts WHERE book_id = ? AND parent_id = ?").all(this.bookId, current) as Row[];
       for (const row of rows) {
         const child = String(row.id);
         if (!out.has(child)) {
@@ -1067,7 +1434,7 @@ export class Ledger {
     const rows: AccountBalance[] = [];
     for (const account of accounts) {
       const ids = sameTypeDescendantIds(account);
-      const defaultAssetId = this.listAnnotations("account", account.id).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
+      const defaultAssetId = account.default_asset_id ?? this.listAnnotations("account", account.id).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
       const defaultAsset = defaultAssetId ? this.getAsset(defaultAssetId) : null;
       for (const asset of assets) {
         const posted = ids.reduce((sum, id) => sum + this.balance(id, asset.id, asOf, "posted"), 0n);
@@ -1506,8 +1873,7 @@ export class Ledger {
       const existing = this.listAccounts().find((account) => account.name.toLowerCase() === name.toLowerCase());
       const accountId = existing?.id ?? this.createAccount(name, type, parent);
       if (!existing) created.push(accountId);
-      const hasDefault = this.listAnnotations("account", accountId).some((tag) => tag.key === "default_asset");
-      if (!hasDefault) this.createAnnotation("account", accountId, "default_asset", assetId);
+      if (!this.getAccount(accountId)?.default_asset_id) this.updateAccount(accountId, { default_asset_id: assetId });
       return accountId;
     };
     if (template === "personal") {
@@ -1575,7 +1941,7 @@ export class Ledger {
       const txId = this.insertTx(txDate, statusValue, `Buy ${symbol}`, lines);
       this.db.prepare("INSERT INTO lots(id, book_id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_journal_id, opened_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')").run(
         id("lot"),
-        DEFAULT_BOOK_ID,
+        this.bookId,
         holdingAccountId,
         securityId,
         shares,
@@ -1627,7 +1993,7 @@ export class Ledger {
     const exists = (table: string, entityId: string): boolean => Boolean(this.db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(entityId));
     const orphanAnnotations: Row[] = [];
     const invalidDefaultAssets: Row[] = [];
-    const annotations = this.db.prepare("SELECT * FROM annotations WHERE book_id = ? ORDER BY entity_type, entity_id, key, id").all(DEFAULT_BOOK_ID) as Row[];
+    const annotations = this.db.prepare("SELECT * FROM annotations WHERE book_id = ? ORDER BY entity_type, entity_id, key, id").all(this.bookId) as Row[];
     const annotationTables: Record<string, string> = {
       account: "accounts",
       asset: "assets",
@@ -1647,10 +2013,18 @@ export class Ledger {
         if (!this.getAccount(String(annotation.entity_id)) || !this.getAsset(String(annotation.value))) invalidDefaultAssets.push(annotation);
       }
     }
+    invalidDefaultAssets.push(...this.db.prepare(
+      `SELECT id AS account_id, default_asset_id AS value, 'default_asset_id' AS key, 'account default_asset_id points at missing asset' AS error
+       FROM accounts
+       WHERE book_id = ?
+         AND default_asset_id IS NOT NULL
+         AND default_asset_id NOT IN (SELECT id FROM assets)
+       ORDER BY id`
+    ).all(this.bookId) as Row[]);
 
     const invalidPrices = this.db.prepare(
       "SELECT * FROM prices WHERE book_id = ? AND (rate_value <= 0 OR rate_scale < 0 OR rate_scale > 18 OR rate_scale != CAST(rate_scale AS INTEGER)) ORDER BY id"
-    ).all(DEFAULT_BOOK_ID) as Row[];
+    ).all(this.bookId) as Row[];
 
     const invalidTargets = this.db.prepare(
       `SELECT * FROM targets
@@ -1661,8 +2035,8 @@ export class Ledger {
          (month IS NOT NULL AND (month < 1 OR month > 12))
        )
        ORDER BY id`
-    ).all(DEFAULT_BOOK_ID) as Row[];
-    for (const target of this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal' AND target_date IS NOT NULL ORDER BY id").all(DEFAULT_BOOK_ID) as Row[]) {
+    ).all(this.bookId) as Row[];
+    for (const target of this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal' AND target_date IS NOT NULL ORDER BY id").all(this.bookId) as Row[]) {
       try {
         dateOnly(String(target.target_date));
       } catch (error) {
@@ -1675,7 +2049,7 @@ export class Ledger {
        WHERE book_id = ? AND type = 'budget'
        GROUP BY account_id, asset_id, period, coalesce(year, -1), coalesce(month, -1)
        HAVING count(*) > 1`
-    ).all(DEFAULT_BOOK_ID) as Row[];
+    ).all(this.bookId) as Row[];
 
     const invalidRecurrences = this.db.prepare(
       `SELECT * FROM recurrences
@@ -1685,8 +2059,8 @@ export class Ledger {
          status NOT IN ('active', 'paused', 'deleted')
        )
        ORDER BY id`
-    ).all(DEFAULT_BOOK_ID) as Row[];
-    for (const recurrence of this.db.prepare("SELECT * FROM recurrences WHERE book_id = ? ORDER BY id").all(DEFAULT_BOOK_ID) as Row[]) {
+    ).all(this.bookId) as Row[];
+    for (const recurrence of this.db.prepare("SELECT * FROM recurrences WHERE book_id = ? ORDER BY id").all(this.bookId) as Row[]) {
       for (const field of ["next_date", "end_date"]) {
         if (recurrence[field] == null) continue;
         try {
@@ -1746,24 +2120,24 @@ export class Ledger {
   exportDocument() {
     const transactions = this.listTransactions({ status: null }).map((tx) => ({ ...tx, entries: this.getEntries(tx.id), tags: this.listAnnotations("tx", tx.id) }));
     const accounts = this.listAccounts().map((account) => {
-      const defaultAssetId = this.listAnnotations("account", account.id).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
+      const defaultAssetId = account.default_asset_id ?? this.listAnnotations("account", account.id).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
       const defaultAsset = defaultAssetId ? this.getAsset(defaultAssetId) : null;
       return { ...account, default_asset_id: defaultAssetId, default_asset_symbol: defaultAsset?.symbol ?? null };
     });
     return {
-      format: "clovis-ledger-v1",
+      format: "clovis-ledger-v2",
       assets: this.listAssets(),
       accounts,
       sources: this.listSources(null, null),
       transactions,
-      account_tags: (this.db.prepare("SELECT id, book_id, entity_type, entity_id, key, value AS val, value FROM annotations WHERE book_id = ? AND entity_type = 'account'").all(DEFAULT_BOOK_ID) as Row[]),
+      account_tags: (this.db.prepare("SELECT id, book_id, entity_type, entity_id, key, value AS val, value FROM annotations WHERE book_id = ? AND entity_type = 'account'").all(this.bookId) as Row[]),
       prices: this.listPrices(),
-      budgets: this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'budget'").all(DEFAULT_BOOK_ID) as Row[],
-      goals: (this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal'").all(DEFAULT_BOOK_ID) as Row[]).map((row) => ({ ...row, target_quantity: row.quantity, target_cents: row.quantity })),
+      budgets: this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'budget'").all(this.bookId) as Row[],
+      goals: (this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND type = 'goal'").all(this.bookId) as Row[]).map((row) => ({ ...row, target_quantity: row.quantity, target_cents: row.quantity })),
       branches: this.db.prepare("SELECT name, created_at, closed_at AS discarded_at FROM books WHERE type = 'scenario' ORDER BY name").all() as Row[],
       checkpoints: this.listCheckpoints(),
       lots: this.listLots(),
-      scheduled_transactions: this.db.prepare("SELECT * FROM recurrences WHERE book_id = ? ORDER BY next_date, id").all(DEFAULT_BOOK_ID) as Row[]
+      scheduled_transactions: this.db.prepare("SELECT * FROM recurrences WHERE book_id = ? ORDER BY next_date, id").all(this.bookId) as Row[]
     };
   }
 
@@ -1861,7 +2235,7 @@ export class Ledger {
         return 0;
       }
     };
-    const existingSource = (sourceId: string): boolean => Boolean(this.db.prepare("SELECT id FROM sources WHERE id = ?").get(sourceId));
+    const existingSource = (sourceId: string): boolean => Boolean(this.db.prepare("SELECT id FROM sources WHERE book_id = ? AND id = ?").get(this.bookId, sourceId));
     const assetMap = new Map<string, string>();
     const accountMap = new Map<string, string>();
     const sourceMap = new Map<string, string>();
@@ -1951,7 +2325,7 @@ export class Ledger {
       const key = name.toLowerCase();
       if (accountNames.has(key)) errors.push(`accounts[${index}].name duplicates accounts[${accountNames.get(key)}].name: ${name}`);
       else accountNames.set(key, index);
-      const existing = this.db.prepare("SELECT id FROM accounts WHERE book_id = ? AND lower(name) = lower(?) LIMIT 1").get(DEFAULT_BOOK_ID, name) as Row | undefined;
+      const existing = this.db.prepare("SELECT id FROM accounts WHERE book_id = ? AND lower(name) = lower(?) LIMIT 1").get(this.bookId, name) as Row | undefined;
       const mappedId = typeof account.id === "string" ? accountMap.get(account.id) : null;
       if (existing && String(existing.id) !== mappedId) errors.push(`accounts[${index}].name already exists: ${name}`);
     });
@@ -1999,6 +2373,8 @@ export class Ledger {
       if (!accountId) return null;
       const tagged = accountDefaultAssets.get(accountId);
       if (tagged) return tagged;
+      const account = this.getAccount(accountId);
+      if (account?.default_asset_id && this.getAsset(account.default_asset_id)) return account.default_asset_id;
       const existing = this.listAnnotations("account", accountId).filter((tag) => tag.key === "default_asset").at(-1)?.value ?? null;
       return existing && this.getAsset(existing) ? existing : null;
     };
@@ -2117,7 +2493,7 @@ export class Ledger {
         if (budgetKeys.has(key)) errors.push(`budgets[${index}] duplicates budgets[${budgetKeys.get(key)}]`);
         else budgetKeys.set(key, index);
         const existing = this.db.prepare("SELECT id FROM targets WHERE book_id = ? AND type = 'budget' AND account_id = ? AND asset_id = ? AND period = ? AND year IS ? AND month IS ? LIMIT 1")
-          .get(DEFAULT_BOOK_ID, accountId, assetId, period, year, month) as Row | undefined;
+          .get(this.bookId, accountId, assetId, period, year, month) as Row | undefined;
         if (existing) errors.push(`budgets[${index}] conflicts with existing budget ${String(existing.id)}`);
       }
     });
@@ -2142,7 +2518,7 @@ export class Ledger {
         if (goalKeys.has(key)) errors.push(`goals[${index}] duplicates goals[${goalKeys.get(key)}]`);
         else goalKeys.set(key, index);
         const existing = this.db.prepare("SELECT id FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ? AND asset_id = ? LIMIT 1")
-          .get(DEFAULT_BOOK_ID, accountId, assetId) as Row | undefined;
+          .get(this.bookId, accountId, assetId) as Row | undefined;
         if (existing) errors.push(`goals[${index}] conflicts with existing goal ${String(existing.id)}`);
       }
     });
@@ -2247,7 +2623,7 @@ export class Ledger {
       for (const account of accounts) {
         this.db.prepare("INSERT INTO accounts(id, book_id, name, type, parent_id, code, color_hex) VALUES (?, ?, ?, ?, NULL, ?, ?)").run(
           accountMap.get(account.id)!,
-          DEFAULT_BOOK_ID,
+          this.bookId,
           account.name,
           account.type ?? account.account_type,
           account.code ?? "",
@@ -2256,36 +2632,31 @@ export class Ledger {
         result.inserted.accounts += 1;
       }
       for (const account of accounts) {
-        if (account.parent_id) this.db.prepare("UPDATE accounts SET parent_id = ? WHERE id = ?").run(accountMap.get(account.parent_id)!, accountMap.get(account.id)!);
+        if (account.parent_id) this.db.prepare("UPDATE accounts SET parent_id = ? WHERE book_id = ? AND id = ?").run(accountMap.get(account.parent_id)!, this.bookId, accountMap.get(account.id)!);
       }
-      const insertedAccountDefaultTags = new Set<string>();
+      for (const [accountId, assetId] of accountDefaultAssets) {
+        this.db.prepare("UPDATE accounts SET default_asset_id = ? WHERE book_id = ? AND id = ?").run(assetId, this.bookId, accountId);
+      }
       for (const tag of accountTags) {
         const annotationId = preserveIds && typeof tag.id === "string" && tag.id.trim() !== "" ? tag.id : id("ann");
         const entityId = mappedAccount(tag.entity_id, "account_tag.entity_id");
         const key = String(tag.key ?? "");
         const rawValue = tagValue(tag);
         const value = key === "default_asset" ? mappedAsset(rawValue, "account_tag.default_asset") : rawValue;
+        if (key === "default_asset") continue;
         this.db.prepare("INSERT INTO annotations(id, book_id, entity_type, entity_id, key, value) VALUES (?, ?, 'account', ?, ?, ?)").run(
           annotationId,
-          DEFAULT_BOOK_ID,
+          this.bookId,
           entityId,
           key,
           value
         );
-        if (key === "default_asset") insertedAccountDefaultTags.add(entityId);
-        result.inserted.account_tags += 1;
-      }
-      for (const account of accounts) {
-        const entityId = accountMap.get(account.id)!;
-        const assetRef = account.default_asset_id ?? account.asset_id;
-        if (assetRef == null || assetRef === "" || insertedAccountDefaultTags.has(entityId)) continue;
-        this.createAnnotation("account", entityId, "default_asset", mappedAsset(assetRef, "account.default_asset"));
         result.inserted.account_tags += 1;
       }
       for (const source of sources) {
         this.db.prepare("INSERT INTO sources(id, book_id, type, label, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
           sourceMap.get(source.id)!,
-          DEFAULT_BOOK_ID,
+          this.bookId,
           source.type,
           source.label ?? "",
           source.status ?? "open",
@@ -2298,7 +2669,7 @@ export class Ledger {
         const txId = txMap.get(tx.id)!;
         this.db.prepare("INSERT INTO journals(id, book_id, source_id, date, posted_at, status, description, external_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
           txId,
-          DEFAULT_BOOK_ID,
+          this.bookId,
           mappedSource(tx.source_id, "transaction.source_id"),
           tx.date,
           tx.posted_at ?? now(),
@@ -2309,7 +2680,7 @@ export class Ledger {
         (tx.entries ?? []).forEach((entry: any, index: number) => {
           this.db.prepare("INSERT INTO journal_lines(id, book_id, journal_id, line_no, account_id, asset_id, quantity) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
             preserveIds ? entry.id : id("line"),
-            DEFAULT_BOOK_ID,
+            this.bookId,
             txId,
             index + 1,
             mappedAccount(entry.account_id, "journal_line.account_id"),
@@ -2317,6 +2688,7 @@ export class Ledger {
             BigInt(entry.quantity ?? entry.qty_cents ?? 0)
           );
         });
+        this.db.prepare("UPDATE journals SET finalized_at = ? WHERE book_id = ? AND id = ?").run(tx.finalized_at ?? tx.posted_at ?? now(), this.bookId, txId);
         for (const tag of tx.tags ?? []) {
           const key = String(tag.key ?? "");
           this.createAnnotation(tag.entity_type ?? "tx", txId, key, mappedTxTagValue(key, tagValue(tag)));
@@ -2326,7 +2698,7 @@ export class Ledger {
       for (const price of prices) {
         this.db.prepare("INSERT INTO prices(id, book_id, asset_id, quote_asset_id, rate_value, rate_scale, time) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? price.id : id("price"),
-          DEFAULT_BOOK_ID,
+          this.bookId,
           mappedAsset(price.asset_id, "price.asset_id"),
           mappedAsset(price.quote_asset_id ?? price.quote_id, "price.quote_asset_id"),
           BigInt(price.rate_value ?? price.rate_cents ?? 0),
@@ -2339,7 +2711,7 @@ export class Ledger {
         const budgetAssetId = budget.asset_id ? mappedAsset(budget.asset_id, "budget.asset_id") : requiredAccountDefaultAsset(budget.account_id, "budget");
         this.db.prepare("INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, ?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? budget.id : id("target"),
-          DEFAULT_BOOK_ID,
+          this.bookId,
           mappedAccount(budget.account_id, "budget.account_id"),
           budgetAssetId,
           BigInt(budget.quantity ?? budget.amount_cents ?? 0),
@@ -2354,7 +2726,7 @@ export class Ledger {
         const goalAssetId = goal.asset_id ? mappedAsset(goal.asset_id, "goal.asset_id") : requiredAccountDefaultAsset(goal.account_id, "goal");
         this.db.prepare("INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, ?, 'goal', ?, ?, ?, ?, ?, ?)").run(
           preserveIds && goal.id ? goal.id : id("target"),
-          DEFAULT_BOOK_ID,
+          this.bookId,
           mappedAccount(goal.account_id, "goal.account_id"),
           goalAssetId,
           BigInt(goal.quantity ?? goal.target_quantity ?? goal.target_cents ?? 0),
@@ -2368,7 +2740,7 @@ export class Ledger {
         this.db.prepare("INSERT INTO books(id, name, type, parent_id, created_at, closed_at) VALUES (?, ?, 'scenario', ?, ?, ?)").run(
           branch.name,
           branch.name,
-          DEFAULT_BOOK_ID,
+          this.bookId,
           branch.created_at ?? now(),
           branch.discarded_at ?? branch.closed_at ?? null
         );
@@ -2377,7 +2749,7 @@ export class Ledger {
       for (const checkpoint of checkpoints) {
         this.db.prepare("INSERT INTO period_closes(id, book_id, name, as_of, description, created_at, reopened_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? checkpoint.id : id("period"),
-          DEFAULT_BOOK_ID,
+          this.bookId,
           checkpoint.name,
           checkpoint.as_of,
           checkpoint.description ?? null,
@@ -2389,7 +2761,7 @@ export class Ledger {
       for (const lot of lots) {
         this.db.prepare("INSERT INTO lots(id, book_id, account_id, asset_id, quantity, cost_asset_id, cost_quantity, opened_journal_id, closed_journal_id, opened_at, closed_at, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? lot.id : id("lot"),
-          DEFAULT_BOOK_ID,
+          this.bookId,
           mappedAccount(lot.account_id, "lot.account_id"),
           mappedAsset(lot.asset_id, "lot.asset_id"),
           BigInt(lot.quantity ?? 0),
@@ -2408,7 +2780,7 @@ export class Ledger {
         const scheduledAssetId = scheduled.asset_id ? mappedAsset(scheduled.asset_id, "scheduled_transaction.asset_id") : scheduledDefaultAsset(scheduled, "scheduled_transaction");
         this.db.prepare("INSERT INTO recurrences(id, book_id, next_date, quantity, from_account_id, to_account_id, description, frequency, end_date, asset_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
           preserveIds ? scheduled.id : id("sched"),
-          DEFAULT_BOOK_ID,
+          this.bookId,
           scheduled.next_date,
           BigInt(scheduled.quantity ?? scheduled.amount_cents ?? 0),
           mappedAccount(scheduled.from_account_id, "scheduled_transaction.from_account_id"),
