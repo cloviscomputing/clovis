@@ -636,6 +636,65 @@ describe("app and package surface", () => {
     }
   });
 
+  it("projects cash with explicit pending, planned, and liability buckets", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const visa = ledger.createAccount("Visa", "liability");
+      const equity = ledger.createAccount("Opening Balances", "equity");
+      const salary = ledger.createAccount("Salary", "income");
+      const groceries = ledger.createAccount("Groceries", "expense");
+
+      ledger.recordTransaction("2026-05-31", 100000n, equity, checking, usd, "Opening cash", "posted");
+      ledger.recordTransaction("2026-06-03", 10000n, checking, groceries, usd, "Pending groceries", "pending");
+      ledger.recordTransaction("2026-06-04", 5000n, visa, groceries, usd, "Posted card", "posted");
+      ledger.recordTransaction("2026-06-05", 2500n, visa, groceries, usd, "Pending card", "pending");
+      ledger.recordTransaction("2026-05-29", 324640n, salary, checking, usd, "Stale planned payroll", "planned");
+      ledger.recordTransaction("2026-06-15", 324343n, salary, checking, usd, "June planned payroll", "planned");
+
+      const base = callTool("cash_projection", { year: 2026, month: 6, asset_account_ids: [checking], liability_account_ids: [visa], include_pending: false, include_planned: false, quote_asset_id: usd }, ledger) as any;
+      expect(base.gross_cash_cents).toBe(100000);
+      expect(base.pending_cash_cents).toBe(0);
+      expect(base.planned_cash_cents).toBe(0);
+      expect(base.liability_effect_cents).toBe(-5000);
+      expect(base.available_cash_cents).toBe(95000);
+
+      const full = callTool("cash_projection", { year: 2026, month: 6, asset_account_ids: [checking], liability_account_ids: [visa], include_pending: true, include_planned: true, quote_asset_id: usd }, ledger) as any;
+      expect(full.pending_cash_cents).toBe(-10000);
+      expect(full.planned_cash_cents).toBe(324343);
+      expect(full.liability_effect_cents).toBe(-7500);
+      expect(full.available_cash_cents).toBe(406843);
+      expect(full.available_cash_cents).not.toBe(base.available_cash_cents);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("collapses overlapping budgets before reporting totals", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const dining = ledger.createAccount("Dining", "expense");
+
+      ledger.recordTransaction("2026-06-02", 4200n, checking, dining, usd, "Dinner", "posted");
+      callTool("set_budget", { account: dining, amount: 300, asset_id: usd }, ledger);
+      callTool("set_budget", { account: dining, amount: 100, asset_id: usd, year: 2026, month: 6 }, ledger);
+
+      const budget = callTool("budget_status", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      expect(budget.budgets).toHaveLength(1);
+      expect(budget.total_budgeted_cents).toBe(10000);
+      expect(budget.total_spent_cents).toBe(4200);
+      expect(budget.budgets[0].remaining_cents).toBe(5800);
+      expect(budget.shadowed_budget_count).toBe(1);
+      expect(budget.shadowed_budgets[0].quantity).toBe(30000);
+      expect(ledger.integrityCheck().ok).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("persists account metadata through shared app paths", () => {
     const ledger = tempLedger();
     try {

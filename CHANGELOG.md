@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6
+
+CFO projection correctness release.
+
+- Make `cash_projection` honor `include_pending` and `include_planned`.
+- Subtract passed liability accounts from available cash and return posted/pending/planned breakdowns.
+- Bound planned projection rows to the requested month so stale prior-month planned payroll is excluded.
+- Collapse overlapping budget targets before reporting `budget_status` totals, while surfacing shadowed rows.
+
 ## 0.1.5
 
 Filesystem gate simplification release.
