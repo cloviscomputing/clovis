@@ -1433,12 +1433,17 @@ const handlers: Record<ToolName, Handler> = {
     const b = account(ledger, args.account_b);
     const txs = iterTransactions(ledger, { status: args.status ?? "pending" });
     const pairs: Row[] = [];
-    for (const left of txs) for (const right of txs) {
-      if (right.id <= left.id) continue;
-      const amountA = amountForAccount(ledger, left.id, a);
-      const amountB = amountForAccount(ledger, right.id, b);
-      const delta = dateDeltaDays(left.date, right.date);
-      if (amountA !== 0n && amountA === -amountB && delta <= (args.date_tolerance_days ?? 1)) pairs.push({ tx_a: left.id, tx_b: right.id, amount_cents: amountA < 0n ? -amountA : amountA });
+    const maybeAddPair = (txA: Journal, txB: Journal) => {
+      const amountA = amountForAccount(ledger, txA.id, a);
+      const amountB = amountForAccount(ledger, txB.id, b);
+      const delta = dateDeltaDays(txA.date, txB.date);
+      if (amountA !== 0n && amountA === -amountB && delta <= (args.date_tolerance_days ?? 1)) pairs.push({ tx_a: txA.id, tx_b: txB.id, amount_cents: amountA < 0n ? -amountA : amountA });
+    };
+    for (let leftIndex = 0; leftIndex < txs.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < txs.length; rightIndex += 1) {
+        maybeAddPair(txs[leftIndex], txs[rightIndex]);
+        maybeAddPair(txs[rightIndex], txs[leftIndex]);
+      }
     }
     const dryRun = args.dry_run !== false;
     if (!dryRun) for (const pair of pairs) { tagTx(ledger, pair.tx_a, "transfer", "matched"); tagTx(ledger, pair.tx_b, "transfer", "matched"); }

@@ -1,6 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { callTool, TOOL_NAMES, type ToolName } from "../src/app/index.js";
 import { Ledger } from "../src/core/index.js";
@@ -29,6 +32,7 @@ type ContractCase = {
   args: (ctx: TestContext) => Args;
   setup?: (ctx: TestContext) => void;
   assert?: (result: any, ctx: TestContext) => void;
+  expectLedgerChange?: boolean;
 };
 
 const cleanups: Array<() => void> = [];
@@ -177,6 +181,51 @@ function ledgerFingerprint(ledger: Ledger): string {
   return JSON.stringify(rows, (_key, value) => typeof value === "bigint" ? value.toString() : value);
 }
 
+function parseCliToolOutput(stdout: string): any {
+  const envelope = JSON.parse(stdout);
+  expect(envelope.ok).toBe(true);
+  return envelope.data;
+}
+
+function callCliTool(ctx: TestContext, name: ToolName, args: Args): any {
+  const stdout = execFileSync(process.execPath, ["dist/cli/main.js", "--db", ctx.db, "--format", "json", "tool", name, "--json", JSON.stringify(args)], {
+    cwd: process.cwd(),
+    env: { ...process.env, CLOVIS_DB: ctx.db, CLOVIS_ALLOWED_ROOT: ctx.dir },
+    encoding: "utf8",
+    timeout: 30_000
+  });
+  return parseCliToolOutput(stdout);
+}
+
+async function withMcpClient(ctx: TestContext, fn: (client: Client) => Promise<void>): Promise<void> {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["dist/mcp/main.js"],
+    cwd: process.cwd(),
+    env: { ...process.env, CLOVIS_DB: ctx.db, CLOVIS_ALLOWED_ROOT: ctx.dir },
+    stderr: "pipe"
+  });
+  const client = new Client({ name: "clovis-contract-test", version: "0.0.0" });
+  try {
+    await client.connect(transport);
+    await fn(client);
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+async function callMcpTool(ctx: TestContext, name: ToolName, args: Args): Promise<any> {
+  let parsed: any;
+  await withMcpClient(ctx, async (client) => {
+    const result = await client.callTool({ name, arguments: args });
+    const content = result.content as Array<{ type: string; text?: string }>;
+    expect(content[0]?.type).toBe("text");
+    expect((result as any).isError, content[0]?.text).not.toBe(true);
+    parsed = JSON.parse(String(content[0]?.text ?? ""));
+  });
+  return parsed;
+}
+
 const CASES = {
   account_balances: { mutation: "read", args: () => ({ account_type: "asset" }), assert: expectArray },
   account_register: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking }), assert: expectObject },
@@ -322,24 +371,83 @@ const CASES = {
   void_by_filter: { mutation: "dry-run", args: () => ({ status: "pending", dry_run: true }), assert: expectObject }
 } satisfies Record<ToolName, ContractCase>;
 
+const APPLY_WRITE_CASES = {
+  apply_match_rules: { mutation: "write", setup: ensureRule, args: (ctx) => ({ catch_all_account_id: ctx.accounts.Uncategorized, dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  apply_pattern: { mutation: "write", args: (ctx) => ({ pattern: "Market", target_account: ctx.accounts["Dining Out"], source_account: ctx.accounts.Groceries, dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  apply_reconciliation_plan: { mutation: "write", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], dry_run: false }), assert: (result) => expect(result.created).toBeGreaterThan(0), expectLedgerChange: true },
+  consolidate_transfers: { mutation: "write", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, dry_run: false }), assert: (result) => expect(result.consolidated).toBeGreaterThan(0), expectLedgerChange: true },
+  delete_tags: { mutation: "write", setup: ensureTag, args: (ctx) => ({ entity_type: "tx", entity_id: ctx.tx.pay, key: "memo", dry_run: false }), assert: (result) => expect(result.deleted).toBe(1), expectLedgerChange: true },
+  discard_batch: { mutation: "write", setup: ensureImportBatch, args: (ctx) => ({ batch_id: ctx.batches.import, dry_run: false }), assert: (result) => expect(result.discarded).toBeGreaterThan(0), expectLedgerChange: true },
+  match_transfer_pairs: { mutation: "write", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, date_tolerance_days: 1, dry_run: false }), assert: (result) => expect(result.matched).toBeGreaterThan(0), expectLedgerChange: true },
+  match_transfers: { mutation: "write", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, date_tolerance_days: 1, dry_run: false }), assert: (result) => expect(result.matched).toBeGreaterThan(0), expectLedgerChange: true },
+  migrate_asset_entries: { mutation: "write", args: (ctx) => ({ from_asset_id: ctx.assets.usd, to_asset_id: ctx.assets.unused, dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  move_transactions: { mutation: "write", args: (ctx) => ({ from_account: ctx.accounts.Uncategorized, to_account: ctx.accounts.Groceries, dry_run: false }), assert: (result) => expect(result.moved).toBeGreaterThan(0), expectLedgerChange: true },
+  process_statement: { mutation: "write", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], expected_balance: null, commit: true }), assert: (result) => expect(result.created).toBeGreaterThan(0), expectLedgerChange: true },
+  recategorize_by_pattern: { mutation: "write", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted", dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  recategorize_by_patterns: { mutation: "write", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted", dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  reconcile_to_balance: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Checking, target_balance: 1000, offset_account_id: ctx.accounts["Opening Balances"], date: "2026-06-30", dry_run: false }), assert: (result) => expect(result.posted).toBe(true), expectLedgerChange: true },
+  record_pending_expenses: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts["Credit Card"], transactions: [{ date: "2026-06-23", amount: 18, description: "Pending expense" }], dry_run: false }), assert: (result) => expect(result.created).toBe(1), expectLedgerChange: true },
+  repair_integrity: { mutation: "write", setup: (ctx) => { ctx.ledger.createAnnotation("tx", "tx_missing", "memo", "orphan"); }, args: () => ({ dry_run: false, backup: false }), assert: (result) => expect(result.repaired).toBeGreaterThan(0), expectLedgerChange: true },
+  void_by_filter: { mutation: "write", args: () => ({ status: "pending", dry_run: false }), assert: (result) => expect(result.voided).toBeGreaterThan(0), expectLedgerChange: true }
+} satisfies Partial<Record<ToolName, ContractCase>>;
+
+const WRITE_TOOL_NAMES = TOOL_NAMES.filter((name) => CASES[name].mutation !== "read");
+const DRY_RUN_TOOL_NAMES = TOOL_NAMES.filter((name) => CASES[name].mutation === "dry-run");
+const APPLY_WRITE_TOOL_NAMES = Object.keys(APPLY_WRITE_CASES) as ToolName[];
+
+function prepareCase(name: ToolName, row: ContractCase): { ctx: TestContext; args: Args; before: string } {
+  const ctx = createContext();
+  row.setup?.(ctx);
+  const before = ledgerFingerprint(ctx.ledger);
+  return { ctx, args: row.args(ctx), before };
+}
+
+function assertCaseResult(name: ToolName, row: ContractCase, ctx: TestContext, result: any, before: string): void {
+  expect(result, `${name} returned undefined`).not.toBeUndefined();
+  row.assert?.(result, ctx);
+  const after = ledgerFingerprint(ctx.ledger);
+  if (row.mutation === "read" || row.mutation === "dry-run") expect(after, `${name} mutated the ledger`).toBe(before);
+  if (row.expectLedgerChange) expect(after, `${name} did not mutate the ledger`).not.toBe(before);
+  expect(ctx.ledger.integrityCheck().ok, `${name} left the ledger with integrity errors`).toBe(true);
+}
+
 describe("MCP contract matrix", () => {
   it("has one explicit contract case for every MCP tool", () => {
     expect(Object.keys(TOOL_SIGNATURES).sort()).toEqual([...TOOL_NAMES].sort());
     expect(Object.keys(CASES).sort()).toEqual([...TOOL_NAMES].sort());
   });
 
-  it.each(TOOL_NAMES)("%s has contract behavior", (name) => {
-    const ctx = createContext();
-    const row = CASES[name];
-    row.setup?.(ctx);
-    const before = ledgerFingerprint(ctx.ledger);
-    const result = callTool(name, row.args(ctx), ctx.ledger);
-    const after = ledgerFingerprint(ctx.ledger);
-    expect(result).not.toBeUndefined();
-    row.assert?.(result, ctx);
-    if (row.mutation === "read" || row.mutation === "dry-run") {
-      expect(after).toBe(before);
-    }
-    expect(ctx.ledger.integrityCheck().ok).toBe(true);
+  it("has explicit write-mode cases for every dry-run mutator", () => {
+    expect(APPLY_WRITE_TOOL_NAMES.sort()).toEqual(DRY_RUN_TOOL_NAMES.sort());
   });
+
+  it.each(TOOL_NAMES)("%s has contract behavior", (name) => {
+    const row = CASES[name];
+    const { ctx, args, before } = prepareCase(name, row);
+    assertCaseResult(name, row, ctx, callTool(name, args, ctx.ledger), before);
+  });
+
+  it.each(WRITE_TOOL_NAMES)("%s write-capable tool runs through the CLI surface", (name) => {
+    const row = CASES[name];
+    const { ctx, args, before } = prepareCase(name, row);
+    assertCaseResult(name, row, ctx, callCliTool(ctx, name, args), before);
+  }, 120_000);
+
+  it.each(WRITE_TOOL_NAMES)("%s write-capable tool runs through the MCP surface", async (name) => {
+    const row = CASES[name];
+    const { ctx, args, before } = prepareCase(name, row);
+    assertCaseResult(name, row, ctx, await callMcpTool(ctx, name, args), before);
+  }, 120_000);
+
+  it.each(APPLY_WRITE_TOOL_NAMES)("%s explicit write mode mutates safely through direct, CLI, and MCP surfaces", async (name) => {
+    for (const runner of [
+      (ctx: TestContext, args: Args) => callTool(name, args, ctx.ledger),
+      (ctx: TestContext, args: Args) => callCliTool(ctx, name, args),
+      (ctx: TestContext, args: Args) => callMcpTool(ctx, name, args)
+    ]) {
+      const row = APPLY_WRITE_CASES[name]!;
+      const { ctx, args, before } = prepareCase(name, row);
+      assertCaseResult(name, row, ctx, await runner(ctx, args), before);
+    }
+  }, 120_000);
 });

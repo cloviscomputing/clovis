@@ -9,6 +9,7 @@ type Shape = Record<string, ZodTypeAny>;
 // Runtime schemas are intentionally stricter than TypeScript metadata: dates,
 // array sizes, and text sizes are bounded before tool handlers run.
 const MAX_STRING_LENGTH = 4096;
+const MAX_DATA_STRING_LENGTH = 10 * 1024 * 1024;
 const MAX_ARRAY_LENGTH = 1000;
 
 function isMonthParameter(name: string): boolean {
@@ -24,9 +25,9 @@ function schemaForParameter(parameter: ToolParameterDefinition): ZodTypeAny {
   const name = parameter[0];
   switch (parameter[1]) {
     case "string":
-      schema = isDateParameter(name)
-        ? z.string().regex(/^\d{4}-\d{2}-\d{2}$/, `${name} must be YYYY-MM-DD`)
-        : z.string().max(MAX_STRING_LENGTH);
+      if (name === "data") schema = z.string().max(MAX_DATA_STRING_LENGTH);
+      else if (isDateParameter(name)) schema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, `${name} must be YYYY-MM-DD`);
+      else schema = z.string().max(MAX_STRING_LENGTH);
       break;
     case "number":
       schema = z.number();

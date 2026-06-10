@@ -132,7 +132,8 @@ export const TOOL_DEFINITIONS = {
   "apply_rollover": {
     parameters: [
       ["year", "integer"],
-      ["month", "integer"]
+      ["month", "integer"],
+      ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
   },
