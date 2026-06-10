@@ -994,7 +994,8 @@ const handlers: Record<ToolName, Handler> = {
     }
     const budgeted = new Set(budgetRows(ledger).map((row) => row.account_id));
     const accounts = new Map(ledger.listAccounts().map((row) => [row.id, row]));
-    return [...totals.entries()].filter(([accountId]) => !args.skip_budgeted || !budgeted.has(accountId)).map(([accountId, values]) => ({ account_id: accountId, account_name: accounts.get(accountId)?.name ?? "", suggested_cents: values.reduce((s, v) => s + v, 0n) / BigInt(values.length) }));
+    const skipBudgeted = args.skip_budgeted !== false;
+    return [...totals.entries()].filter(([accountId]) => !skipBudgeted || !budgeted.has(accountId)).map(([accountId, values]) => ({ account_id: accountId, account_name: accounts.get(accountId)?.name ?? "", suggested_cents: values.reduce((s, v) => s + v, 0n) / BigInt(values.length) }));
   },
 
   set_goal: (ledger, args) => {
@@ -1431,7 +1432,14 @@ const handlers: Record<ToolName, Handler> = {
   },
   holdings: (ledger, args) => {
     const acct = args.account_id ? account(ledger, args.account_id) : null;
-    const rows = ledger.listAssets().filter((ast) => !args.asset_type || ast.asset_type === args.asset_type).flatMap((ast) => ledger.listAccounts().filter((accountRow) => !acct || accountRow.id === acct).map((accountRow) => ({ account_id: accountRow.id, account_name: accountRow.name, asset_id: ast.id, asset_symbol: ast.symbol, quantity: ledger.balanceTree(accountRow.id, ast.id, null, null), quantity_display: display(ledger, ledger.balanceTree(accountRow.id, ast.id, null, null), ast.id) })).filter((row) => row.quantity !== 0n));
+    const rows = ledger.listAssets().filter((ast) => !args.asset_type || ast.asset_type === args.asset_type).flatMap((ast) => ledger.listAccounts()
+      .filter((accountRow) => accountRow.account_type === "asset")
+      .filter((accountRow) => !acct || accountRow.id === acct)
+      .map((accountRow) => {
+        const quantity = ledger.balanceTree(accountRow.id, ast.id, null, null);
+        return { account_id: accountRow.id, account_name: accountRow.name, asset_id: ast.id, asset_symbol: ast.symbol, quantity, quantity_display: display(ledger, quantity, ast.id) };
+      })
+    ).filter((row) => row.quantity !== 0n);
     return rows;
   },
   recognize_gain_loss: (ledger, args) => {
