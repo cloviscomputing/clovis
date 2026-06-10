@@ -81,6 +81,7 @@ function createOracleContext(): OracleContext {
     coffee: ledger.recordTransaction("2026-06-03", 1200n, accounts.Checking, accounts["Dining Out"], usd, "Coffee", "posted").id,
     cardDinner: ledger.recordTransaction("2026-06-04", 500n, accounts["Credit Card"], accounts["Dining Out"], usd, "Card Dinner", "posted").id,
     eurSeed: ledger.recordTransaction("2026-06-05", 10000n, accounts["Opening Balances"], accounts.Savings, eur, "EUR Seed", "posted").id,
+    postedDuplicate: ledger.recordTransaction("2026-06-07", 999n, accounts.Checking, accounts.Uncategorized, usd, "Duplicate Pending", "posted").id,
     pendingCoffee: ledger.recordTransaction("2026-06-06", 800n, accounts.Checking, accounts.Uncategorized, usd, "Coffee Pending", "pending").id,
     duplicateA: ledger.recordTransaction("2026-06-07", 999n, accounts.Checking, accounts.Uncategorized, usd, "Duplicate Pending", "pending").id,
     duplicateB: ledger.recordTransaction("2026-06-07", 999n, accounts.Checking, accounts.Uncategorized, usd, "Duplicate Pending", "pending").id,
@@ -247,6 +248,40 @@ function representativePendingTotal(ctx: OracleContext): bigint {
   `).reduce((sum, row) => sum + BigInt(row.amount), 0n);
 }
 
+function dateDeltaDays(left: string, right: string): number {
+  return Math.abs((Date.parse(`${left}T00:00:00Z`) - Date.parse(`${right}T00:00:00Z`)) / 86400000);
+}
+
+function duplicateReviewGroups(ctx: OracleContext): Row[] {
+  const txRows = (status: string) => all(ctx, `
+    SELECT j.id, j.date, max(abs(l.quantity)) AS amount_cents, lower(j.description) AS description
+    FROM journals j JOIN journal_lines l ON l.journal_id = j.id
+    WHERE j.status = ?
+    GROUP BY j.id
+  `, status);
+  const group = (rows: Row[]) => {
+    const groups = new Map<string, Row[]>();
+    for (const row of rows) {
+      const key = `${row.amount_cents}|${row.description}`;
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    return groups;
+  };
+  const pending = group(txRows("pending"));
+  const posted = group(txRows("posted"));
+  const duplicates: Row[] = [];
+  for (const [key, rows] of pending) {
+    if (rows.length > 1 && rows.some((left, index) => rows.slice(index + 1).some((right) => dateDeltaDays(String(left.date), String(right.date)) <= 3))) {
+      duplicates.push({ type: "pending", key, tx_ids: rows.map((row) => row.id) });
+    }
+    const postedMatches = (posted.get(key) ?? []).filter((postedRow) => rows.some((pendingRow) => dateDeltaDays(String(pendingRow.date), String(postedRow.date)) <= 3));
+    if (postedMatches.length > 0) {
+      duplicates.push({ type: "posted", key, tx_ids: [...rows.map((row) => row.id), ...postedMatches.map((row) => row.id)] });
+    }
+  }
+  return duplicates;
+}
+
 function rootAccounts(ctx: OracleContext, types: string[]): string[] {
   return all(ctx, `
     SELECT a.id
@@ -404,18 +439,11 @@ const READ_CASES: ReadCase[] = [
   {
     name: "find_pending_duplicates",
     args: () => ({}),
-    oracle: (result, ctx) => expect(result.count).toBe(sqlCount(ctx, `
-      SELECT count(*) AS count FROM (
-        SELECT date, amount, description FROM (
-          SELECT j.id, j.date, max(abs(l.quantity)) AS amount, lower(j.description) AS description
-          FROM journals j JOIN journal_lines l ON l.journal_id = j.id
-          WHERE j.status = 'pending'
-          GROUP BY j.id
-        ) grouped
-        GROUP BY date, amount, description
-        HAVING count(*) > 1
-      )
-    `))
+    oracle: (result, ctx) => {
+      const expected = duplicateReviewGroups(ctx);
+      expect(result.count).toBe(expected.length);
+      expect(result.duplicates).toEqual(expect.arrayContaining(expected.map((row) => expect.objectContaining({ type: row.type, key: row.key, tx_ids: expect.arrayContaining(row.tx_ids) }))));
+    }
   },
   {
     name: "forecast",

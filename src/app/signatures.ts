@@ -1058,6 +1058,8 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string"],
       ["counterpart_id", "string"],
       ["transactions", "object[]"],
+      ["currency", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
       ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }]
     ],

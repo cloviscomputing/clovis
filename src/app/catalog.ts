@@ -74,6 +74,10 @@ function previousDate(date: string): string {
   return parsed.toISOString().slice(0, 10);
 }
 
+function dateDeltaDays(left: string, right: string): number {
+  return Math.abs((Date.parse(`${left}T00:00:00Z`) - Date.parse(`${right}T00:00:00Z`)) / 86400000);
+}
+
 function account(ledger: Ledger, ref?: string | null): string {
   return resolveAccount(ledger, ref);
 }
@@ -427,16 +431,12 @@ function importTransactionRows(ledger: Ledger, accountId: string, counterpartId:
   const assetId = options.asset_id ? explicitAsset(ledger, options.asset_id) : options.currency ? asset(ledger, null, options.currency) : accountAsset(ledger, accountId);
   const created: Row[] = [];
   const errors: Row[] = [];
-  const existing = new Set(ledger.listTransactions({ status: null }).map((tx) => {
-    const amount = amountForAccount(ledger, tx.id, accountId, assetId);
-    return `${tx.date}|${amount}|${tx.description.toLowerCase()}`;
-  }));
+  const existing = existingImportFingerprints(ledger, accountId, assetId);
   rows.forEach((row, index) => {
     try {
       const rowCounterpart = row.counterpart_ref ? account(ledger, String(row.counterpart_ref)) : row.counterpart_id ? account(ledger, String(row.counterpart_id)) : counterpartId;
-      const quantity = amountToQuantity(ledger, assetId, row.amount_cents ?? row.quantity ?? row.amount ?? 0);
-      const signed = options.amount_convention === "unsigned_charges" ? -((quantity < 0n) ? -quantity : quantity) : quantity;
-      const fingerprint = `${row.date}|${signed}|${String(row.description ?? "").toLowerCase()}`;
+      const signed = signedStatementQuantity(ledger, assetId, row, options.amount_convention);
+      const fingerprint = importFingerprint(row, signed);
       if (!options.skip_dedup && existing.has(fingerprint)) return;
       const postOptions = {
         sourceId: options.source_id ? String(options.source_id) : null,
@@ -453,6 +453,39 @@ function importTransactionRows(ledger: Ledger, accountId: string, counterpartId:
     }
   });
   return { created: created.length, transactions: created, errors, dry_run: false };
+}
+
+function signedStatementQuantity(ledger: Ledger, assetId: string, row: Row, amountConvention?: unknown): bigint {
+  const quantity = row.amount_cents != null || row.quantity != null
+    ? BigInt(row.amount_cents ?? row.quantity)
+    : amountToQuantity(ledger, assetId, row.amount ?? 0);
+  return amountConvention === "unsigned_charges" ? -((quantity < 0n) ? -quantity : quantity) : quantity;
+}
+
+function importFingerprint(row: Row, signed: bigint): string {
+  return `${row.date}|${signed}|${String(row.description ?? "").toLowerCase()}`;
+}
+
+function existingImportFingerprints(ledger: Ledger, accountId: string, assetId: string): Set<string> {
+  return new Set(ledger.listTransactions({ status: null }).map((tx) => {
+    const amount = amountForAccount(ledger, tx.id, accountId, assetId);
+    return importFingerprint(tx, amount);
+  }));
+}
+
+function importableStatementDelta(ledger: Ledger, accountId: string, assetId: string, rows: Row[], options: Args = {}): { rows: Row[]; delta: bigint } {
+  const existing = existingImportFingerprints(ledger, accountId, assetId);
+  let delta = 0n;
+  const importable: Row[] = [];
+  for (const row of rows) {
+    const signed = signedStatementQuantity(ledger, assetId, row, options.amount_convention);
+    const fingerprint = importFingerprint(row, signed);
+    if (!options.skip_dedup && existing.has(fingerprint)) continue;
+    existing.add(fingerprint);
+    delta += signed;
+    importable.push(row);
+  }
+  return { rows: importable, delta };
 }
 
 function batch(ledger: Ledger, label?: string | null, metadata: Row = {}): string {
@@ -1047,13 +1080,13 @@ const handlers: Record<ToolName, Handler> = {
     const rows = parseStatementRows(ledger, args.file_path, args);
     const accountId = account(ledger, args.account_id);
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : accountAsset(ledger, accountId);
-    const projectedDelta = rows.reduce((sum, row) => sum + amountToQuantity(ledger, assetId, row.amount ?? 0), 0n);
-    const actualBalance = ledger.balanceTree(accountId, assetId, null, null) + projectedDelta;
+    const importable = importableStatementDelta(ledger, accountId, assetId, rows, args);
+    const actualBalance = ledger.balanceTree(accountId, assetId, null, "posted") + importable.delta;
     const expected = args.expected_balance == null ? null : amountToQuantity(ledger, assetId, args.expected_balance);
     if (expected != null && actualBalance !== expected) {
       throw new Error(`expected_balance mismatch: expected ${expected}, actual ${actualBalance}`);
     }
-    const preview = { rows: rows.slice(0, args.preview_rows ?? 10), transactions: rows.slice(0, args.preview_rows ?? 10), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: !args.commit };
+    const preview = { rows: rows.slice(0, args.preview_rows ?? 10), transactions: rows.slice(0, args.preview_rows ?? 10), total_rows: rows.length, would_import: importable.rows.length, skipped_duplicates: rows.length - importable.rows.length, warnings: [], dry_run: !args.commit };
     const imported = args.commit ? handlers.import_file(ledger, { ...args, status: "posted" }) as Row : { created: 0, transactions: [] };
     return { ...preview, ...imported, balance_matches: expected == null ? null : true, actual_balance_cents: actualBalance, expected_balance_cents: expected };
   },
@@ -1235,10 +1268,10 @@ const handlers: Record<ToolName, Handler> = {
     return { count: rows.length, transactions: rows, total_cents: rows.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n) };
   },
   record_pending_expenses: (ledger, args) => {
-    const source = args.dry_run === false ? ledger.getOrCreateAccount("Pending Expenses", "liability") : "Pending Expenses";
+    const pendingBucket = args.dry_run === false ? ledger.getOrCreateAccount("Pending Expenses", "expense") : "Pending Expenses";
     return handlers.import_transactions(ledger, {
-      account_id: source,
-      counterpart_id: args.account_id,
+      account_id: args.account_id,
+      counterpart_id: pendingBucket,
       transactions: args.transactions ?? [],
       status: "pending",
       dry_run: args.dry_run !== false,
@@ -1250,14 +1283,35 @@ const handlers: Record<ToolName, Handler> = {
     });
   },
   find_pending_duplicates: (ledger, args) => {
-    if (args.date_tolerance_days != null && args.date_tolerance_days !== 3) unsupportedArguments({ date_tolerance_days: args.date_tolerance_days });
-    const rows = (handlers.list_transactions(ledger, { account_id: args.account_id, status: "pending", date_from: args.date_from, date_to: args.date_to, compact: false, limit: 100000 }) as Row).transactions as Row[];
-    const seen = new Map<string, string[]>();
-    for (const tx of rows) {
-      const key = `${tx.date}|${tx.amount_cents}|${String(tx.description).toLowerCase()}`;
-      seen.set(key, [...(seen.get(key) ?? []), String(tx.id)]);
+    const tolerance = Number(args.date_tolerance_days ?? 3);
+    const pending = (handlers.list_transactions(ledger, { account_id: args.account_id, status: "pending", date_from: args.date_from, date_to: args.date_to, compact: false, limit: 100000 }) as Row).transactions as Row[];
+    const posted = (handlers.list_transactions(ledger, { account_id: args.account_id, status: "posted", compact: false, limit: 100000 }) as Row).transactions as Row[];
+    const byAmountDescription = (rows: Row[]) => {
+      const groups = new Map<string, Row[]>();
+      for (const tx of rows) {
+        const key = `${tx.amount_cents}|${String(tx.description).toLowerCase()}`;
+        groups.set(key, [...(groups.get(key) ?? []), tx]);
+      }
+      return groups;
+    };
+    const pendingGroups = byAmountDescription(pending);
+    const postedGroups = byAmountDescription(posted);
+    const duplicates: Row[] = [];
+    for (const [key, rows] of pendingGroups) {
+      if (rows.length > 1 && rows.some((left, index) => rows.slice(index + 1).some((right) => dateDeltaDays(String(left.date), String(right.date)) <= tolerance))) {
+        duplicates.push({ type: "pending", key, tx_ids: rows.map((tx) => tx.id) });
+      }
+      const postedMatches = (postedGroups.get(key) ?? []).filter((postedTx) => rows.some((pendingTx) => dateDeltaDays(String(pendingTx.date), String(postedTx.date)) <= tolerance));
+      if (postedMatches.length > 0) {
+        duplicates.push({
+          type: "posted",
+          key,
+          pending_tx_ids: rows.map((tx) => tx.id),
+          posted_tx_ids: postedMatches.map((tx) => tx.id),
+          tx_ids: [...rows.map((tx) => tx.id), ...postedMatches.map((tx) => tx.id)]
+        });
+      }
     }
-    const duplicates = [...seen.entries()].filter(([, ids]) => ids.length > 1).map(([key, tx_ids]) => ({ key, tx_ids }));
     return { duplicates, count: duplicates.length };
   },
   forecast: (ledger, args) => {
@@ -1345,19 +1399,27 @@ const handlers: Record<ToolName, Handler> = {
   },
   reconcile_statement: (ledger, args) => {
     const accountId = account(ledger, args.account_id);
+    const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : accountAsset(ledger, accountId);
     const existing = (handlers.list_transactions(ledger, { account_id: accountId, status: null, compact: false, limit: 100000 }) as Row).transactions as Row[];
     const unmatched: Row[] = [];
     for (const row of args.transactions ?? []) {
-      let amount = BigInt(row.amount_cents ?? row.quantity ?? toAtomicUnits(row.amount ?? 0, 2));
-      if (args.amount_convention === "unsigned_charges") amount = -((amount < 0n) ? -amount : amount);
-      const found = existing.some((tx) => tx.date === row.date && (tx.entries as Row[]).some((entry) => entry.account_id === accountId && BigInt(entry.quantity) === amount));
+      const amount = signedStatementQuantity(ledger, assetId, row, args.amount_convention);
+      const found = existing.some((tx) => tx.date === row.date && (tx.entries as Row[]).some((entry) => entry.account_id === accountId && entry.asset_id === assetId && BigInt(entry.quantity) === amount));
       if (!found) unmatched.push(row);
     }
     return { matched: (args.transactions ?? []).length - unmatched.length, unmatched: unmatched.length, unmatched_rows: unmatched, reconciled: unmatched.length === 0 };
   },
   reconcile_statement_plan: (ledger, args) => {
     const rows = parseStatementRows(ledger, args.file_path, args);
-    return { ...(handlers.reconcile_statement(ledger, { account_id: args.account_id, counterpart_id: args.counterpart_account_id ?? args.account_id, transactions: rows }) as Row), rows: rows.slice(0, args.sample_limit ?? 20) };
+    return { ...(handlers.reconcile_statement(ledger, {
+      account_id: args.account_id,
+      counterpart_id: args.counterpart_account_id ?? args.account_id,
+      transactions: rows,
+      amount_convention: args.amount_convention,
+      statement_type: args.statement_type,
+      asset_id: args.asset_id,
+      currency: args.currency
+    }) as Row), rows: rows.slice(0, args.sample_limit ?? 20) };
   },
   apply_reconciliation_plan: (ledger, args) => args.dry_run === false ? handlers.import_file(ledger, args) : handlers.reconcile_statement_plan(ledger, args),
   reconcile_diff: (ledger, args) => {
@@ -1375,7 +1437,7 @@ const handlers: Record<ToolName, Handler> = {
       if (right.id <= left.id) continue;
       const amountA = amountForAccount(ledger, left.id, a);
       const amountB = amountForAccount(ledger, right.id, b);
-      const delta = Math.abs((Date.parse(left.date) - Date.parse(right.date)) / 86400000);
+      const delta = dateDeltaDays(left.date, right.date);
       if (amountA !== 0n && amountA === -amountB && delta <= (args.date_tolerance_days ?? 1)) pairs.push({ tx_a: left.id, tx_b: right.id, amount_cents: amountA < 0n ? -amountA : amountA });
     }
     const dryRun = args.dry_run !== false;
