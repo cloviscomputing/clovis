@@ -6,11 +6,21 @@
 [![license](https://img.shields.io/npm/l/clovis)](LICENSE)
 [![node](https://img.shields.io/node/v/clovis)](package.json)
 
-Clovis is a local-first bookkeeping package for Node.js. It provides a SQLite
-ledger engine, package APIs, a command-line interface, and an optional MCP
+Clovis is a local-first bookkeeping toolkit for people and agents that need a
+durable SQLite ledger instead of a hosted finance app. It ships as one npm
+package with a double-entry ledger engine, a CLI, Node.js APIs, and an MCP
 server for local agent workflows.
 
-Clovis is not a hosted service, sync service, or app UI. The public surfaces are:
+Use Clovis when you want to:
+
+- keep financial records in a local SQLite database you control
+- import CSV, QFX, or OFX bank statements for review
+- run reports and exports from a scriptable CLI
+- expose a finance-safe tool surface to local MCP clients
+- embed a versioned bookkeeping engine in another Node.js project
+
+Clovis is not a bank, custody system, sync service, tax product, or app UI. The
+public surfaces are:
 
 - the SQLite schema created by the ledger engine
 - the package exports under `clovis`, `clovis/core`, `clovis/app`, and
@@ -18,38 +28,35 @@ Clovis is not a hosted service, sync service, or app UI. The public surfaces are
 - the `clovis` CLI
 - the `clovis-mcp` server and its MCP tool signatures
 
-This package currently defines the local database format while the project is in
-the `0.x` line.
+The project is public and pre-1.0. The package currently defines the local
+database format while the API and schema settle during the `0.x` line.
 
 ## Status
 
 The database format is versioned. The current schema is `SCHEMA_VERSION = 2`.
-Fresh databases are created directly with this schema. Schema v1 ledgers are
+Fresh databases are created directly with schema v2. Schema v1 ledgers are
 migrated on open. Ledger JSON snapshots can be exported and imported with
 `export_ledger` and `import_ledger`.
 
-`0.1.0` is the first public release. Clovis is designed for long-running local
-bookkeeping workflows while the public API and database format settle during the
-`0.x` line.
-
-The schema is a versioned local data format, but the package is still pre-1.0.
-Patch releases should continue to read schema v1 and v2 databases. Minor
-releases may revise the format and should document the upgrade path.
+Patch releases in the `0.x` line should keep reading schema v1 and v2
+databases, preserve public package entrypoints, and avoid removing MCP tools.
+Minor releases may revise behavior or database shape, but the changelog should
+document the compatibility impact and upgrade path.
 
 ## Financial Records
 
 Clovis is designed for local bookkeeping records, but you should treat any
 financial database with care:
 
-- keep backups of your ledger file
+- keep backups of your ledger file and exported snapshots
 - review imported or pending transactions before posting them
 - reconcile against source statements
-- run `npm run release:check` before release builds
+- run `clovis doctor --read-only-tools --quote <asset>` after upgrades
 
 The engine enforces balanced double-entry journals per asset, stores quantities
 as integers using each asset's scale, uses SQLite foreign keys, supports period
-closes, and ships with a contract test row for every MCP tool. It is not a bank,
-custody system, tax filing product, or substitute for professional review.
+closes, and ships with contract coverage for every CLI/MCP tool. It is not a
+substitute for professional review.
 
 ## Currency Model
 
@@ -94,6 +101,27 @@ You can also run the CLI without a global install:
 npx clovis --help
 ```
 
+## Quickstart
+
+Create a local ledger, add one posted transaction, run a report, and exercise
+the read-only diagnostic suite:
+
+```sh
+clovis --db ./ledger.db init --currency CAD
+clovis --db ./ledger.db txn add \
+  --date 2026-06-01 \
+  --amount 100 \
+  --desc "Opening cash" \
+  --from "Opening Balances" \
+  --to "Checking" \
+  --status posted
+clovis --db ./ledger.db report balance-sheet --quote CAD
+clovis --db ./ledger.db doctor --read-only-tools --quote CAD
+```
+
+By default, the CLI stores its ledger at `~/.clovis/clovis.db`. Use `--db` or
+`CLOVIS_DB` whenever you want an explicit database file.
+
 ## Update
 
 After a new version is published to npm, update the global CLI and MCP server
@@ -131,9 +159,6 @@ after the global package is updated.
 The CLI covers common setup, account, transaction, import/export, and report
 flows. The complete app tool catalog is also available through `clovis tool`.
 
-By default, the CLI stores its ledger at `~/.clovis/clovis.db`. Use
-`--db` or `CLOVIS_DB` to choose another database path.
-
 ```sh
 clovis --db ./ledger.db init --currency CAD
 clovis --db ./ledger.db --format json account list
@@ -141,11 +166,11 @@ clovis --db ./ledger.db --format json account balances --type asset
 ```
 
 Record a posted transaction between two accounts that share the same account
-currency:
+currency. Account arguments may be ids or resolvable account names:
 
 ```sh
 clovis --db ./ledger.db txn add --date 2026-06-01 --amount 100 \
-  --desc "Owner contribution" --from "<equity-account-id>" --to "<checking-id>" \
+  --desc "Owner contribution" --from "Opening Balances" --to "Checking" \
   --status posted
 ```
 
@@ -158,12 +183,23 @@ clovis --db ./ledger.db report income-statement --year 2026 --month 6 --quote CA
 
 Import a CSV, QFX, or OFX statement into an existing account. If `--currency`
 is omitted, the import uses the account `default_asset`; pass `--currency`
-when the file needs to create or use a different explicit asset. CLI imports default to
-`pending` so rows can be reviewed before posting.
+when the file needs to create or use a different explicit asset. CLI imports
+default to `pending` so rows can be reviewed before posting.
 
 ```sh
 clovis --db ./ledger.db import --file ./statement.csv \
-  --account "<checking-id>" --counterpart "<uncategorized-id>"
+  --account "Checking" --counterpart "Uncategorized"
+```
+
+Export filtered transaction rows:
+
+```sh
+clovis --db ./ledger.db export \
+  --account "Checking" \
+  --from 2026-06-01 \
+  --to 2026-06-30 \
+  --status all \
+  --output ./checking-june.csv
 ```
 
 For full CLI parity with the app and MCP catalog, call any public tool by name:
@@ -205,6 +241,9 @@ Run a built-in read-only smoke pass against a ledger with:
 clovis --db ./ledger.db doctor --read-only-tools --quote CAD
 ```
 
+The doctor checks the tool registry, status semantics, filtered exports,
+integrity, and quote-report paths without mutating the ledger.
+
 ## MCP
 
 Start the MCP server against a specific local ledger database:
@@ -241,8 +280,8 @@ Example local MCP configuration:
 
 ## Package API
 
-`npm install clovis` installs one package. Import the surface you need through
-an explicit public entrypoint:
+`npm install clovis` installs one package. Import through an explicit public
+entrypoint:
 
 ```ts
 import { Ledger } from "clovis/core";
