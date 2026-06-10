@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+CLI/MCP contract hardening release.
+
+- Standardize read/filter status semantics across CLI and MCP tools: `all` and JSON `null` mean visible non-void transactions, while creation tools still require lifecycle statuses.
+- Fix `export_transactions` and `export_ledger` so advertised account, date, entity, and status filters are actually applied.
+- Add MCP safety annotations, parameter aliases, and the `tool_registry` reader for machine-readable schema, status, alias, and safety metadata.
+- Add QFX/OFX statement preview support and make tagged/manual import batches visible to batch tooling.
+- Replace misleading implementations for `detect_recurring`, `age_of_money`, posted-at search, and unmatched-transfer tolerance with persistence-backed behavior.
+- Enable SQLite WAL mode and busy timeouts, and add concurrent read-only CLI smoke coverage.
+- Add `clovis doctor --read-only-tools --quote <asset>` for local read-only tool diagnostics.
+
 ## 0.2.0
 
 Schema v2 hardening release.

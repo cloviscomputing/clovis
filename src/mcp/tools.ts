@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodTypeAny } from "zod";
 import { callTool } from "../app/catalog.js";
-import { TOOL_DEFINITIONS, type ToolDefinition, type ToolParameterDefinition } from "../app/signatures.js";
+import { TOOL_DEFINITIONS, normalizeToolInput, parameterAliasesForTool, toolAnnotations, type ToolDefinition, type ToolParameterDefinition } from "../app/signatures.js";
 import { VERSION } from "../version.js";
 
 type Shape = Record<string, ZodTypeAny>;
@@ -68,22 +68,29 @@ function schemaForParameter(parameter: ToolParameterDefinition): ZodTypeAny {
   return schema;
 }
 
-export function inputShapeFromDefinition(definition: ToolDefinition): Shape {
+export function inputShapeFromDefinition(definition: ToolDefinition, name?: string): Shape {
   const shape: Shape = {};
   for (const parameter of definition.parameters) {
     shape[parameter[0]] = schemaForParameter(parameter);
   }
+  if (name) {
+    const parameters = new Map(definition.parameters.map((parameter) => [parameter[0], parameter]));
+    for (const [alias, target] of Object.entries(parameterAliasesForTool(name))) {
+      const parameter = parameters.get(target);
+      if (parameter) shape[alias] = schemaForParameter([alias, parameter[1], { ...parameter[2], optional: true }]);
+    }
+  }
   return shape;
 }
 
-export function inputSchemaFromDefinition(definition: ToolDefinition): z.ZodObject<Shape> {
-  return z.object(inputShapeFromDefinition(definition)).strict();
+export function inputSchemaFromDefinition(definition: ToolDefinition, name?: string): z.ZodObject<Shape> {
+  return z.object(inputShapeFromDefinition(definition, name)).strict();
 }
 
 export function parseToolInput(name: string, input: Record<string, unknown> = {}): Record<string, unknown> {
   const definition = TOOL_DEFINITIONS[name as keyof typeof TOOL_DEFINITIONS];
   if (!definition) throw new Error(`Unknown tool: ${name}`);
-  return inputSchemaFromDefinition(definition).parse(input);
+  return normalizeToolInput(name, inputSchemaFromDefinition(definition, name).parse(input));
 }
 
 export function createClovisMcpServer(): McpServer {
@@ -91,7 +98,7 @@ export function createClovisMcpServer(): McpServer {
   for (const [name, definition] of Object.entries(TOOL_DEFINITIONS)) {
     (server as any).registerTool(
       name,
-      { inputSchema: inputSchemaFromDefinition(definition) },
+      { inputSchema: inputSchemaFromDefinition(definition, name), annotations: toolAnnotations(name) },
       async (input: Record<string, unknown>) => {
         const result = callTool(name, input ?? {});
         return {

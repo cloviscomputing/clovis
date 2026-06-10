@@ -61,6 +61,10 @@ Transactions may omit `asset_id` only when both accounts have the same
 `default_asset`. Cross-currency movement should use `fx_transfer`. Reports that
 present converted totals require an explicit `quote_asset_id` or CLI `--quote`
 value, and report missing conversions when prices are unavailable.
+Tool inputs accept asset ids or symbols for `asset_id` and `quote_asset_id`.
+For quote-style tools, `currency`, `quote`, and `quote_id` are aliases for
+`quote_asset_id` unless the tool already defines one of those names for another
+purpose.
 
 ## Install
 
@@ -152,9 +156,9 @@ clovis --db ./ledger.db report balance-sheet --quote CAD
 clovis --db ./ledger.db report income-statement --year 2026 --month 6 --quote CAD
 ```
 
-Import a CSV statement into an existing account. If `--currency` is omitted,
-the import uses the account `default_asset`; pass `--currency` when the file
-needs to create or use a different explicit asset. CLI imports default to
+Import a CSV, QFX, or OFX statement into an existing account. If `--currency`
+is omitted, the import uses the account `default_asset`; pass `--currency`
+when the file needs to create or use a different explicit asset. CLI imports default to
 `pending` so rows can be reviewed before posting.
 
 ```sh
@@ -171,6 +175,18 @@ clovis --db ./ledger.db --format json tool account_balances \
 clovis --db ./ledger.db --format json tool import_transactions --stdin < args.json
 ```
 
+Read/filter tools accept these status filters:
+
+- `posted`, `pending`, `planned`, and `void` select one lifecycle status.
+- `active` means `posted + pending`.
+- `combined` means `posted + pending + planned`.
+- `all` means all visible non-void transactions.
+
+In JSON tool calls, explicit `null` is treated like `all` for read/filter
+status.
+Creation tools still require a real lifecycle status: `posted`, `pending`,
+`planned`, or `void`.
+
 File tools are sandboxed to the ledger directory unless `CLOVIS_ALLOWED_ROOT`
 is set. Bulk mutation tools default to dry-run and require `dry_run:false` in
 the tool arguments to apply changes:
@@ -181,6 +197,12 @@ clovis --db ./ledger.db tool void_by_filter \
   --json '{"status":"planned","date_to":"2026-05-31"}'
 clovis --db ./ledger.db tool void_by_filter \
   --json '{"status":"planned","date_to":"2026-05-31","dry_run":false}'
+```
+
+Run a built-in read-only smoke pass against a ledger with:
+
+```sh
+clovis --db ./ledger.db doctor --read-only-tools --quote CAD
 ```
 
 ## MCP
@@ -196,6 +218,10 @@ ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` to allow imports,
 exports, and backups under another local directory. MCP and CLI tools share the
 same catalog and behavior: bulk mutation tools preview by default, and callers
 must pass `dry_run:false` or an equivalent commit argument to apply changes.
+MCP tools include safety annotations such as `readOnlyHint`,
+`destructiveHint`, and `idempotentHint`. The `tool_registry` tool returns the
+full shared schema, rendered signatures, parameter aliases, status convention,
+and safety metadata through the normal MCP tool-call path.
 
 Example local MCP configuration:
 

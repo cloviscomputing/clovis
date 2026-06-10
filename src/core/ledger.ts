@@ -228,6 +228,9 @@ export class Ledger {
     this.path = dbPath;
     this.bookId = options.bookId || DEFAULT_BOOK_ID;
     this.db = new DatabaseSync(this.path, { readBigInts: true });
+    this.db.exec("PRAGMA busy_timeout = 5000");
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA synchronous = NORMAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.initialize();
   }
@@ -450,6 +453,25 @@ export class Ledger {
   listAnnotationEntityIds(entityType: string, key: string, value: string): string[] {
     return (this.db.prepare("SELECT entity_id FROM annotations WHERE book_id = ? AND entity_type = ? AND key = ? AND value = ? ORDER BY entity_id").all(this.bookId, entityType, key, value) as Row[])
       .map((row) => String(row.entity_id));
+  }
+
+  listAnnotationValues(entityType: string, key: string): Row[] {
+    return this.db.prepare(`
+      SELECT a.value,
+             count(DISTINCT a.entity_id) AS count,
+             min(j.posted_at) AS first_seen_at,
+             max(j.posted_at) AS last_seen_at
+        FROM annotations a
+        LEFT JOIN journals j
+          ON j.book_id = a.book_id
+         AND a.entity_type = 'tx'
+         AND j.id = a.entity_id
+       WHERE a.book_id = ?
+         AND a.entity_type = ?
+         AND a.key = ?
+       GROUP BY a.value
+       ORDER BY max(j.posted_at) DESC, a.value
+    `).all(this.bookId, entityType, key) as Row[];
   }
 
   createSource(type: string, label?: string | null, metadata: Row = {}, status = "open"): string {
@@ -1189,7 +1211,8 @@ export class Ledger {
     let sql = "SELECT * FROM journals WHERE book_id = ? AND finalized_at IS NOT NULL";
     const params: SQLInputValue[] = [this.bookId];
     if (options.status != null) {
-      if (options.status === "active") sql += " AND status IN ('posted', 'pending')";
+      if (options.status === "all") sql += " AND status != 'void'";
+      else if (options.status === "active") sql += " AND status IN ('posted', 'pending')";
       else if (options.status === "combined") sql += " AND status IN ('posted', 'pending', 'planned')";
       else {
         sql += " AND status = ?";
@@ -1347,6 +1370,7 @@ export class Ledger {
 
   private statusClause(status: TxStatus | string | null | undefined): { sql: string; params: unknown[] } {
     if (status == null) return { sql: "AND t.status != 'void'", params: [] };
+    if (status === "all") return { sql: "AND t.status != 'void'", params: [] };
     if (status === "active") return { sql: "AND t.status IN ('posted', 'pending')", params: [] };
     if (status === "combined") return { sql: "AND t.status IN ('posted', 'pending', 'planned')", params: [] };
     return { sql: "AND t.status = ?", params: [txStatus(String(status))] };
@@ -1518,7 +1542,7 @@ export class Ledger {
     const income = new Map<string, Row>();
     const expense = new Map<string, Row>();
     const missing: Row[] = [];
-    for (const tx of this.listTransactions({ status, dateFrom, dateTo })) {
+    for (const tx of this.listTransactions({ status: status ?? "all", dateFrom, dateTo })) {
       for (const entry of this.getEntries(tx.id)) {
         const [converted, error] = this.tryConvertQuantity(entry.quantity, entry.asset_id, quoteAssetId, tx.date);
         if (converted == null) {
@@ -1722,7 +1746,7 @@ export class Ledger {
       expense: new Map<string, bigint>(),
       liability: new Map<string, bigint>()
     };
-    for (const tx of this.listTransactions({ status, dateFrom, dateTo })) {
+    for (const tx of this.listTransactions({ status: status ?? "all", dateFrom, dateTo })) {
       for (const entry of this.getEntries(tx.id)) {
         const account = accounts.get(entry.account_id);
         if (account?.account_type === "income" || account?.account_type === "expense" || account?.account_type === "liability") {
@@ -1787,7 +1811,7 @@ export class Ledger {
     if (!account) throw new Error(`Account ${accountId} not found`);
     let running = 0n;
     const rows: Row[] = [];
-    for (const tx of this.listTransactions({ status, dateFrom, dateTo })) {
+    for (const tx of this.listTransactions({ status: status ?? "all", dateFrom, dateTo })) {
       for (const entry of this.getEntries(tx.id).filter((line) => line.account_id === accountId && line.asset_id === assetId)) {
         running += entry.quantity;
         const parts = debitCredit(entry.quantity);
@@ -1816,6 +1840,8 @@ export class Ledger {
     status?: TxStatus | string | null;
     dateFrom?: string | null;
     dateTo?: string | null;
+    postedAtFrom?: string | null;
+    postedAtTo?: string | null;
     assetId?: string | null;
     sort?: string;
     limit?: number | null;
@@ -1823,6 +1849,9 @@ export class Ledger {
   }) {
     let rows: Array<Journal & { entries: JournalLine[] }> = [];
     for (const tx of this.listTransactions({ status: options.status, dateFrom: options.dateFrom, dateTo: options.dateTo })) {
+      if (options.status == null && tx.status === "void") continue;
+      if (options.postedAtFrom && tx.posted_at < options.postedAtFrom) continue;
+      if (options.postedAtTo && tx.posted_at > options.postedAtTo) continue;
       if (options.desc && !tx.description.toLowerCase().includes(options.desc.toLowerCase())) continue;
       const entries = this.getEntries(tx.id);
       if (options.accountId && !entries.some((entry) => entry.account_id === options.accountId)) continue;
@@ -2801,11 +2830,11 @@ export class Ledger {
     }
   }
 
-  exportTransactionsCsv(outputPath?: string | null) {
+  exportTransactionsCsv(outputPath?: string | null, options: { accountId?: string | null; dateFrom?: string | null; dateTo?: string | null; status?: TxStatus | string | null } = {}) {
     const rows = ["date,description,amount,account_id,tx_id"];
-    for (const tx of this.listTransactions({ status: null })) {
-      if (tx.status === "void") continue;
-      for (const entry of this.getEntries(tx.id)) {
+    const status = options.status == null ? "all" : options.status;
+    for (const tx of this.listTransactions({ status, dateFrom: options.dateFrom, dateTo: options.dateTo })) {
+      for (const entry of this.getEntries(tx.id).filter((line) => !options.accountId || line.account_id === options.accountId)) {
         const desc = `"${tx.description.replaceAll('"', '""')}"`;
         rows.push(`${tx.date},${desc},${entry.quantity.toString()},${entry.account_id},${tx.id}`);
       }

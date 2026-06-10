@@ -33,6 +33,13 @@ export type ToolDefinition = {
   returns: ToolTypeDefinition;
 };
 
+export type ToolSafetyAnnotations = {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+};
+
 export const TOOL_DEFINITIONS = {
   "account_balances": {
     parameters: [
@@ -283,7 +290,7 @@ export const TOOL_DEFINITIONS = {
       ["branch_b", "string", { nullable: true, optional: true, defaultValue: null }],
       ["as_of_a", "string", { nullable: true, optional: true, defaultValue: null }],
       ["as_of_b", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ["asset_id", "string"]
     ],
     returns: { type: "object" }
   },
@@ -498,6 +505,7 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["status", "string", { nullable: true, optional: true, defaultValue: null }],
       ["output_path", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
@@ -1263,6 +1271,12 @@ export const TOOL_DEFINITIONS = {
     ],
     returns: { type: "object[]" }
   },
+  "tool_registry": {
+    parameters: [
+
+    ],
+    returns: { type: "object" }
+  },
   "transfer": {
     parameters: [
       ["from_account_id", "string"],
@@ -1329,6 +1343,86 @@ export const TOOL_DEFINITIONS = {
 } as const satisfies Record<string, ToolDefinition>;
 
 export type ToolSignatureName = keyof typeof TOOL_DEFINITIONS;
+
+export const STATUS_FILTER_VALUES = ["posted", "pending", "planned", "void", "active", "combined", "all"] as const;
+
+const READ_ONLY_TOOLS = new Set<string>([
+  "account_balances", "account_register", "age_of_money", "assert_balance", "assert_balances", "audit_categorization",
+  "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "cash_flow",
+  "cash_projection", "compare_scenarios", "count_transactions", "detect_recurring", "export_ledger",
+  "export_transactions", "financial_overview", "financial_picture", "find_pending_duplicates", "forecast",
+  "forecast_month_end", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_price",
+  "get_transaction", "goal_progress", "holdings", "income_statement", "inspect_transaction", "integrity_check",
+  "list_accounts", "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries",
+  "list_entries_by_asset", "list_goals", "list_import_batches", "list_match_rules", "list_prices", "list_scheduled",
+  "list_tags", "list_transactions", "list_uncategorized", "list_unmatched_transfers", "net_worth", "pending_summary",
+  "preview_commit", "preview_import", "project_balances", "project_month_end", "reconcile_diff", "reconcile_statement",
+  "reconcile_statement_plan", "search_transactions", "spending", "spending_rate", "suggest_budgets",
+  "top_descriptions", "tool_registry", "trial_balance", "unbudgeted_spending"
+]);
+
+const DESTRUCTIVE_TOOLS = new Set<string>([
+  "delete_account", "delete_asset", "delete_budget", "delete_budgets", "delete_goal", "delete_match_rule",
+  "delete_match_rules", "delete_tag", "delete_tags", "delete_transaction", "discard_batch", "discard_branch",
+  "merge_accounts", "migrate_asset_entries", "move_transactions", "repair_integrity", "rollback_import",
+  "rollback_recategorize", "void_by_filter"
+]);
+
+function parameterNames(definition: ToolDefinition): Set<string> {
+  return new Set(definition.parameters.map((parameter) => parameter[0]));
+}
+
+export function toolAnnotations(name: string): ToolSafetyAnnotations {
+  const readOnly = READ_ONLY_TOOLS.has(name);
+  return {
+    readOnlyHint: readOnly,
+    destructiveHint: DESTRUCTIVE_TOOLS.has(name),
+    idempotentHint: readOnly,
+    openWorldHint: false
+  };
+}
+
+export function toolSafety(name: string): ToolSafetyAnnotations & { supportsDryRun: boolean; defaultDryRun: boolean } {
+  const definition = TOOL_DEFINITIONS[name as ToolSignatureName];
+  const dryRun = definition?.parameters.find((parameter) => parameter[0] === "dry_run");
+  return {
+    ...toolAnnotations(name),
+    supportsDryRun: Boolean(dryRun),
+    defaultDryRun: dryRun?.[2]?.defaultValue === true
+  };
+}
+
+export function parameterAliasesForTool(name: string): Record<string, string> {
+  const definition = TOOL_DEFINITIONS[name as ToolSignatureName];
+  if (!definition) return {};
+  const names = parameterNames(definition);
+  const aliases: Record<string, string> = {};
+  if (names.has("quote_asset_id")) {
+    if (!names.has("currency")) aliases.currency = "quote_asset_id";
+    if (!names.has("quote")) aliases.quote = "quote_asset_id";
+    if (!names.has("quote_id")) aliases.quote_id = "quote_asset_id";
+  }
+  if (names.has("quote_id")) {
+    if (!names.has("quote_asset_id")) aliases.quote_asset_id = "quote_id";
+    if (!names.has("quote")) aliases.quote = "quote_id";
+  }
+  if (names.has("asset_id") && !names.has("asset")) aliases.asset = "asset_id";
+  return aliases;
+}
+
+export function normalizeToolInput(name: string, input: Record<string, unknown> = {}): Record<string, unknown> {
+  const aliases = parameterAliasesForTool(name);
+  const normalized = { ...input };
+  for (const [alias, target] of Object.entries(aliases)) {
+    if (!(alias in normalized)) continue;
+    if (target in normalized && normalized[target] !== normalized[alias]) {
+      throw new Error(`Use either ${target} or ${alias}, not both`);
+    }
+    normalized[target] = normalized[alias];
+    delete normalized[alias];
+  }
+  return normalized;
+}
 
 function typeDisplay(definition: ToolTypeDefinition): string {
   let rendered: string;

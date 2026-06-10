@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "../src/core/index.js";
 import { callTool, TOOL_NAMES } from "../src/app/index.js";
@@ -14,6 +15,7 @@ import { inputShapeFromDefinition, inputSchemaFromDefinition } from "../src/mcp/
 // Core tests are invariant-oriented: schema shape, balancing, currency scale,
 // reports, imports, and public command behavior all meet here.
 const dirs: string[] = [];
+const execFileAsync = promisify(execFile);
 
 function tempLedger(): Ledger {
   const dir = mkdtempSync(join(tmpdir(), "clovis-npm-"));
@@ -768,6 +770,180 @@ describe("app and package surface", () => {
     }
   });
 
+  it("treats status all as visible non-void transactions across read filters", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      const posted = callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Posted", status: "posted" }, ledger) as any;
+      callTool("create_transaction", { date: "2026-06-02", amount: 50, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Pending", status: "pending" }, ledger);
+      callTool("plan_transaction", { date: "2026-06-03", amount: 25, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Planned" }, ledger);
+      const voided = callTool("create_transaction", { date: "2026-06-04", amount: 10, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Voided", status: "posted" }, ledger) as any;
+      callTool("delete_transaction", { id: voided.id }, ledger);
+
+      const listed = callTool("list_transactions", { status: "all", compact: true, limit: 100 }, ledger) as any;
+      expect(listed.total).toBe(3);
+      expect(listed.transactions.map((tx: any) => tx.status).sort()).toEqual(["pending", "planned", "posted"]);
+      expect((callTool("count_transactions", { status: "all" }, ledger) as any).count).toBe(3);
+      expect((callTool("count_transactions", { status: null }, ledger) as any).count).toBe(3);
+      expect((callTool("get_balance", { account_id: accounts.Checking, status: "all" }, ledger) as any).balance_cents).toBe(17500);
+      expect((callTool("trial_balance", { asset_id: usd, status: "all" }, ledger) as any).balanced).toBe(true);
+      expect((callTool("account_register", { account_id: accounts.Checking, status: "all" }, ledger) as any).total).toBe(3);
+      expect((callTool("search_transactions", { query: "Posted", status: "all" }, ledger) as any).transactions.map((tx: any) => tx.id)).toEqual([posted.id]);
+
+      callTool("set_budget", { account: accounts.Groceries, amount: 100, year: 2026, month: 6 }, ledger);
+      callTool("create_transaction", { date: "2026-06-05", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Posted groceries", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-06", amount: 5, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Pending groceries", status: "pending" }, ledger);
+      callTool("plan_transaction", { date: "2026-06-07", amount: 2, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Planned groceries" }, ledger);
+      const voidedExpense = callTool("create_transaction", { date: "2026-06-08", amount: 1, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Voided groceries", status: "posted" }, ledger) as any;
+      callTool("delete_transaction", { id: voidedExpense.id }, ledger);
+      expect((callTool("spending", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any).total).toBe(1000);
+      expect((callTool("spending", { year: 2026, month: 6, quote_asset_id: usd, status: "all" }, ledger) as any).total).toBe(1700);
+      expect((callTool("spending", { year: 2026, month: 6, quote_asset_id: usd, status: null }, ledger) as any).total).toBe(1700);
+      expect((callTool("budget_summary", { year: 2026, month: 6, quote_asset_id: usd, status: "all" }, ledger) as any).total_spent_cents).toBe(1700);
+      expect((callTool("budget_summary", { year: 2026, month: 6, quote_asset_id: usd, status: null }, ledger) as any).total_spent_cents).toBe(1700);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("applies export transaction filters instead of dumping the whole ledger", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "June pay", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-02", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "June groceries", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-07-01", amount: 200, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "July pay", status: "posted" }, ledger);
+      const voided = callTool("create_transaction", { date: "2026-06-03", amount: 3, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Voided June pay", status: "posted" }, ledger) as any;
+      callTool("delete_transaction", { id: voided.id }, ledger);
+
+      const exported = callTool("export_transactions", { account_id: accounts.Checking, date_from: "2026-06-01", date_to: "2026-06-30", status: "all" }, ledger) as any;
+      const lines = String(exported.csv).trim().split(/\r?\n/);
+      expect(exported.exported).toBe(2);
+      expect(lines).toHaveLength(3);
+      expect(lines[1]).toContain(",10000,");
+      expect(lines[2]).toContain(",-1000,");
+      expect(lines.every((line) => line === lines[0] || line.startsWith("2026-06-"))).toBe(true);
+      expect(lines.slice(1).every((line) => line.includes(`,${accounts.Checking},`))).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("applies scoped export_ledger filters instead of dumping the whole ledger", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const june = callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "June pay", status: "posted" }, ledger) as any;
+      callTool("create_transaction", { date: "2026-06-02", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "June groceries", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-07-01", amount: 200, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "July pay", status: "posted" }, ledger);
+
+      const scoped = JSON.parse((callTool("export_ledger", { account_ids: [accounts.Groceries], date_from: "2026-06-01", date_to: "2026-06-30" }, ledger) as any).data);
+      expect(scoped.scope).toMatchObject({ date_from: "2026-06-01", date_to: "2026-06-30", transaction_count: 1 });
+      expect(scoped.transactions.map((tx: any) => tx.description)).toEqual(["June groceries"]);
+      expect(scoped.accounts.map((row: any) => row.id)).toContain(accounts.Groceries);
+      expect(scoped.accounts.map((row: any) => row.id)).not.toContain(accounts.Salary);
+
+      const byEntity = JSON.parse((callTool("export_ledger", { entity_id: june.id }, ledger) as any).data);
+      expect(byEntity.transactions.map((tx: any) => tx.id)).toEqual([june.id]);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("uses true posted_at filters for transaction search", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const early = callTool("create_transaction", { date: "2026-06-30", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Early posted", status: "posted" }, ledger) as any;
+      const late = callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Late posted", status: "posted" }, ledger) as any;
+      ledger.db.prepare("UPDATE journals SET posted_at = ? WHERE id = ?").run("2026-06-01T09:00:00Z", early.id);
+      ledger.db.prepare("UPDATE journals SET posted_at = ? WHERE id = ?").run("2026-06-10T09:00:00Z", late.id);
+
+      const byPosted = callTool("search_transactions", { posted_at_from: "2026-06-10", posted_at_to: "2026-06-10", status: "posted" }, ledger) as any;
+      expect(byPosted.transactions.map((tx: any) => tx.id)).toEqual([late.id]);
+      const byDate = callTool("search_transactions", { date_from: "2026-06-30", date_to: "2026-06-30", status: "posted" }, ledger) as any;
+      expect(byDate.transactions.map((tx: any) => tx.id)).toEqual([early.id]);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("uses recurring detection time windows and amount tolerance", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("create_transaction", { date: "2026-05-01", amount: 100, from_account_id: accounts.Checking, to_account_id: accounts.Utilities, description: "Utility Bill", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-01", amount: 104, from_account_id: accounts.Checking, to_account_id: accounts.Utilities, description: "Utility Bill", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-01", amount: 50, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "One-off", status: "posted" }, ledger);
+
+      const tolerant = callTool("detect_recurring", { year: 2026, month: 6, min_occurrences: 2, amount_tolerance_pct: 5 }, ledger) as any[];
+      expect(tolerant).toEqual([]);
+      const twoMonths = callTool("detect_recurring", { months: 2, min_occurrences: 2, amount_tolerance_pct: 5 }, ledger) as any[];
+      expect(twoMonths).toContainEqual(expect.objectContaining({ description: "Utility Bill", occurrences: 2 }));
+      const strict = callTool("detect_recurring", { months: 2, min_occurrences: 2, amount_tolerance_pct: 1 }, ledger) as any[];
+      expect(strict).toEqual([]);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("computes age_of_money from remaining inflow lots instead of echoing the input", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const salary = ledger.createAccount("Salary", "income");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      for (const accountId of [checking, salary, groceries]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+      const asOf = new Date();
+      const oldDate = new Date(asOf);
+      oldDate.setUTCDate(oldDate.getUTCDate() - 10);
+      const newDate = new Date(asOf);
+      newDate.setUTCDate(newDate.getUTCDate() - 2);
+      ledger.recordTransaction(oldDate.toISOString().slice(0, 10), 10000n, salary, checking, usd, "Old pay", "posted");
+      ledger.recordTransaction(newDate.toISOString().slice(0, 10), 10000n, salary, checking, usd, "New pay", "posted");
+      ledger.recordTransaction(newDate.toISOString().slice(0, 10), 5000n, checking, groceries, usd, "Spend", "posted");
+
+      const result = callTool("age_of_money", { days: 30, quote_asset_id: usd }, ledger) as any;
+      expect(result.income_cents).toBe(20000);
+      expect(result.outflow_cents).toBe(5000);
+      expect(result.remaining_cents).toBe(15000);
+      expect(result.average_age_days).toBeGreaterThan(2);
+      expect(result.average_age_days).toBeLessThan(30);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("exposes tool registry metadata and normalizes common asset aliases", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Pay", status: "posted" }, ledger);
+
+      const registry = callTool("tool_registry", {}, ledger) as any;
+      expect(registry.count).toBe(TOOL_NAMES.length);
+      const byName = Object.fromEntries(registry.tools.map((tool: any) => [tool.name, tool]));
+      expect(byName.list_accounts.safety.readOnlyHint).toBe(true);
+      expect(byName.delete_transaction.safety.destructiveHint).toBe(true);
+      expect(byName.balance_sheet.aliases.currency).toBe("quote_asset_id");
+      expect(byName.tool_registry.safety.idempotentHint).toBe(true);
+
+      const sheet = callTool("balance_sheet", { currency: "USD", status: "all" }, ledger) as any;
+      expect(sheet.quote_asset_id).toBe((callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id);
+      expect(sheet.total_assets).toBe(10000);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("keeps financial picture report scopes consistent", () => {
     const ledger = tempLedger();
     try {
@@ -1288,6 +1464,59 @@ describe("app and package surface", () => {
     }
   });
 
+  it("previews and reconciles QFX statement files", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-qfx-"));
+      dirs.push(dir);
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
+      try {
+        const usd = ledger.createAsset("USD", "currency", 2);
+        const checking = ledger.createAccount("Checking", "asset");
+        const equity = ledger.createAccount("Equity", "equity");
+        for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+        ledger.recordTransaction("2026-06-01", 1250n, equity, checking, usd, "Existing QFX row", "posted", { externalId: "fitid-1" });
+
+        writeFileSync(join(dir, "statement.qfx"), [
+          "OFXHEADER:100",
+          "DATA:OFXSGML",
+          "<OFX>",
+          "<BANKTRANLIST>",
+          "<STMTTRN>",
+          "<TRNTYPE>CREDIT",
+          "<DTPOSTED>20260601120000[-5:EST]",
+          "<TRNAMT>12.50",
+          "<FITID>fitid-1",
+          "<NAME>Existing QFX row",
+          "</STMTTRN>",
+          "<STMTTRN>",
+          "<TRNTYPE>DEBIT",
+          "<DTPOSTED>20260602120000[-5:EST]",
+          "<TRNAMT>-4.25",
+          "<FITID>fitid-2",
+          "<NAME>Coffee",
+          "<MEMO>Morning coffee",
+          "</STMTTRN>",
+          "</BANKTRANLIST>",
+          "</OFX>"
+        ].join("\n"), "utf8");
+
+        const preview = callTool("preview_import", { file_path: "statement.qfx", account_id: checking, counterpart_account_id: equity }, ledger) as any;
+        expect(preview.total_rows).toBe(2);
+        expect(preview.rows[0]).toMatchObject({ date: "2026-06-01", amount: 12.5, description: "Existing QFX row", external_id: "fitid-1" });
+
+        const plan = callTool("reconcile_statement_plan", { file_path: "statement.qfx", account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0 }, ledger) as any;
+        expect(plan).toMatchObject({ matched: 1, unmatched: 1, reconciled: false });
+        expect(plan.rows[1]).toMatchObject({ date: "2026-06-02", amount: -4.25, description: "Coffee" });
+      } finally {
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("imports CSV row counterpart and tag columns", () => {
     const ledger = tempLedger();
     try {
@@ -1369,6 +1598,68 @@ describe("app and package surface", () => {
       expect(result.batch_id).toEqual(expect.stringMatching(/^batch_/));
       expect(ledger.getTx(result.transactions[0].id)?.source_id).toBe(result.batch_id);
       expect(callTool("list_import_batches", {}, ledger)).toContainEqual(expect.objectContaining({ id: result.batch_id, tx_count: 1 }));
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("lists tag-only import batches and resolves them for batch operations", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      const tx = ledger.recordTransaction("2026-06-01", 2500n, equity, checking, usd, "Manual pending", "pending");
+      ledger.createAnnotation("tx", tx.id, "import_batch", "manual-pending-20260608T161311294225");
+
+      const batches = callTool("list_import_batches", {}, ledger) as any[];
+      expect(batches).toContainEqual(expect.objectContaining({
+        id: "manual-pending-20260608T161311294225",
+        origin: "tag",
+        tx_count: 1
+      }));
+
+      const committed = callTool("commit_batch", { batch_id: "manual-pending-20260608T161311294225" }, ledger) as any;
+      expect(committed.committed).toBe(1);
+      expect(ledger.getTx(tx.id)?.status).toBe("posted");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("sets SQLite WAL mode and a busy timeout for concurrent local clients", () => {
+    const ledger = tempLedger();
+    try {
+      expect((ledger.db.prepare("PRAGMA journal_mode").get() as any).journal_mode).toBe("wal");
+      expect(Number((ledger.db.prepare("PRAGMA busy_timeout").get() as any).timeout)).toBeGreaterThanOrEqual(5000);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("allows concurrent read-only CLI clients against the same database", async () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Posted", status: "posted" }, ledger);
+
+      const results = await Promise.all(Array.from({ length: 8 }, () => execFileAsync(process.execPath, [
+        "dist/cli/main.js",
+        "--db",
+        ledger.path,
+        "--format",
+        "json",
+        "tool",
+        "count_transactions",
+        "--json",
+        JSON.stringify({ status: "all" })
+      ], { cwd: process.cwd(), encoding: "utf8" })));
+
+      for (const result of results) {
+        const envelope = JSON.parse(String(result.stdout));
+        expect(envelope).toMatchObject({ ok: true, data: { count: 1 } });
+      }
     } finally {
       ledger.close();
     }
@@ -1853,6 +2144,9 @@ describe("app and package surface", () => {
 
     const ageOfMoney = inputShapeFromDefinition(TOOL_DEFINITIONS.age_of_money);
     expect(ageOfMoney.quote_asset_id.parse("USD")).toBe("USD");
+
+    const compareScenarios = inputShapeFromDefinition(TOOL_DEFINITIONS.compare_scenarios);
+    expect(compareScenarios.asset_id.safeParse(undefined).success).toBe(false);
 
     const createTransaction = inputShapeFromDefinition(TOOL_DEFINITIONS.create_transaction);
     expect(() => createTransaction.date.parse("today")).toThrow();

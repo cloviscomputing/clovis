@@ -43,8 +43,20 @@ export function parseAssetType(value: string): AssetType {
 
 export function parseTxStatus(value?: string | null): TxStatus | null {
   if (value == null || value === "") return null;
-  if (!["posted", "pending", "planned", "void"].includes(value)) throw new Error(`Invalid transaction status: ${value}`);
-  return value as TxStatus;
+  const normalized = value.toLowerCase();
+  if (!["posted", "pending", "planned", "void"].includes(normalized)) throw new Error(`Invalid transaction status: ${value}`);
+  return normalized as TxStatus;
+}
+
+export function parseTxStatusFilter(value: unknown, fallback: TxStatus | "active" | "combined" | null = null): TxStatus | "active" | "combined" | null {
+  if (value === undefined || value === "") return fallback;
+  if (value === null) return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "" || normalized === "all") return null;
+  if (normalized === "active" || normalized === "combined") return normalized;
+  const status = parseTxStatus(normalized);
+  if (!status) return fallback;
+  return status;
 }
 
 export function resolveAsset(ledger: Ledger, ref?: string | null, symbol?: string | null): string {

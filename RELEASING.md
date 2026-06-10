@@ -25,12 +25,19 @@ Before bumping the version:
 ```sh
 git status --short
 npm run release:check
+tmpdir=$(mktemp -d)
+node dist/cli/main.js --db "$tmpdir/ledger.db" --format json init --currency CAD >/dev/null
+node dist/cli/main.js --db "$tmpdir/ledger.db" --format json tool create_transaction \
+  --json '{"date":"2026-06-01","amount":100,"from_account_id":"Salary","to_account_id":"Checking","description":"Release smoke","status":"posted"}' >/dev/null
+node dist/cli/main.js --db "$tmpdir/ledger.db" --format json doctor --read-only-tools --quote CAD
 ```
 
 Confirm:
 
 - `CHANGELOG.md` has an entry for the version being released.
 - Any schema, MCP, CLI, or package export changes are documented.
+- The read-only doctor passes for status handling, registry metadata, export
+  filters, integrity checks, and quote-report smoke coverage.
 - `main` is green in GitHub Actions.
 - npm Trusted Publishing is still configured for `cloviscomputing/clovis` and
   `.github/workflows/publish.yml`.
@@ -77,6 +84,11 @@ npm view clovis dist-tags --json
 `npm run release:check` is the local release gate. It runs dependency audit,
 typecheck, build, tests, package dry-run, packed artifact allowlist checks, and
 packed local path leak checks.
+
+`node dist/cli/main.js ... doctor --read-only-tools --quote <asset>` is the
+local tool-surface smoke check. Run it against a freshly initialized, seeded
+ledger and, when possible, a representative real ledger before creating the
+GitHub Release.
 
 `npm run release:status` checks that the clean working tree, local tag, GitHub
 Release, npm version, npm dist-tag, and npm `gitHead` all agree.

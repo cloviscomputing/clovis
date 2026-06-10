@@ -15,6 +15,7 @@ type GlobalOptions = { format?: "json" | "table"; db?: string };
 type ToolOptions = { json?: string; stdin?: boolean; allowFilesystem?: boolean; allowDestructive?: boolean; allowAll?: boolean };
 
 const STATUS_HELP = "Transaction status: posted, pending, planned, or void";
+const STATUS_FILTER_HELP = "Transaction status filter: posted, pending, planned, void, active, combined, or all";
 
 function helpBlock(title: string, lines: string[]): string {
   return `\n${title}:\n${lines.map((line) => `  ${line}`).join("\n")}`;
@@ -80,6 +81,71 @@ function withOutput(program: Command, fn: (format: "json" | "table") => unknown)
   }
 }
 
+function runReadOnlyDoctor(ledger: Ledger, quote?: string | null): Record<string, unknown> {
+  const checks: Array<Record<string, unknown>> = [];
+  const check = (name: string, fn: () => unknown): void => {
+    try {
+      checks.push({ name, ok: true, result: fn() });
+    } catch (error) {
+      checks.push({ name, ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  check("tool_registry", () => {
+    const registry = callTool("tool_registry", {}, ledger) as any;
+    if (registry.count !== TOOL_NAMES.length) throw new Error(`expected ${TOOL_NAMES.length} tools, got ${registry.count}`);
+    return { count: registry.count };
+  });
+
+  check("status_all", () => {
+    const all = callTool("count_transactions", { status: "all" }, ledger) as any;
+    const explicitNull = callTool("count_transactions", { status: null }, ledger) as any;
+    if (all.count !== explicitNull.count) throw new Error(`status all/null mismatch: ${all.count} != ${explicitNull.count}`);
+    return { count: all.count, by_status: all.by_status };
+  });
+
+  check("list_transactions_all", () => {
+    const result = callTool("list_transactions", { status: "all", limit: 10, compact: true }, ledger) as any;
+    if ((result.transactions ?? []).some((tx: any) => tx.status === "void")) throw new Error("status all returned void transactions");
+    return { total: result.total, sampled: result.transactions.length };
+  });
+
+  check("export_filters", () => {
+    const sample = callTool("list_transactions", { status: "all", limit: 1, compact: false, sort: "date_asc" }, ledger) as any;
+    const tx = sample.transactions?.[0];
+    if (!tx) return { skipped: "ledger has no visible transactions" };
+    const entry = tx.entries?.[0];
+    if (!entry) return { skipped: "sample transaction has no entries" };
+    const exported = callTool("export_transactions", { account_id: entry.account_id, date_from: tx.date, date_to: tx.date, status: "all" }, ledger) as any;
+    const lines = String(exported.csv ?? "").trim().split(/\r?\n/).slice(1).filter(Boolean);
+    for (const line of lines) {
+      const cells = line.match(/(?:^|,)(?:"(?:[^"]|"")*"|[^,]*)/g)?.map((cell) => cell.replace(/^,/, "").replace(/^"|"$/g, "").replaceAll('""', '"')) ?? [];
+      if (cells[0] !== tx.date) throw new Error(`export date filter leaked ${cells[0]}`);
+      if (cells[3] !== entry.account_id) throw new Error(`export account filter leaked ${cells[3]}`);
+    }
+    return { exported: exported.exported, sample_tx: tx.id };
+  });
+
+  check("integrity_check", () => {
+    const result = callTool("integrity_check", {}, ledger) as any;
+    if (!result.ok) throw new Error("ledger integrity check failed");
+    return { ok: result.ok };
+  });
+
+  if (quote) {
+    check("quote_reports", () => {
+      const now = new Date();
+      const year = now.getUTCFullYear();
+      const month = now.getUTCMonth() + 1;
+      const balanceSheet = callTool("balance_sheet", { quote_asset_id: quote, status: "all" }, ledger) as any;
+      const cashFlow = callTool("cash_flow", { year, month, quote_asset_id: quote, status: "all" }, ledger) as any;
+      return { quote_asset_id: balanceSheet.quote_asset_id ?? quote, cash_flow_month: cashFlow.month };
+    });
+  }
+
+  return { ok: checks.every((row) => row.ok), checks };
+}
+
 function addCommon(program: Command): Command {
   return program
     .option("--format <format>", "Output format: json or table")
@@ -127,6 +193,19 @@ program.command("tools")
     "clovis tools | grep account_balances"
   ]))
   .action(() => withOutput(program, () => TOOL_NAMES.map((name) => ({ name, signature: TOOL_SIGNATURES[name] }))));
+
+program.command("doctor")
+  .description("Run local diagnostics")
+  .option("--read-only-tools", "Exercise read-only tool paths")
+  .option("--quote <asset>", "Quote asset id or symbol for report checks")
+  .addHelpText("after", [
+    examples(["clovis doctor --read-only-tools --quote CAD"]),
+    notes(["The read-only suite does not mutate the ledger."])
+  ].join("\n"))
+  .action((opts) => withLedger(program, (ledger) => {
+    if (!opts.readOnlyTools) return runReadOnlyDoctor(ledger, opts.quote);
+    return runReadOnlyDoctor(ledger, opts.quote);
+  }));
 
 program.command("tool")
   .description("Run any public app tool by name")
@@ -282,7 +361,7 @@ txn.command("list")
   .option("--account <id>", "Filter by account id")
   .option("--year <year>", "Filter by UTC year")
   .option("--month <month>", "Filter by month, 1-12")
-  .option("--status <status>", STATUS_HELP)
+  .option("--status <status>", STATUS_FILTER_HELP)
   .option("--desc <desc>", "Case-insensitive description search")
   .option("--limit <n>", "Maximum rows", "50")
   .addHelpText("after", examples([
@@ -319,12 +398,13 @@ program.command("export")
   .option("--account <id>", "Filter by account id")
   .option("--from <date>", "Start date, YYYY-MM-DD")
   .option("--to <date>", "End date, YYYY-MM-DD")
+  .option("--status <status>", STATUS_FILTER_HELP)
   .option("--output <path>", "Write CSV file")
   .addHelpText("after", examples([
     "clovis export --from 2026-06-01 --to 2026-06-30 --output june.csv",
     "clovis --format json export --account <checking-id>"
   ]))
-  .action((opts) => withLedger(program, (ledger) => callTool("export_transactions", { account_id: opts.account, date_from: opts.from, date_to: opts.to, output_path: opts.output }, ledger)));
+  .action((opts) => withLedger(program, (ledger) => callTool("export_transactions", { account_id: opts.account, date_from: opts.from, date_to: opts.to, status: opts.status, output_path: opts.output }, ledger)));
 
 program.command("import")
   .description("Import a CSV statement into an account")
@@ -360,7 +440,7 @@ report.command("balance-sheet").description("Report assets, liabilities, and equ
 report.command("net-worth").description("Report net worth").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report net-worth --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("net_worth", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
 report.command("spending").description("Report spending by category").requiredOption("--year <year>", "UTC year").requiredOption("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report spending --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("spending", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
 report.command("cash-flow").description("Report cash flow by activity").requiredOption("--year <year>", "UTC year").requiredOption("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report cash-flow --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("cash_flow", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
-report.command("register").description("Show an account register").requiredOption("--account <id>", "Account id").option("--asset <id>", "Asset id or symbol").option("--from <date>", "Start date, YYYY-MM-DD").option("--to <date>", "End date, YYYY-MM-DD").option("--status <status>", STATUS_HELP).addHelpText("after", examples(["clovis report register --account <checking-id> --from 2026-06-01 --to 2026-06-30"])).action((opts) => withLedger(program, (ledger) => callTool("account_register", { account_id: opts.account, asset_id: opts.asset, date_from: opts.from, date_to: opts.to, status: opts.status }, ledger)));
-report.command("trial-balance").description("Show debit and credit totals for one asset").requiredOption("--asset <id>", "Asset id or symbol").option("--status <status>", STATUS_HELP).addHelpText("after", examples(["clovis report trial-balance --asset CAD"])).action((opts) => withLedger(program, (ledger) => callTool("trial_balance", { asset_id: opts.asset, status: opts.status }, ledger)));
+report.command("register").description("Show an account register").requiredOption("--account <id>", "Account id").option("--asset <id>", "Asset id or symbol").option("--from <date>", "Start date, YYYY-MM-DD").option("--to <date>", "End date, YYYY-MM-DD").option("--status <status>", STATUS_FILTER_HELP).addHelpText("after", examples(["clovis report register --account <checking-id> --from 2026-06-01 --to 2026-06-30"])).action((opts) => withLedger(program, (ledger) => callTool("account_register", { account_id: opts.account, asset_id: opts.asset, date_from: opts.from, date_to: opts.to, status: opts.status }, ledger)));
+report.command("trial-balance").description("Show debit and credit totals for one asset").requiredOption("--asset <id>", "Asset id or symbol").option("--status <status>", STATUS_FILTER_HELP).addHelpText("after", examples(["clovis report trial-balance --asset CAD"])).action((opts) => withLedger(program, (ledger) => callTool("trial_balance", { asset_id: opts.asset, status: opts.status }, ledger)));
 
 program.parseAsync();

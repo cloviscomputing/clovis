@@ -239,6 +239,49 @@ function expenseByAccount(ctx: OracleContext, status = "posted"): Map<string, bi
   return out;
 }
 
+function ageOfMoneyOracle(ctx: OracleContext, days: number, quoteAssetId: string): { income: bigint; outflow: bigint; remaining: bigint } {
+  const asOf = new Date().toISOString().slice(0, 10);
+  const cutoff = new Date(`${asOf}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+  const dateFrom = cutoff.toISOString().slice(0, 10);
+  const assetAccounts = new Set(all(ctx, "SELECT id FROM accounts WHERE type = 'asset'").map((row) => String(row.id)));
+  const lots: Array<{ date: string; quantity: bigint }> = [];
+  let income = 0n;
+  let outflow = 0n;
+
+  const txs = all(ctx, `
+    SELECT id, date
+    FROM journals
+    WHERE status = 'posted' AND finalized_at IS NOT NULL AND date BETWEEN ? AND ?
+    ORDER BY date, id
+  `, dateFrom, asOf);
+
+  for (const tx of txs) {
+    let delta = 0n;
+    for (const entry of all(ctx, "SELECT account_id, asset_id, quantity FROM journal_lines WHERE journal_id = ? ORDER BY line_no, id", tx.id)) {
+      if (!assetAccounts.has(String(entry.account_id))) continue;
+      const value = converted(ctx, BigInt(entry.quantity), String(entry.asset_id), quoteAssetId, String(tx.date));
+      if (value != null) delta += value;
+    }
+    if (delta > 0n) {
+      income += delta;
+      lots.push({ date: String(tx.date), quantity: delta });
+    } else if (delta < 0n) {
+      let remaining = -delta;
+      outflow += remaining;
+      while (remaining > 0n && lots.length > 0) {
+        const lot = lots[0];
+        const used = lot.quantity < remaining ? lot.quantity : remaining;
+        lot.quantity -= used;
+        remaining -= used;
+        if (lot.quantity === 0n) lots.shift();
+      }
+    }
+  }
+
+  return { income, outflow, remaining: lots.reduce((sum, lot) => sum + lot.quantity, 0n) };
+}
+
 function representativePendingTotal(ctx: OracleContext): bigint {
   return all(ctx, `
     SELECT j.id, max(abs(l.quantity)) AS amount
@@ -323,7 +366,13 @@ const READ_CASES: ReadCase[] = [
   {
     name: "age_of_money",
     args: (ctx) => ({ days: 30, quote_asset_id: ctx.assets.usd }),
-    oracle: (result, ctx) => expect(result.income_cents).toBe(Number(incomeExpense(ctx).income))
+    oracle: (result, ctx) => {
+      const expected = ageOfMoneyOracle(ctx, 30, ctx.assets.usd);
+      expect(result.income_cents).toBe(Number(expected.income));
+      expect(result.outflow_cents).toBe(Number(expected.outflow));
+      expect(result.remaining_cents).toBe(Number(expected.remaining));
+      expect(result.average_age_days).not.toBe(30);
+    }
   },
   {
     name: "assert_balance",
@@ -681,7 +730,7 @@ const READ_CASES: ReadCase[] = [
   },
   {
     name: "top_descriptions",
-    args: (ctx) => ({ account_id: ctx.accounts.Checking }),
+    args: (ctx) => ({ account_id: ctx.accounts.Checking, status: "posted" }),
     oracle: (result, ctx) => {
       const counts = new Map<string, { count: number; amount: bigint }>();
       for (const row of all(ctx, `
@@ -698,6 +747,16 @@ const READ_CASES: ReadCase[] = [
       const [description, top] = [...counts.entries()].sort((a, b) => b[1].count - a[1].count)[0];
       expect(result[0]).toMatchObject({ description, count: top.count, amount_cents: Number(top.amount) });
     }
+  },
+  {
+    name: "tool_registry",
+    args: () => ({}),
+    oracle: (result) => {
+      expect(result.count).toBe(TOOL_NAMES.length);
+      expect(result.tools.find((tool: Row) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
+      expect(result.tools.find((tool: Row) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
+    },
+    cli: false
   },
   {
     name: "trial_balance",
@@ -718,7 +777,7 @@ describe("read tool SQLite oracle audit", () => {
   it("has a raw SQLite oracle for every read-only tool", () => {
     const readNames = new Set(READ_CASES.map((row) => row.name));
     expect(readNames.size).toBe(READ_CASES.length);
-    expect(readNames.size).toBe(66);
+    expect(readNames.size).toBe(67);
     for (const name of readNames) expect(TOOL_NAMES).toContain(name);
   });
 

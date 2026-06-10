@@ -363,6 +363,11 @@ const CASES = {
   spending_rate: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
   suggest_budgets: { mutation: "read", args: (ctx) => ({ months: 1, year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
   top_descriptions: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking }), assert: expectArray },
+  tool_registry: { mutation: "read", args: () => ({}), assert: (result) => {
+    expect(result.count).toBe(TOOL_NAMES.length);
+    expect(result.tools.find((tool: any) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
+    expect(result.tools.find((tool: any) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
+  } },
   transfer: { mutation: "write", args: (ctx) => ({ from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Savings, amount: 25, date: "2026-06-16", description: "Move cash" }), assert: expectObject },
   trial_balance: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },
   unbudgeted_spending: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
@@ -439,6 +444,19 @@ describe("MCP contract matrix", () => {
         expect((result as any).isError).toBe(true);
         expect(content[0]?.text).toMatch(/Invalid arguments|Unrecognized key|valid YYYY-MM-DD/);
       }
+    });
+  });
+
+  it("exposes MCP safety annotations through tool discovery", async () => {
+    const ctx = createContext();
+    await withMcpClient(ctx, async (client) => {
+      const tools = await client.listTools();
+      const byName = Object.fromEntries(tools.tools.map((tool: any) => [tool.name, tool]));
+      expect(byName.list_accounts.annotations.readOnlyHint).toBe(true);
+      expect(byName.list_accounts.annotations.destructiveHint).toBe(false);
+      expect(byName.delete_transaction.annotations.destructiveHint).toBe(true);
+      expect(byName.void_by_filter.annotations.destructiveHint).toBe(true);
+      expect(byName.create_transaction.annotations.readOnlyHint).toBe(false);
     });
   });
 
