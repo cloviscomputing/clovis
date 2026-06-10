@@ -171,12 +171,15 @@ clovis --db ./ledger.db --format json tool import_transactions --stdin < args.js
 ```
 
 File tools are sandboxed to the ledger directory unless `CLOVIS_ALLOWED_ROOT`
-is set. Destructive tools require an explicit CLI gate:
+is set. Bulk mutation tools default to dry-run and require `dry_run:false` in
+the tool arguments to apply changes:
 
 ```sh
 clovis --db ./ledger.db tool backup_now
-clovis --db ./ledger.db tool delete_account \
-  --json '{"id":"<account-id>"}' --allow-destructive
+clovis --db ./ledger.db tool void_by_filter \
+  --json '{"status":"planned","date_to":"2026-05-31"}'
+clovis --db ./ledger.db tool void_by_filter \
+  --json '{"status":"planned","date_to":"2026-05-31","dry_run":false}'
 ```
 
 ## MCP
@@ -189,17 +192,9 @@ CLOVIS_DB=./ledger.db clovis-mcp
 
 `clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools are limited to the
 ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` to allow imports,
-exports, and backups under another local directory.
-
-MCP file tools are sandboxed to the ledger directory or `CLOVIS_ALLOWED_ROOT`.
-Destructive MCP operations are disabled unless explicitly enabled:
-
-```sh
-CLOVIS_MCP_CAPABILITIES=destructive clovis-mcp
-```
-
-Use `destructive` for delete, rollback, hard state transition, and non-dry-run
-bulk mutation tools.
+exports, and backups under another local directory. MCP and CLI tools share the
+same catalog and behavior: bulk mutation tools preview by default, and callers
+must pass `dry_run:false` or an equivalent commit argument to apply changes.
 
 Example local MCP configuration:
 

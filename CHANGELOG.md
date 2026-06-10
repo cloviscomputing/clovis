@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.8
+
+Capability gate removal release.
+
+- Remove the MCP destructive capability gate.
+- Remove the generic CLI destructive allow gate from help and enforcement.
+- Keep old allow flags accepted as hidden no-ops for script compatibility.
+- Keep file path sandboxing and dry-run defaults for bulk mutation tools.
+
 ## 0.1.7
 
 Cash projection compatibility release.

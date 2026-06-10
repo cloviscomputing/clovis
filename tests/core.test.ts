@@ -1004,26 +1004,23 @@ describe("app and package surface", () => {
     }
   });
 
-  it("runs sandboxed MCP file tools without a capability flag and still gates destructive tools", () => {
+  it("runs MCP tools without capability gates while keeping path sandboxing", () => {
     const dir = mkdtempSync(join(tmpdir(), "clovis-mcp-cap-"));
     dirs.push(dir);
     const previousDb = process.env.CLOVIS_DB;
     const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
-    const previousCaps = process.env.CLOVIS_MCP_CAPABILITIES;
     process.env.CLOVIS_DB = join(dir, "ledger.db");
     process.env.CLOVIS_ALLOWED_ROOT = dir;
     try {
-      delete process.env.CLOVIS_MCP_CAPABILITIES;
       const backup = callTool("backup_now", {}) as any;
       expect(String(backup.path)).toContain("backups");
       expect(String(backup.path)).not.toContain(dir);
-      expect(() => callTool("delete_account", { id: "missing" })).toThrow(/destructive/);
-      process.env.CLOVIS_MCP_CAPABILITIES = "destructive";
+      const disposable = callTool("create_account", { name: "Disposable", type: "expense" }) as any;
+      expect((callTool("delete_account", { id: disposable.id }) as any).deleted).toBe(disposable.id);
       expect(() => callTool("delete_account", { id: "missing" })).toThrow(/not found/);
     } finally {
       if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
       if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
-      if (previousCaps == null) delete process.env.CLOVIS_MCP_CAPABILITIES; else process.env.CLOVIS_MCP_CAPABILITIES = previousCaps;
     }
   });
 
@@ -1082,7 +1079,8 @@ describe("app and package surface", () => {
     expect(help()).toContain("Default ledger:");
     expect(help()).toContain("clovis tool account_balances");
     expect(help("tool")).toContain("Tool args must be a JSON object");
-    expect(help("tool")).toContain("--allow-destructive");
+    expect(help("tool")).toContain("dry_run:false");
+    expect(help("tool")).not.toContain("--allow-destructive");
     expect(help("account", "balances")).toContain("Current balance is posted plus pending");
     expect(help("import")).toContain("Default status is pending");
     expect(help("report", "balance-sheet")).toContain("Quote asset symbol or id");
@@ -1155,8 +1153,7 @@ describe("app and package surface", () => {
 
     const disposable = run("tool", "create_account", "--json", JSON.stringify({ name: "Disposable", type: "expense" })).data.id;
     const deleteArgs = ["tool", "delete_account", "--json", JSON.stringify({ id: disposable })];
-    expect(fail(deleteArgs)).toContain("--allow-destructive");
-    expect(run(...deleteArgs, "--allow-destructive").data.deleted).toBe(disposable);
+    expect(run(...deleteArgs).data.deleted).toBe(disposable);
   });
 
   it("roots generic CLI file tools beside --db when CLOVIS_DB is unset", () => {

@@ -464,70 +464,27 @@ function safeMatchRegex(pattern: unknown): RegExp {
   }
 }
 
-export type ToolCapability = "destructive";
-
-const DESTRUCTIVE_TOOLS = new Set([
-  "close_period",
-  "commit_batch",
-  "delete_account",
-  "delete_asset",
-  "delete_budget",
-  "delete_budgets",
-  "delete_goal",
-  "delete_match_rule",
-  "delete_match_rules",
-  "delete_tag",
-  "delete_transaction",
-  "discard_branch",
-  "merge_accounts",
-  "reopen_period",
-  "rollback_import",
-  "rollback_recategorize"
-]);
-
-function mcpCapabilities(): Set<ToolCapability | "all"> {
-  return new Set(String(process.env.CLOVIS_MCP_CAPABILITIES ?? "")
-    .split(",")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean)) as Set<ToolCapability | "all">;
-}
-
-function hasToolCapability(caps: Set<ToolCapability | "all">, capability: ToolCapability): boolean {
-  return caps.has("all") || caps.has(capability);
-}
+export type ToolCapability = never;
 
 export function requiredToolCapabilities(name: string, args: Args = {}): ToolCapability[] {
+  void name;
+  void args;
   const capabilities: ToolCapability[] = [];
-  if (toolRequiresDestructive(name, args)) capabilities.push("destructive");
   return capabilities;
 }
 
-function toolRequiresDestructive(name: string, args: Args): boolean {
-  return DESTRUCTIVE_TOOLS.has(name) ||
-    (name === "apply_match_rules" && args.dry_run === false) ||
-    (name === "apply_pattern" && args.dry_run === false) ||
-    (name === "apply_reconciliation_plan" && args.dry_run === false) ||
-    (name === "delete_tags" && args.dry_run === false) ||
-    (name === "discard_batch" && args.dry_run === false) ||
-    (name === "migrate_asset_entries" && args.dry_run === false) ||
-    (name === "move_transactions" && args.dry_run === false) ||
-    (name === "process_statement" && args.commit === true) ||
-    (name === "recategorize_by_pattern" && args.dry_run === false) ||
-    (name === "void_by_filter" && args.dry_run === false);
-}
-
 export function assertToolCapabilities(name: string, args: Args, granted: Set<ToolCapability | "all">, surface: "CLI" | "MCP"): void {
-  const missing = requiredToolCapabilities(name, args).filter((capability) => !hasToolCapability(granted, capability));
-  if (missing.length) {
-    if (surface === "MCP") throw new Error(`MCP tool '${name}' requires CLOVIS_MCP_CAPABILITIES=${missing.join(",")}`);
-    throw new Error(`CLI tool '${name}' requires ${missing.map((capability) => `--allow-${capability}`).join(", ")}`);
-  }
+  void name;
+  void args;
+  void granted;
+  void surface;
 }
 
 function assertMcpCapability(name: string, args: Args): void {
-  // MCP can be driven by model output. Filesystem and destructive operations
-  // therefore require explicit environment capabilities.
-  assertToolCapabilities(name, args, mcpCapabilities(), "MCP");
+  // Capability gates are intentionally not enforced here. Risk is carried by
+  // explicit tool names, dry-run defaults, path sandboxing, and ledger backups.
+  void name;
+  void args;
 }
 
 const handlers: Record<ToolName, Handler> = {
