@@ -12,7 +12,7 @@ import { parseToolInput } from "../mcp/tools.js";
 import { VERSION } from "../version.js";
 
 type GlobalOptions = { format?: "json" | "table"; db?: string };
-type ToolOptions = { json?: string; stdin?: boolean; allowFilesystem?: boolean; allowDestructive?: boolean; allowAll?: boolean };
+type ToolOptions = { json?: string; stdin?: boolean; allowDestructive?: boolean; allowAll?: boolean };
 
 const STATUS_HELP = "Transaction status: posted, pending, planned, or void";
 const STATUS_FILTER_HELP = "Transaction status filter: posted, pending, planned, void, active, combined, or all";
@@ -214,7 +214,6 @@ program.command("tool")
   .option("--stdin", "Read tool args as a JSON object from stdin")
   .addOption(new Option("--allow-destructive", "Deprecated no-op; tool calls execute directly").hideHelp())
   .addOption(new Option("--allow-all", "Deprecated no-op; tool calls execute directly").hideHelp())
-  .addOption(new Option("--allow-filesystem", "Deprecated no-op; file tools are sandboxed by path").hideHelp())
   .addHelpText("after", [
     examples([
       "clovis tool account_balances --json '{\"account_type\":\"asset\"}'",
@@ -226,7 +225,7 @@ program.command("tool")
     notes([
       "Run `clovis tools` to list tool names and signatures.",
       "Tool args must be a JSON object.",
-      "File tools are sandboxed to the ledger directory or CLOVIS_ALLOWED_ROOT.",
+      "File tools use ordinary filesystem permissions.",
       "Bulk mutation tools default to dry_run; pass dry_run:false to apply."
     ])
   ].join("\n"))
@@ -420,7 +419,7 @@ program.command("import")
     ]),
     notes([
       "Default status is pending so imported rows can be reviewed before posting.",
-      "File paths are limited to the ledger directory unless CLOVIS_ALLOWED_ROOT is set."
+      "File paths use ordinary filesystem permissions."
     ])
   ].join("\n"))
   .action((opts) => withLedger(program, (ledger) => callTool("import_file", { file_path: opts.file, account_id: opts.account, counterpart_account_id: opts.counterpart, currency: opts.currency, status: opts.status }, ledger)));

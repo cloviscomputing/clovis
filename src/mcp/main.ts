@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Stdio MCP executable. Ledger selection is environment-driven; file tools are
-// sandboxed by the shared app layer before touching disk.
+// Stdio MCP executable. Ledger selection is environment-driven; file tools use
+// the shared app layer for validation before touching disk.
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { mcpDbPathFromEnv } from "../app/context.js";
 import { createClovisMcpServer } from "./tools.js";

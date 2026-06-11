@@ -22,12 +22,12 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-async function withMcpClient(command: string, args: string[], cwd: string, db: string, root: string, fn: (client: Client) => Promise<void>): Promise<void> {
+async function withMcpClient(command: string, args: string[], cwd: string, db: string, fn: (client: Client) => Promise<void>): Promise<void> {
   const transport = new StdioClientTransport({
     command,
     args,
     cwd,
-    env: { ...process.env, CLOVIS_DB: db, CLOVIS_ALLOWED_ROOT: root },
+    env: { ...process.env, CLOVIS_DB: db },
     stderr: "pipe"
   });
   const client = new Client({ name: "clovis-release-smoke", version: "0.0.0" });
@@ -42,7 +42,7 @@ async function withMcpClient(command: string, args: string[], cwd: string, db: s
 describe("release smoke", () => {
   it("serves the full MCP tool list over stdio from built output", async () => {
     const dir = tempDir("clovis-mcp-smoke-");
-    await withMcpClient(process.execPath, ["dist/mcp/main.js"], process.cwd(), join(dir, "ledger.db"), dir, async (client) => {
+    await withMcpClient(process.execPath, ["dist/mcp/main.js"], process.cwd(), join(dir, "ledger.db"), async (client) => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
       const result = await client.callTool({ name: "init_defaults", arguments: { template: "personal", currency: "USD" } });
@@ -87,7 +87,7 @@ describe("release smoke", () => {
     expect(cli.ok).toBe(true);
     expect(cli.data.accounts_created).toBeGreaterThan(0);
 
-    await withMcpClient(join(binDir, "clovis-mcp"), [], dir, join(project, "mcp.db"), project, async (client) => {
+    await withMcpClient(join(binDir, "clovis-mcp"), [], dir, join(project, "mcp.db"), async (client) => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([...TOOL_NAMES].sort());
     });

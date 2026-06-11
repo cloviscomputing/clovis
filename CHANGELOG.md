@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.4
+
+Runtime safety and cash runway release.
+
+- Remove the Clovis file path gate. File tools now use ordinary filesystem permissions while retaining suffix checks, overwrite protection, and `CLOVIS_MAX_FILE_BYTES`.
+- Make `refresh_statement` dry-runs non-persistent, require `dry_run:false` to stage statement plans, add credit-card statement balance sign handling, expose clearer statement counters and ambiguous match candidates, return explicit backup output paths, and add filtered/summary `tool_registry` responses.
+- Add conservative `cash_runway`, make cash projection default to actual posted cash, add projection audit trails, expose planned/pending cash assumptions, and add severity-shaped currency conversion warnings.
+
 ## 0.2.3
 
 Schema v3 statement plan release.

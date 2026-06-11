@@ -22,13 +22,9 @@ afterEach(() => {
 
 function createWorkflowContext(): WorkflowContext {
   const dir = mkdtempSync(join(tmpdir(), "clovis-cfo-workflow-"));
-  const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
-  process.env.CLOVIS_ALLOWED_ROOT = dir;
   const ledger = new Ledger(join(dir, "ledger.db"));
   cleanups.push(() => {
     ledger.close();
-    if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT;
-    else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -139,7 +135,9 @@ describe("CFO workflow SQLite oracle audit", () => {
     }, ledger) as Row;
 
     expect(result.would_import).toBe(1);
-    expect(result.skipped_duplicates).toBe(1);
+    expect(result.matched_existing).toBe(1);
+    expect(result.new_rows).toBe(1);
+    expect(result).not.toHaveProperty("skipped_duplicates");
     expect(result.created).toBe(1);
     expect(result.actual_balance_cents).toBe(13000);
     expect(ledger.balanceTree(accounts.Checking, assets.usd, null, "posted")).toBe(13000n);

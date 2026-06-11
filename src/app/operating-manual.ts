@@ -58,7 +58,7 @@ const SECTIONS = {
       "Use QFX or OFX when the bank offers it. Those files usually include stable ids such as FITID, which help Clovis recognize the same bank row later.",
       "Use CSV when QFX or OFX is unavailable, incomplete, or malformed. CSV works, but the bank often leaves out stable ids, so date, amount, and description matching matters more.",
       "Preview the file before importing. The preview answers: can Clovis read the file, which columns did it understand, and what rows will it create?",
-      "Use refresh_statement when you need the safest path. It creates a plan that separates already-matched rows, pending rows to commit, true new rows, stale pending rows to void, and ambiguous rows that need review.",
+      "Use refresh_statement when you need the safest path. It previews a plan by default; pass dry_run:false to stage an immutable plan that separates already-matched rows, pending rows to commit, true new rows, stale pending rows to void, and ambiguous rows that need review.",
       "Import direct rows as pending by default. Pending means the row is visible and useful, but not yet trusted as final bookkeeping.",
       "Before committing, reconcile against the statement and check duplicate candidates. A clean plan is boring: expected rows, expected balance, no unexplained extras.",
       "Commit only after review. If the import looks wrong, discard the batch or fix the mapping instead of posting bad rows and cleaning them up later."
@@ -77,7 +77,7 @@ const SECTIONS = {
     ],
     warnings: [
       "Do not commit a fresh import just because parsing succeeded. Parsing only proves the file was readable.",
-      "If a path is blocked, call file_access_status and restart the agent host with the needed CLOVIS_ALLOWED_ROOTS value.",
+      "File tools use ordinary filesystem permissions. If a path fails, check the actual file path, suffix, file size, and operating-system permissions.",
       "If CSV descriptions change between exports, duplicate detection is weaker than QFX/OFX stable-id matching."
     ]
   },
@@ -139,18 +139,21 @@ const SECTIONS = {
   },
   runway: {
     topic: "runway",
-    title: "Runway",
-    summary: "Runway is how long the usable money lasts under a stated burn rate. The hard part is deciding what money is truly usable.",
+    title: "Cash Runway",
+    summary: "Cash runway is how long spendable cash lasts under explicit burn assumptions. Clovis treats this as a conservative report, not a net-worth shortcut.",
     guidance: [
-      "Start with liquid assets, then subtract liabilities and near-term obligations when the question is survival cash.",
+      "Start with cash_runway. It defaults to posted actual cash, deducts liabilities, excludes planned and pending rows, and keeps obvious investment accounts out of default spendable cash.",
+      "Use include_pending:true or include_planned:true only when the answer should explicitly become a projection.",
+      "Read the burn models separately: budget burn, trailing actual burn, fixed-obligation burn, and discretionary-adjusted burn answer different questions.",
+      "Use cash_projection when you need the audit trail behind spendable cash: starting cash, liabilities, earmarks, remaining budget, and planned income.",
       "Remove earmarked money when it is not available for general spending. A tax reserve or rent reserve is not free cash.",
-      "Estimate burn from actual spending over a relevant period, then adjust for known changes.",
-      "Separate recurring fixed costs from optional variable spend. Cutting coffee does not fix a rent-sized problem.",
       "State the quote asset, included accounts, included statuses, and burn assumptions in the answer.",
       "Use scenarios for what-if work instead of rewriting actual history."
     ],
     recommended_tools: [
+      "cash_runway",
       "cash_projection",
+      "budget_summary",
       "spending_rate",
       "spending",
       "net_worth",
@@ -160,6 +163,8 @@ const SECTIONS = {
     ],
     warnings: [
       "Net worth is not runway. Illiquid investments and unpaid card balances can make net worth look better than cash reality.",
+      "Planned paycheques are not current cash. If they are included, say that the answer is a projection.",
+      "Missing currency conversions need severity. A tiny missing balance may be noise; a large missing balance can invalidate the answer.",
       "Average spend can hide annual or irregular obligations. Look for rent, taxes, insurance, subscriptions, and debt payments.",
       "Runway answers should be ranges when inputs are uncertain."
     ]
@@ -201,7 +206,7 @@ const SECTIONS = {
       "Read MCP annotations before routing calls. readOnlyHint, destructiveHint, and idempotentHint are machine-readable safety labels.",
       "Use dry-run-capable tools in preview mode before applying changes. The preview is the change request.",
       "Back up before destructive or broad edits. Backups are cheap compared with manual reconstruction.",
-      "Use file_access_status when a statement path fails. The allowed roots are deliberate so agents cannot read arbitrary local files by surprise.",
+      "Use file_access_status when a statement path fails. It reports the current path policy, max file size, and relevant filesystem configuration.",
       "Run doctor or integrity checks after upgrades and before important month-end work."
     ],
     recommended_tools: [
@@ -338,8 +343,8 @@ export const OPERATING_MANUAL_RESOURCES = [
   {
     name: "clovis_runway_manual",
     uri: "clovis://manual/runway",
-    title: "Clovis Runway Manual",
-    description: "Runway analysis guidance for usable cash, burn assumptions, and scenario work.",
+    title: "Clovis Cash Runway Manual",
+    description: "Cash runway guidance for spendable cash, burn assumptions, projections, and scenario work.",
     topic: "runway"
   },
   {

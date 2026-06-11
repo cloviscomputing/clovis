@@ -39,7 +39,6 @@ function createOracleContext(): OracleContext {
   dirs.push(dir);
   const db = join(dir, "ledger.db");
   const ledger = new Ledger(db);
-  process.env.CLOVIS_ALLOWED_ROOT = dir;
 
   const usd = ledger.createAsset("USD", "currency", 2, "US Dollar");
   const eur = ledger.createAsset("EUR", "currency", 2, "Euro");
@@ -337,7 +336,7 @@ function rootAccounts(ctx: OracleContext, types: string[]): string[] {
 function expectCliMatches(name: ToolName, args: Record<string, unknown>, appResult: any, ctx: OracleContext): void {
   const stdout = execFileSync(process.execPath, ["dist/cli/main.js", "--db", ctx.db, "--format", "json", "tool", name, "--json", JSON.stringify(args)], {
     cwd: process.cwd(),
-    env: { ...process.env, CLOVIS_ALLOWED_ROOT: ctx.dir },
+    env: { ...process.env },
     encoding: "utf8"
   });
   const envelope = JSON.parse(stdout);
@@ -445,12 +444,29 @@ const READ_CASES: ReadCase[] = [
     args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }),
     oracle: (result, ctx) => {
       const expected = rootAccounts(ctx, ["asset"]).reduce((sum, accountId) => {
-        return sum
-          + quotedBalance(ctx, accountId, ctx.assets.usd, "posted", "2026-06-30").total
-          + quotedBalance(ctx, accountId, ctx.assets.usd, "pending", "2026-06-30").total
-          + quotedBalance(ctx, accountId, ctx.assets.usd, "planned", "2026-06-30", "2026-05-31").total;
+        return sum + quotedBalance(ctx, accountId, ctx.assets.usd, "posted", "2026-06-30").total;
       }, 0n);
       expect(result.gross_cash_cents).toBe(Number(expected));
+      expect(result.include_pending).toBe(false);
+      expect(result.include_planned).toBe(false);
+      expect(result.audit_trail.line_items.length).toBeGreaterThan(0);
+    }
+  },
+  {
+    name: "cash_runway",
+    args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }),
+    oracle: (result) => {
+      expect(result.include_pending).toBe(false);
+      expect(result.include_planned).toBe(false);
+      expect(result.assumptions.conservative_default).toBe(true);
+      expect(result.burn_models.map((row: Row) => row.model)).toEqual(expect.arrayContaining([
+        "budget_burn",
+        "trailing_3_month_actual",
+        "trailing_6_month_actual",
+        "fixed_obligation_burn",
+        "discretionary_adjusted_burn"
+      ]));
+      expect(result.recommended_model).toBeTruthy();
     }
   },
   {
@@ -486,9 +502,11 @@ const READ_CASES: ReadCase[] = [
     name: "file_access_status",
     args: () => ({}),
     oracle: (result, ctx) => {
-      expect(result.allowed_roots).toContain(realpathSync(ctx.dir));
+      expect(result.mode).toBe("unrestricted");
+      expect(result.path_policy).toContain("operating system permits");
+      expect(result.ledger_dir).toBe(realpathSync(ctx.dir));
       expect(result.errors).toEqual([]);
-      expect(result.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
+      expect(result.configure.env).toContain("No Clovis path configuration");
     }
   },
   {
@@ -499,7 +517,11 @@ const READ_CASES: ReadCase[] = [
   {
     name: "financial_picture",
     args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }),
-    oracle: (result, ctx) => expect(result.monthly_activity.income).toBe(Number(incomeExpense(ctx, "combined").income))
+    oracle: (result, ctx) => {
+      expect(result.monthly_activity.income).toBe(Number(incomeExpense(ctx, "active").income));
+      expect(result.include_planned).toBe(false);
+      expect(result.cash_position.actual.include_planned).toBe(false);
+    }
   },
   {
     name: "find_pending_duplicates",
@@ -781,7 +803,7 @@ const READ_CASES: ReadCase[] = [
       expect(result.count).toBe(TOOL_NAMES.length);
       expect(result.tools.find((tool: Row) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
       expect(result.tools.find((tool: Row) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
-      expect(result.file_access.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
+      expect(result.file_access.mode).toBe("unrestricted");
     },
     cli: false
   },
@@ -804,7 +826,7 @@ describe("read tool SQLite oracle audit", () => {
   it("has a raw SQLite oracle for every read-only tool", () => {
     const readNames = new Set(READ_CASES.map((row) => row.name));
     expect(readNames.size).toBe(READ_CASES.length);
-    expect(readNames.size).toBe(69);
+    expect(readNames.size).toBe(70);
     for (const name of readNames) expect(TOOL_NAMES).toContain(name);
   });
 

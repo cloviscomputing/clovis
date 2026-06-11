@@ -1076,8 +1076,8 @@ Plan-first import flow:
 3. Turn each amount into a signed quantity from the statement account's point of
    view.
 4. Compare each row with posted and pending ledger history.
-5. Store a `statement_plans` row and one `statement_plan_rows` decision per
-   source row.
+5. Preview decisions without writing; when staged with `dry_run:false`, store a
+   `statement_plans` row and one `statement_plan_rows` decision per source row.
 6. Refuse to apply while any row is ambiguous.
 7. Apply the exact reviewed plan: commit matched pending rows, void stale
    pending rows, and write only true new rows.
@@ -1156,50 +1156,35 @@ By default, backups go into a `backups` folder next to the ledger database.
 
 File access is not stored in SQLite.
 
-Think of it as the fence around tools that touch files:
+Think of it as normal process I/O:
 
 ```text
 ledger.db can say what happened
-allowed roots say which folders Clovis may read or write
+the operating system decides which files the process may read or write
 ```
 
-By default, the fence is the ledger directory. If your ledger is here:
+Clovis does not maintain a table of trusted folders.
 
-```text
-~/.clovis/clovis.db
-```
+File tools still enforce practical format constraints:
 
-then file tools can use files under:
-
-```text
-~/.clovis/
-```
-
-That is safe, but it is not always convenient. Bank downloads, exports, and
-agent workspaces often live somewhere else. For that, start Clovis with:
-
-```sh
-CLOVIS_ALLOWED_ROOT="$HOME/Desktop/CFO"
-```
-
-or multiple roots:
-
-```sh
-CLOVIS_ALLOWED_ROOTS="$HOME/Desktop/CFO:$HOME/Downloads"
-```
-
-On Windows, the separator is `;` instead of `:`.
+- import tools only accept expected suffixes such as `.csv`, `.qfx`, `.ofx`, or
+  `.json`
+- export tools refuse to overwrite an existing file
+- `CLOVIS_MAX_FILE_BYTES` limits input size
+- relative paths are resolved beside the ledger first, then from the current
+  working directory for reads
 
 The important idea:
 
 ```text
 The database stores finance facts.
-The process environment controls which local folders tools may touch.
+The process sandbox controls filesystem boundaries.
 ```
 
-Agents can call `file_access_status` or read `tool_registry.file_access` before
-asking for a path. If a file is outside the fence, Clovis returns the requested
-path, the active allowed roots, and an example `CLOVIS_ALLOWED_ROOTS` value.
+Agents can call `file_access_status` or read `tool_registry.file_access` to see
+the active policy and max file size. If you need a real filesystem boundary,
+use operating-system permissions, a container, a separate user account, or the
+agent runtime's sandbox.
 
 ## What SQLite Enforces Vs What The Engine Enforces
 

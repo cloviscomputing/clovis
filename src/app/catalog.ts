@@ -25,7 +25,7 @@ export const TOOL_NAMES = [
   "account_balances", "account_register", "add_match_rule", "add_match_rules", "age_of_money", "apply_match_rules", "apply_pattern",
   "apply_reconciliation_plan", "apply_rollover", "assert_balance", "assert_balances", "audit_categorization", "backup_now",
   "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "buy_security",
-  "cash_flow", "cash_projection", "close_period", "commit_batch", "compare_scenarios", "consolidate_transfers",
+  "cash_flow", "cash_projection", "cash_runway", "close_period", "commit_batch", "compare_scenarios", "consolidate_transfers",
   "copy_budgets", "count_transactions", "create_account", "create_accounts", "create_asset", "create_branch",
   "create_price", "create_scheduled_transaction", "create_transaction", "delete_account", "delete_asset", "delete_budget",
   "delete_budgets", "delete_goal", "delete_match_rule", "delete_match_rules", "delete_tag", "delete_tags",
@@ -74,6 +74,11 @@ function previousDate(date: string): string {
   const parsed = new Date(`${date}T00:00:00Z`);
   parsed.setUTCDate(parsed.getUTCDate() - 1);
   return parsed.toISOString().slice(0, 10);
+}
+
+function addMonths(year: number, month: number, delta: number): { year: number; month: number } {
+  const date = new Date(Date.UTC(year, month - 1 + delta, 1));
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 };
 }
 
 function dateDeltaDays(left: string, right: string): number {
@@ -423,6 +428,110 @@ function incomeStatementRows(ledger: Ledger, year: number, month: number | null,
   };
 }
 
+function conversionSeverity(missing: Row[]): Row {
+  if (missing.length === 0) {
+    return {
+      severity: "none",
+      materiality: "none",
+      missing_count: 0,
+      message: "All requested balances converted into the report currency."
+    };
+  }
+  return {
+    severity: "unknown",
+    materiality: "unknown",
+    missing_count: missing.length,
+    message: "One or more balances could not be converted into the report currency, so materiality cannot be calculated safely."
+  };
+}
+
+function runwayMonths(cash: bigint, monthlyBurn: bigint): number | null {
+  if (monthlyBurn <= 0n) return null;
+  return Math.round((Number(cash) / Number(monthlyBurn)) * 100) / 100;
+}
+
+function fixedBudgetAccount(accountName: string): boolean {
+  return /\b(rent|mortgage|utilities?|insurance|loan|debt|phone|internet|subscription|tax|property tax|childcare|daycare|tuition)\b/i.test(accountName);
+}
+
+function spendableAssetAccountDefaults(ledger: Ledger): { selected: string[]; excluded: string[]; rule: string } {
+  const roots = rootAccountIds(ledger, ["asset"]);
+  const assetAccounts = ledger.listAccounts().filter((row) => row.account_type === "asset");
+  const accountMap = new Map(assetAccounts.map((row) => [row.id, row]));
+  const accountName = (accountId: string) => ledger.getAccount(accountId)?.name ?? "";
+  const illiquid = /\b(brokerage|investment|investing|security|securities|stock|stocks|crypto|coinbase|retirement|tfsa|rrsp|rsp|401k|ira|roth|pension|property|real estate|vehicle)\b/i;
+  const cashLike = /\b(cash|checking|chequing|savings?|bank|operating|wallet)\b/i;
+  const hasIlliquidName = (accountId: string): boolean => {
+    let current: string | null | undefined = accountId;
+    while (current) {
+      if (illiquid.test(accountName(current))) return true;
+      current = accountMap.get(current)?.parent_id ?? null;
+    }
+    return false;
+  };
+  const selectedAncestors = (selectedIds: string[]): Set<string> => {
+    const ancestors = new Set<string>();
+    for (const selected of selectedIds) {
+      let current = accountMap.get(selected)?.parent_id ?? null;
+      while (current) {
+        ancestors.add(current);
+        current = accountMap.get(current)?.parent_id ?? null;
+      }
+    }
+    return ancestors;
+  };
+  const liquid = assetAccounts.filter((row) => cashLike.test(row.name) && !hasIlliquidName(row.id)).map((row) => row.id);
+  const selected = nonOverlappingAccounts(ledger, liquid.length > 0 ? liquid : roots.filter((accountId) => !hasIlliquidName(accountId)), ["asset"]);
+  const covered = new Set(selected);
+  for (const selectedId of selected) for (const child of ledger.descendants(selectedId)) covered.add(child);
+  const ancestors = selectedAncestors(selected);
+  return {
+    selected,
+    excluded: assetAccounts.map((row) => row.id).filter((accountId) => !covered.has(accountId) && !ancestors.has(accountId)),
+    rule: liquid.length > 0
+      ? "cash-like asset accounts, excluding obvious investment and illiquid account names"
+      : "root asset accounts excluding obvious investment and illiquid account names"
+  };
+}
+
+function trailingSpend(ledger: Ledger, year: number, month: number, months: number, quote: string): Row {
+  const monthRows: Row[] = [];
+  const missing: Row[] = [];
+  for (let offset = months - 1; offset >= 0; offset -= 1) {
+    const period = addMonths(year, month, -offset);
+    const result = spendingRows(ledger, period.year, period.month, "posted", quote, true) as { rows: Row[]; missing: Row[] };
+    const total = result.rows.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n);
+    monthRows.push({ year: period.year, month: period.month, spending_cents: total, categories: result.rows });
+    missing.push(...result.missing);
+  }
+  const total = monthRows.reduce((sum, row) => sum + BigInt(row.spending_cents), 0n);
+  return {
+    months,
+    total_cents: total,
+    monthly_burn_cents: total / BigInt(months),
+    month_rows: monthRows,
+    missing_conversions: missing
+  };
+}
+
+function budgetBurn(ledger: Ledger, year: number, month: number, quote: string, includePending: boolean): Row {
+  const budget = handlers.budget_summary(ledger, { year, month, quote_asset_id: quote, include_pending: includePending }) as Row;
+  const budgets = (budget.budgets as Row[]) ?? [];
+  const fixedRows = budgets.filter((row) => fixedBudgetAccount(String(row.account_name ?? ledger.getAccount(String(row.account_id))?.name ?? "")));
+  const fixed = fixedRows.reduce((sum, row) => sum + BigInt(row.budgeted_cents), 0n);
+  return {
+    budget,
+    monthly_burn_cents: BigInt(budget.total_budgeted_cents ?? 0),
+    fixed_budget_cents: fixed,
+    discretionary_budget_cents: BigInt(budget.total_budgeted_cents ?? 0) - fixed,
+    fixed_budget_rows: fixedRows
+  };
+}
+
+function scaleBigint(value: bigint, multiplier: number): bigint {
+  return value * BigInt(Math.round(multiplier * 10000)) / 10000n;
+}
+
 function parseCsv(text: string): Row[] {
   // Statement imports use a bounded CSV parser instead of accepting arbitrary
   // file sizes or column counts through MCP.
@@ -770,7 +879,32 @@ function statementCandidates(ledger: Ledger, accountId: string, assetId: string,
   return sameDescription.length === 1 ? sameDescription : dated;
 }
 
-function planRow(row: Row, action: string, quantity: bigint, counterpartId: string | null, reason: string, matchedId?: string | null): Row {
+function statementCandidateSummary(ledger: Ledger, accountId: string, assetId: string, row: Row, quantity: bigint, tolerance: number, tx: Journal): Row {
+  const matchedQuantity = amountForAccount(ledger, tx.id, accountId, assetId);
+  const date_delta_days = dateDeltaDays(tx.date, String(row.date));
+  const sameDescription = tx.description.trim().toLowerCase() === String(row.description ?? "").trim().toLowerCase();
+  const externalMatch = row.external_id != null && row.external_id !== "" && tx.external_id === String(row.external_id);
+  const reasons = [
+    matchedQuantity === quantity ? "amount" : null,
+    date_delta_days <= tolerance ? "date_tolerance" : null,
+    sameDescription ? "description" : null,
+    externalMatch ? "external_id" : null
+  ].filter(Boolean);
+  const score = (matchedQuantity === quantity ? 60 : 0) + (date_delta_days <= tolerance ? 20 : 0) + (sameDescription ? 15 : 0) + (externalMatch ? 25 : 0);
+  return {
+    journal_id: tx.id,
+    date: tx.date,
+    description: tx.description,
+    status: tx.status,
+    external_id: tx.external_id ?? null,
+    amount_cents: matchedQuantity,
+    date_delta_days,
+    score,
+    reasons
+  };
+}
+
+function planRow(row: Row, action: string, quantity: bigint, counterpartId: string | null, reason: string, matchedId?: string | null, extraMetadata: Row = {}): Row {
   return {
     row_index: Number(row.index ?? row.row_index ?? 0),
     date: row.date,
@@ -785,7 +919,8 @@ function planRow(row: Row, action: string, quantity: bigint, counterpartId: stri
     metadata: {
       amount: row.amount ?? null,
       tags: row.tags ?? {},
-      source_row: row
+      source_row: row,
+      ...extraMetadata
     }
   };
 }
@@ -809,9 +944,24 @@ function publicPlanRows(rows: Row[]): Row[] {
       metadata,
       quantity,
       amount_cents: quantity,
-      amount: sourceRow.amount ?? metadata.amount ?? null
+      amount: sourceRow.amount ?? metadata.amount ?? null,
+      candidates: metadata.candidates ?? []
     };
   });
+}
+
+function userFacingLiabilityBalance(args: Args): boolean {
+  const statementType = String(args.statement_type ?? "").toLowerCase().replace(/[\s_-]+/g, "");
+  const balanceSign = String(args.balance_sign ?? args.balance_basis ?? "").toLowerCase().replace(/[\s_-]+/g, "");
+  return ["creditcard", "cardstatement", "liabilitystatement"].includes(statementType) || ["statement", "userfacing", "positive"].includes(balanceSign);
+}
+
+function expectedStatementBalance(ledger: Ledger, accountId: string, assetId: string, args: Args): bigint | null {
+  if (args.expected_balance == null) return null;
+  let expected = amountToQuantity(ledger, assetId, args.expected_balance);
+  const accountRow = ledger.getAccount(accountId);
+  if (accountRow?.account_type === "liability" && expected > 0n && userFacingLiabilityBalance(args)) expected = -expected;
+  return expected;
 }
 
 function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = {}): Row {
@@ -827,6 +977,7 @@ function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = {}): Ro
     planned_balance_cents: plan?.planned_balance ?? extra.planned_balance_cents ?? null,
     applied_balance_cents: plan?.applied_balance ?? null,
     balance_matches: extra.balance_matches ?? null,
+    balance_sign: extra.balance_sign ?? null,
     rows: publicRows.slice(0, extra.sample_limit ?? 20),
     total_rows: publicRows.length,
     actions: summary,
@@ -870,7 +1021,9 @@ function buildStatementPlan(ledger: Ledger, args: Args, options: { persist?: boo
         planRows.push(planRow(row, "matched", quantity, rowCounterpart, "matched existing transaction", matched.id));
       }
     } else if (candidates.length > 1) {
-      planRows.push(planRow(row, "ambiguous", quantity, rowCounterpart, "multiple matching transactions", null));
+      planRows.push(planRow(row, "ambiguous", quantity, rowCounterpart, "multiple matching transactions", null, {
+        candidates: candidates.map((tx) => statementCandidateSummary(ledger, accountId, assetId, row, quantity, tolerance, tx))
+      }));
     } else if (!rowCounterpart) {
       planRows.push(planRow(row, "ambiguous", quantity, null, "counterpart account could not be resolved", null));
     } else if (targetStatus === "pending") {
@@ -910,7 +1063,7 @@ function buildStatementPlan(ledger: Ledger, args: Args, options: { persist?: boo
 
   const baseStatus = targetStatus === "pending" ? "pending" : "posted";
   const plannedBalance = ledger.balanceTree(accountId, assetId, null, baseStatus) + plannedDelta;
-  const expected = args.expected_balance == null ? null : amountToQuantity(ledger, assetId, args.expected_balance);
+  const expected = expectedStatementBalance(ledger, accountId, assetId, args);
   const balanceMatches = expected == null ? null : expected === plannedBalance;
   if (expected != null && !balanceMatches && args.require_balance_match !== false) throw new Error(`expected_balance mismatch: expected ${expected}, actual ${plannedBalance}`);
   const metadata = {
@@ -931,7 +1084,17 @@ function buildStatementPlan(ledger: Ledger, args: Args, options: { persist?: boo
     metadata
   }, planRows) : null;
   const persistedRows = persisted ? ledger.listStatementPlanRows(String(persisted.id)) : planRows;
-  return statementPlanOutput(persisted, persistedRows, { account_id: accountId, asset_id: assetId, expected_balance_cents: expected, planned_balance_cents: plannedBalance, balance_matches: balanceMatches, sample_limit: args.sample_limit ?? args.preview_rows ?? 20, dry_run: !options.persist, metadata });
+  return statementPlanOutput(persisted, persistedRows, {
+    account_id: accountId,
+    asset_id: assetId,
+    expected_balance_cents: expected,
+    planned_balance_cents: plannedBalance,
+    balance_matches: balanceMatches,
+    balance_sign: userFacingLiabilityBalance(args) ? "user_facing_liability" : "ledger",
+    sample_limit: args.sample_limit ?? args.preview_rows ?? 20,
+    dry_run: !options.persist,
+    metadata
+  });
 }
 
 function applyStatementPlan(ledger: Ledger, planId: string, args: Args = {}): Row {
@@ -1047,6 +1210,59 @@ function recurringDateRange(args: Args): [string | null, string | null] {
   start.setUTCMonth(start.getUTCMonth() - Number(args.months ?? 6));
   start.setUTCDate(start.getUTCDate() + 1);
   return [start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)];
+}
+
+function registryNames(args: Args): ToolName[] {
+  if (args.names == null) return [...TOOL_NAMES];
+  const requested = Array.isArray(args.names)
+    ? args.names.map((name) => String(name))
+    : String(args.names).split(",").map((name) => name.trim()).filter(Boolean);
+  const known = new Set<string>(TOOL_NAMES);
+  const unknown = requested.filter((name) => !known.has(name));
+  if (unknown.length > 0) throw new Error(`Unknown tool name(s): ${unknown.join(", ")}`);
+  return requested as ToolName[];
+}
+
+function registrySafetyMatches(name: ToolName, args: Args): boolean {
+  const safety = toolSafety(name);
+  const filter = args.safety_filter;
+  if (filter == null) return true;
+  if (typeof filter === "string") {
+    const value = filter.toLowerCase().replace(/[\s_-]+/g, "");
+    if (["readonly", "read"].includes(value)) return safety.readOnlyHint;
+    if (["write", "mutating"].includes(value)) return !safety.readOnlyHint;
+    if (value === "destructive") return safety.destructiveHint;
+    if (["dryrun", "dryruncapable"].includes(value)) return safety.supportsDryRun;
+    if (value === "defaultdryrun") return safety.defaultDryRun;
+    if (value === "idempotent") return safety.idempotentHint;
+    if (value === "safe") return safety.readOnlyHint || safety.defaultDryRun;
+    throw new Error(`Unknown safety_filter: ${filter}`);
+  }
+  if (typeof filter !== "object") throw new Error("safety_filter must be a string or object");
+  for (const [key, expected] of Object.entries(filter)) {
+    if (key in safety && (safety as Row)[key] !== expected) return false;
+  }
+  return true;
+}
+
+function registryEntry(name: ToolName, summary: boolean): Row {
+  const safety = toolSafety(name);
+  if (summary) {
+    return {
+      name,
+      signature: TOOL_SIGNATURES[name],
+      parameters: TOOL_DEFINITIONS[name].parameters.map((parameter) => parameter[0]),
+      aliases: parameterAliasesForTool(name),
+      safety
+    };
+  }
+  return {
+    name,
+    signature: TOOL_SIGNATURES[name],
+    definition: TOOL_DEFINITIONS[name],
+    aliases: parameterAliasesForTool(name),
+    safety
+  };
 }
 
 function scopedExportDocument(ledger: Ledger, args: Args): Row {
@@ -1236,7 +1452,7 @@ export function assertToolCapabilities(name: string, args: Args, granted: Set<To
 
 function assertMcpCapability(name: string, args: Args): void {
   // Capability gates are intentionally not enforced here. Risk is carried by
-  // explicit tool names, dry-run defaults, path sandboxing, and ledger backups.
+  // explicit tool names, dry-run defaults, file validation, and ledger backups.
   void name;
   void args;
 }
@@ -1551,8 +1767,31 @@ const handlers: Record<ToolName, Handler> = {
     };
   },
   financial_picture: (ledger, args) => {
-    const status = reportStatus(args, "combined");
-    return handlers.financial_overview(ledger, { ...args, status });
+    const fallbackIncludesPending = args.include_pending !== false;
+    const fallbackIncludesPlanned = args.include_planned === true;
+    const status = reportStatus(args, fallbackIncludesPlanned ? "combined" : fallbackIncludesPending ? "active" : "posted");
+    const includePending = status == null || status === "active" || status === "combined" || status === "pending";
+    const includePlanned = status == null || status === "combined" || status === "planned";
+    const overview = handlers.financial_overview(ledger, { ...args, status }) as Row;
+    const year = args.year ?? new Date().getUTCFullYear();
+    const month = args.month ?? new Date().getUTCMonth() + 1;
+    const actualCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: false, include_planned: false }) as Row;
+    const projectedCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
+    return {
+      ...overview,
+      basis: includePlanned ? "planned_projection" : includePending ? "current_active" : "current_actual",
+      report_status: status,
+      include_pending: includePending,
+      include_planned: includePlanned,
+      actual_cash_cents: actualCash.available_cash_cents,
+      planned_cash_cents: projectedCash.planned_cash_cents,
+      projected_cash_cents: projectedCash.available_cash_cents,
+      cash_position: {
+        actual: actualCash,
+        selected: projectedCash
+      },
+      conversion_warning: projectedCash.conversion_warning
+    };
   },
   cash_projection: (ledger, args) => {
     const quote = reportAsset(ledger, args.quote_asset_id);
@@ -1570,18 +1809,20 @@ const handlers: Record<ToolName, Handler> = {
 
     const accountBreakdown = assetAccounts.map((ref: string) => {
       const accountId = account(ledger, ref);
+      const accountRow = ledger.getAccount(accountId);
       const posted = quoted(accountId, "posted");
-      const pending = args.include_pending === false ? 0n : quoted(accountId, "pending");
-      const planned = args.include_planned === false ? 0n : quoted(accountId, "planned", plannedAfter);
-      return { account_id: accountId, posted_cash_cents: posted, pending_cash_cents: pending, planned_cash_cents: planned, included_cash_cents: posted + pending + planned };
+      const pending = args.include_pending === true ? quoted(accountId, "pending") : 0n;
+      const planned = args.include_planned === true ? quoted(accountId, "planned", plannedAfter) : 0n;
+      return { account_id: accountId, account_name: accountRow?.name ?? "", posted_cash_cents: posted, pending_cash_cents: pending, planned_cash_cents: planned, included_cash_cents: posted + pending + planned };
     });
     const liabilityBreakdown = liabilityAccounts.map((ref: string) => {
       const accountId = account(ledger, ref);
+      const accountRow = ledger.getAccount(accountId);
       const posted = quoted(accountId, "posted");
-      const pending = args.include_pending === false ? 0n : quoted(accountId, "pending");
-      const planned = args.include_planned === false ? 0n : quoted(accountId, "planned", plannedAfter);
+      const pending = args.include_pending === true ? quoted(accountId, "pending") : 0n;
+      const planned = args.include_planned === true ? quoted(accountId, "planned", plannedAfter) : 0n;
       const effect = posted + pending + planned;
-      return { account_id: accountId, posted_liability_effect_cents: posted, pending_liability_effect_cents: pending, planned_liability_effect_cents: planned, included_liability_effect_cents: effect, included_liability_balance_cents: -effect };
+      return { account_id: accountId, account_name: accountRow?.name ?? "", posted_liability_effect_cents: posted, pending_liability_effect_cents: pending, planned_liability_effect_cents: planned, included_liability_effect_cents: effect, included_liability_balance_cents: -effect };
     });
 
     const postedCash = accountBreakdown.reduce((sum: bigint, row: Row) => sum + BigInt(row.posted_cash_cents), 0n);
@@ -1592,13 +1833,30 @@ const handlers: Record<ToolName, Handler> = {
     const pendingLiabilities = liabilityBreakdown.reduce((sum: bigint, row: Row) => sum + BigInt(row.pending_liability_effect_cents), 0n);
     const plannedLiabilities = liabilityBreakdown.reduce((sum: bigint, row: Row) => sum + BigInt(row.planned_liability_effect_cents), 0n);
     const liabilityEffect = postedLiabilities + pendingLiabilities + plannedLiabilities;
-    const earmarks = (args.earmarks ?? []).reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
+    const earmarkItems = (args.earmarks ?? []).map((row: Row, index: number) => ({ name: row.name ?? row.label ?? `Earmark ${index + 1}`, amount_cents: amountToQuantity(ledger, quote, row.amount ?? 0) }));
+    const earmarks = earmarkItems.reduce((sum: bigint, row: Row) => sum + BigInt(row.amount_cents), 0n);
+    const budget = args.year == null || args.month == null ? null : handlers.budget_summary(ledger, { year: args.year, month: args.month, quote_asset_id: quote, include_pending: args.include_pending === true }) as Row;
+    const plannedIncome = args.year == null || args.month == null ? 0n : BigInt((handlers.income_statement(ledger, { year: args.year, month: args.month, quote_asset_id: quote, status: "planned" }) as Row).income ?? 0);
+    const available = gross + liabilityEffect - earmarks;
+    const auditLineItems = [
+      { type: "starting_cash", label: "Posted cash", amount_cents: postedCash },
+      { type: "pending_cash", label: "Pending asset-account cash", amount_cents: pendingCash, included: args.include_pending === true },
+      { type: "planned_cash", label: "Planned asset-account cash", amount_cents: plannedCash, included: args.include_planned === true },
+      { type: "posted_liabilities", label: "Posted liability effect", amount_cents: postedLiabilities },
+      { type: "pending_liabilities", label: "Pending liability effect", amount_cents: pendingLiabilities, included: args.include_pending === true },
+      { type: "planned_liabilities", label: "Planned liability effect", amount_cents: plannedLiabilities, included: args.include_planned === true },
+      ...earmarkItems.map((row: Row) => ({ type: "earmark", label: row.name, amount_cents: -BigInt(row.amount_cents) })),
+      { type: "remaining_budget", label: "Remaining budget", amount_cents: budget?.total_remaining_cents ?? null, included: false },
+      { type: "planned_income", label: "Planned income", amount_cents: plannedIncome, included: args.include_planned === true }
+    ];
     return {
       year: args.year,
       month: args.month,
       as_of: asOf,
       planned_date_from: periodStart,
+      basis: args.include_planned === true ? "projection" : args.include_pending === true ? "actual_plus_pending" : "actual",
       gross_cash_cents: gross,
+      actual_cash_cents: postedCash,
       posted_cash_cents: postedCash,
       pending_cash_cents: pendingCash,
       planned_cash_cents: plannedCash,
@@ -1608,17 +1866,136 @@ const handlers: Record<ToolName, Handler> = {
       pending_liability_effect_cents: pendingLiabilities,
       planned_liability_effect_cents: plannedLiabilities,
       earmarks_cents: earmarks,
-      available_cash_cents: gross + liabilityEffect - earmarks,
+      available_cash_cents: available,
+      actual_available_cash_cents: postedCash + postedLiabilities - earmarks,
+      pending_available_delta_cents: pendingCash + pendingLiabilities,
+      planned_available_delta_cents: plannedCash + plannedLiabilities,
+      remaining_budget_cents: budget?.total_remaining_cents ?? null,
+      planned_income_cents: plannedIncome,
       accounts: assetAccounts,
       asset_account_ids: assetAccounts,
       liability_account_ids: liabilityAccounts,
       account_breakdown: accountBreakdown,
       liability_breakdown: liabilityBreakdown,
+      earmarks: earmarkItems,
+      audit_trail: {
+        line_items: auditLineItems,
+        asset_accounts: accountBreakdown,
+        liabilities: liabilityBreakdown,
+        earmarks: earmarkItems,
+        remaining_budget: budget,
+        planned_income_cents: plannedIncome
+      },
       quote_asset_id: quote,
-      include_pending: args.include_pending !== false,
-      include_planned: args.include_planned !== false,
+      include_pending: args.include_pending === true,
+      include_planned: args.include_planned === true,
       valuation_complete: missing.length === 0,
-      missing_conversions: missing
+      missing_conversions: missing,
+      conversion_warning: conversionSeverity(missing)
+    };
+  },
+
+  cash_runway: (ledger, args) => {
+    const quote = reportAsset(ledger, args.quote_asset_id);
+    const nowDate = new Date();
+    const year = Number(args.year ?? nowDate.getUTCFullYear());
+    const month = Number(args.month ?? nowDate.getUTCMonth() + 1);
+    const includePending = args.include_pending === true;
+    const includePlanned = args.include_planned === true;
+    const shortMonths = Number(args.trailing_months_short ?? 3);
+    const longMonths = Number(args.trailing_months_long ?? 6);
+    if (!Number.isInteger(shortMonths) || shortMonths < 1) throw new Error("trailing_months_short must be a positive integer");
+    if (!Number.isInteger(longMonths) || longMonths < 1) throw new Error("trailing_months_long must be a positive integer");
+    const discretionaryMultiplier = args.discretionary_multiplier == null ? 0.5 : Number(args.discretionary_multiplier);
+    if (!Number.isFinite(discretionaryMultiplier) || discretionaryMultiplier < 0 || discretionaryMultiplier > 1) throw new Error("discretionary_multiplier must be between 0 and 1");
+
+    const defaultAssets = spendableAssetAccountDefaults(ledger);
+    const assetAccounts = nonOverlappingAccounts(ledger, args.asset_account_ids ?? defaultAssets.selected, ["asset"]);
+    const liabilityAccounts = nonOverlappingAccounts(ledger, args.liability_account_ids ?? rootAccountIds(ledger, ["liability"]), ["liability"]);
+    const projection = handlers.cash_projection(ledger, {
+      year,
+      month,
+      asset_account_ids: assetAccounts,
+      liability_account_ids: liabilityAccounts,
+      earmarks: args.earmarks ?? null,
+      include_pending: includePending,
+      include_planned: includePlanned,
+      quote_asset_id: quote
+    }) as Row;
+    const budget = budgetBurn(ledger, year, month, quote, includePending);
+    const trailingShort = trailingSpend(ledger, year, month, shortMonths, quote);
+    const trailingLong = trailingSpend(ledger, year, month, longMonths, quote);
+    const available = BigInt(projection.available_cash_cents);
+    const fixedBurn = BigInt(budget.fixed_budget_cents);
+    const discretionaryBurn = BigInt(budget.discretionary_budget_cents);
+    const discretionaryAdjusted = fixedBurn + scaleBigint(discretionaryBurn, discretionaryMultiplier);
+    const model = (name: string, label: string, monthlyBurn: bigint, source: Row) => ({
+      model: name,
+      label,
+      monthly_burn_cents: monthlyBurn,
+      runway_months: runwayMonths(available, monthlyBurn),
+      source
+    });
+    const burnModels = [
+      model("budget_burn", "Budget burn", BigInt(budget.monthly_burn_cents), budget.budget as Row),
+      model(`trailing_${shortMonths}_month_actual`, `Trailing ${shortMonths}-month actual burn`, BigInt(trailingShort.monthly_burn_cents), trailingShort),
+      model(`trailing_${longMonths}_month_actual`, `Trailing ${longMonths}-month actual burn`, BigInt(trailingLong.monthly_burn_cents), trailingLong),
+      model("fixed_obligation_burn", "Fixed-obligation burn", fixedBurn, { fixed_budget_rows: budget.fixed_budget_rows }),
+      model("discretionary_adjusted_burn", "Fixed plus reduced discretionary burn", discretionaryAdjusted, {
+        fixed_budget_cents: fixedBurn,
+        discretionary_budget_cents: discretionaryBurn,
+        discretionary_multiplier: discretionaryMultiplier
+      })
+    ];
+    const recommended = burnModels.find((row) => row.model === `trailing_${shortMonths}_month_actual` && row.runway_months != null)
+      ?? burnModels.find((row) => row.model === "budget_burn" && row.runway_months != null)
+      ?? burnModels.find((row) => row.runway_months != null)
+      ?? burnModels[0];
+    const missing = [
+      ...projection.missing_conversions as Row[],
+      ...trailingShort.missing_conversions as Row[],
+      ...trailingLong.missing_conversions as Row[],
+      ...((budget.budget as Row).missing_conversions ?? []) as Row[]
+    ];
+    return {
+      year,
+      month,
+      quote_asset_id: quote,
+      basis: includePlanned ? "projection" : includePending ? "actual_plus_pending" : "conservative_actual",
+      include_pending: includePending,
+      include_planned: includePlanned,
+      actual_cash_cents: projection.actual_available_cash_cents,
+      spendable_cash_cents: projection.available_cash_cents,
+      planned_cash_cents: projection.planned_cash_cents,
+      pending_cash_delta_cents: projection.pending_available_delta_cents,
+      earmarks_cents: projection.earmarks_cents,
+      liability_effect_cents: projection.liability_effect_cents,
+      asset_account_ids: assetAccounts,
+      liability_account_ids: liabilityAccounts,
+      excluded_asset_account_ids: args.asset_account_ids ? [] : defaultAssets.excluded,
+      account_selection_rule: args.asset_account_ids ? "explicit asset_account_ids" : defaultAssets.rule,
+      assumptions: {
+        conservative_default: true,
+        planned_cash_excluded_unless_requested: true,
+        pending_cash_excluded_unless_requested: true,
+        investments_excluded_by_default_when_named_as_investment_accounts: true,
+        trailing_months_short: shortMonths,
+        trailing_months_long: longMonths,
+        discretionary_multiplier: discretionaryMultiplier
+      },
+      recommended_model: recommended.model,
+      runway_months: recommended.runway_months,
+      burn_models: burnModels,
+      models: burnModels,
+      cash_projection: projection,
+      budget: budget.budget,
+      trailing_actuals: {
+        short: trailingShort,
+        long: trailingLong
+      },
+      valuation_complete: missing.length === 0,
+      missing_conversions: missing,
+      conversion_warning: conversionSeverity(missing)
     };
   },
 
@@ -1663,7 +2040,7 @@ const handlers: Record<ToolName, Handler> = {
         return [];
       }
       const spent = spentForBudget(String(budget.account_id));
-      return [{ account_id: budget.account_id, asset_id: quote, source_budget_id: budget.id, budgeted_cents: budgeted, spent_cents: spent, remaining_cents: budgeted - spent, percent_used: budgeted ? Number(spent) / Number(budgeted) * 100 : 0 }];
+      return [{ account_id: budget.account_id, account_name: ledger.getAccount(String(budget.account_id))?.name ?? "", asset_id: quote, source_budget_id: budget.id, budgeted_cents: budgeted, spent_cents: spent, remaining_cents: budgeted - spent, percent_used: budgeted ? Number(spent) / Number(budgeted) * 100 : 0 }];
     });
     const coveredSpendingAccountIds = new Set(rows.flatMap((row) => spendingAccountIdsForBudget(String(row.account_id))));
     return {
@@ -1812,11 +2189,20 @@ const handlers: Record<ToolName, Handler> = {
   process_statement: (ledger, args) => {
     unsupportedArguments({ transfer_account_id: args.transfer_account_id });
     const plan = buildStatementPlan(ledger, { ...args, status: "posted" }, { persist: Boolean(args.commit), targetStatus: "posted" });
+    const actions = plan.actions ?? {};
+    const newRows = (actions.new_posted ?? 0) + (actions.new_pending ?? 0);
+    const wouldApply = newRows + (actions.pending_to_commit ?? 0) + (actions.stale_pending_to_void ?? 0);
     const preview = {
       ...plan,
       transactions: [...(plan.new_posted ?? []), ...(plan.pending_to_commit ?? [])].slice(0, args.preview_rows ?? 10),
-      would_import: (plan.actions?.new_posted ?? 0) + (plan.actions?.pending_to_commit ?? 0),
-      skipped_duplicates: plan.actions?.matched ?? 0,
+      matched_existing: actions.matched ?? 0,
+      pending_to_commit_count: actions.pending_to_commit ?? 0,
+      stale_pending_to_void_count: actions.stale_pending_to_void ?? 0,
+      new_rows: newRows,
+      ambiguous_count: actions.ambiguous ?? 0,
+      ignored_count: actions.ignored ?? 0,
+      would_import: newRows,
+      would_apply: wouldApply,
       dry_run: !args.commit
     };
     return args.commit ? { ...preview, ...applyStatementPlan(ledger, String(plan.plan_id), { dry_run: false, batch_label: args.batch_label }) } : { ...preview, created: 0 };
@@ -2130,7 +2516,12 @@ const handlers: Record<ToolName, Handler> = {
   },
   project_month_end: (ledger, args) => {
     const projectionAccounts = splitProjectionAccounts(ledger, args);
-    const projection = handlers.cash_projection(ledger, { ...args, ...projectionAccounts }) as Row;
+    const projection = handlers.cash_projection(ledger, {
+      ...args,
+      include_pending: args.include_pending ?? true,
+      include_planned: args.include_planned ?? true,
+      ...projectionAccounts
+    }) as Row;
     const quote = reportAsset(ledger, args.quote_asset_id);
     const inflows = [...(args.expected_inflows ?? []), ...(args.expected_paychecks ?? [])].reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
     const outflows = (args.expected_outflows ?? []).reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
@@ -2225,10 +2616,15 @@ const handlers: Record<ToolName, Handler> = {
   },
   refresh_statement: (ledger, args) => {
     const action = String(args.action ?? "plan");
-    if (action === "plan") return buildStatementPlan(ledger, { ...args, status: args.status ?? "posted" }, { persist: true, targetStatus: args.status ?? "posted" });
+    if (action === "plan") return buildStatementPlan(ledger, { ...args, status: args.status ?? "posted" }, { persist: args.dry_run === false, targetStatus: args.status ?? "posted" });
     if (action === "apply") return applyStatementPlan(ledger, args.plan_id, args);
     if (action === "verify") return verifyStatementPlan(ledger, args.plan_id);
-    if (action === "discard") return ledger.discardStatementPlan(args.plan_id);
+    if (action === "discard") {
+      const plan = ledger.getStatementPlan(args.plan_id);
+      if (!plan) throw new Error(`Statement plan '${String(args.plan_id)}' not found`);
+      if (args.dry_run !== false) return { dry_run: true, would_discard: true, plan_id: args.plan_id, status: plan.status };
+      return { ...ledger.discardStatementPlan(args.plan_id), dry_run: false, discarded: true };
+    }
     throw new Error("action must be plan, apply, verify, or discard");
   },
   reconcile_diff: (ledger, args) => {
@@ -2341,7 +2737,7 @@ const handlers: Record<ToolName, Handler> = {
   backup_now: (ledger, args) => {
     const target = args.output_path ? resolveToolWritePath(ledger.path, args.output_path, new Set([".db", ".sqlite", ".sqlite3"])) : null;
     const result = ledger.backupNow(target);
-    return { ...result, path: redactToolPath(ledger.path, result.path), compact: args.compact !== false };
+    return { ...result, path: target ? result.path : redactToolPath(ledger.path, result.path), compact: args.compact !== false };
   },
   backup_status: (ledger) => {
     const backups = handlers.list_backups(ledger, {}) as Row[];
@@ -2379,30 +2775,34 @@ const handlers: Record<ToolName, Handler> = {
     if (!dryRun) for (const tag of tags) ledger.deleteAnnotation(tag.id);
     return { matched: tags.length, deleted: dryRun ? 0 : tags.length, dry_run: dryRun };
   },
-  tool_registry: (ledger) => ({
-    version: 1,
-    count: TOOL_NAMES.length,
-    file_access: fileAccessStatus(ledger.path),
-    status_filter: {
-      accepted_values: STATUS_FILTER_VALUES,
-      all: "all non-void transactions",
-      "null": "same as all for read/filter status",
-      active: "posted + pending",
-      combined: "posted + pending + planned",
-      creation_status_values: ["posted", "pending", "planned", "void"]
-    },
-    asset_references: {
-      asset_id: "asset id or symbol",
-      quote_asset_id: "asset id or symbol; aliases currency, quote, and quote_id are accepted when the tool does not already define those parameters"
-    },
-    tools: TOOL_NAMES.map((name) => ({
-      name,
-      signature: TOOL_SIGNATURES[name],
-      definition: TOOL_DEFINITIONS[name],
-      aliases: parameterAliasesForTool(name),
-      safety: toolSafety(name)
-    }))
-  }),
+  tool_registry: (ledger, args) => {
+    const names = registryNames(args).filter((name) => registrySafetyMatches(name, args));
+    const summary = args.summary === true;
+    return {
+      version: 1,
+      count: TOOL_NAMES.length,
+      returned_count: names.length,
+      summary,
+      file_access: fileAccessStatus(ledger.path),
+      status_filter: {
+        accepted_values: STATUS_FILTER_VALUES,
+        all: "all non-void transactions",
+        "null": "same as all for read/filter status",
+        active: "posted + pending",
+        combined: "posted + pending + planned",
+        creation_status_values: ["posted", "pending", "planned", "void"]
+      },
+      asset_references: {
+        asset_id: "asset id or symbol",
+        quote_asset_id: "asset id or symbol; aliases currency, quote, and quote_id are accepted when the tool does not already define those parameters"
+      },
+      filters: {
+        names: args.names ?? null,
+        safety_filter: args.safety_filter ?? null
+      },
+      tools: names.map((name) => registryEntry(name, summary))
+    };
+  },
   inspect_transaction: (ledger, args) => {
     const tx = txWithEntries(ledger, args.tx_id);
     tx.integrity = { balanced: (tx.entries as JournalLine[] | Row[]).reduce((sum: bigint, entry: any) => sum + BigInt(entry.quantity), 0n) === 0n };

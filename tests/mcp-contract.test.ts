@@ -43,16 +43,13 @@ afterEach(() => {
 
 function createContext(): TestContext {
   const previousDb = process.env.CLOVIS_DB;
-  const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
   const dir = mkdtempSync(join(tmpdir(), "clovis-contract-"));
   const db = join(dir, "ledger.db");
   process.env.CLOVIS_DB = db;
-  process.env.CLOVIS_ALLOWED_ROOT = dir;
   const ledger = new Ledger(db);
   cleanups.push(() => {
     ledger.close();
     if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
-    if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -190,7 +187,7 @@ function parseCliToolOutput(stdout: string): any {
 function callCliTool(ctx: TestContext, name: ToolName, args: Args): any {
   const stdout = execFileSync(process.execPath, ["dist/cli/main.js", "--db", ctx.db, "--format", "json", "tool", name, "--json", JSON.stringify(args)], {
     cwd: process.cwd(),
-    env: { ...process.env, CLOVIS_DB: ctx.db, CLOVIS_ALLOWED_ROOT: ctx.dir },
+    env: { ...process.env, CLOVIS_DB: ctx.db },
     encoding: "utf8",
     timeout: 30_000
   });
@@ -202,7 +199,7 @@ async function withMcpClient(ctx: TestContext, fn: (client: Client) => Promise<v
     command: process.execPath,
     args: ["dist/mcp/main.js"],
     cwd: process.cwd(),
-    env: { ...process.env, CLOVIS_DB: ctx.db, CLOVIS_ALLOWED_ROOT: ctx.dir },
+    env: { ...process.env, CLOVIS_DB: ctx.db },
     stderr: "pipe"
   });
   const client = new Client({ name: "clovis-contract-test", version: "0.0.0" });
@@ -248,6 +245,7 @@ const CASES = {
   buy_security: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Brokerage, symbol: "AAPL", shares: 1.25, total_cost_cents: 12345, commission_cents: 55, date: "2026-06-10" }), assert: expectObject },
   cash_flow: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   cash_projection: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  cash_runway: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   close_period: { mutation: "write", args: () => ({ name: "May close", as_of: "2026-05-31" }), assert: expectObject },
   commit_batch: { mutation: "write", setup: ensureImportBatch, args: (ctx) => ({ batch_id: ctx.batches.import }), assert: (result) => expect(result.committed).toBeGreaterThan(0) },
   compare_scenarios: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },
@@ -277,8 +275,9 @@ const CASES = {
   export_ledger: { mutation: "read", args: () => ({}), assert: (result) => expect(String(result.data)).toContain("accounts") },
   export_transactions: { mutation: "read", args: () => ({}), assert: (result) => expect(String(result.csv)).toContain("date,description") },
   file_access_status: { mutation: "read", args: () => ({}), assert: (result, ctx) => {
-    expect(result.allowed_roots).toContain(realpathSync(ctx.dir));
-    expect(result.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
+    expect(result.mode).toBe("unrestricted");
+    expect(result.path_policy).toContain("operating system permits");
+    expect(result.ledger_dir).toBe(realpathSync(ctx.dir));
   } },
   financial_overview: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   financial_picture: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
@@ -358,7 +357,7 @@ const CASES = {
   reconcile_statement: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, counterpart_id: ctx.accounts["Opening Balances"], transactions: [{ date: "2026-06-01", amount_cents: 100000, description: "June Pay" }] }), assert: expectObject },
   reconcile_statement_plan: { mutation: "read", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"] }), assert: expectObject },
   reconcile_to_balance: { mutation: "dry-run", args: (ctx) => ({ account_id: ctx.accounts.Checking, target_balance: 1000, offset_account_id: ctx.accounts["Opening Balances"], date: "2026-06-30", dry_run: true }), assert: expectObject },
-  refresh_statement: { mutation: "write", args: (ctx) => ({ action: "plan", file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], status: "posted" }), assert: (result) => {
+  refresh_statement: { mutation: "write", args: (ctx) => ({ action: "plan", file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], status: "posted", dry_run: false }), assert: (result) => {
     expect(result.plan_id).toEqual(expect.stringMatching(/^stmtplan_/));
   } },
   record_investment: { mutation: "write", args: (ctx) => ({ date: "2026-06-15", amount: 100, investment_account_id: ctx.accounts.Brokerage, source_account_id: ctx.accounts.Checking, description: "Investment transfer" }), assert: expectObject },
@@ -381,7 +380,7 @@ const CASES = {
     expect(result.count).toBe(TOOL_NAMES.length);
     expect(result.tools.find((tool: any) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
     expect(result.tools.find((tool: any) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
-    expect(result.file_access.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
+    expect(result.file_access.mode).toBe("unrestricted");
   } },
   transfer: { mutation: "write", args: (ctx) => ({ from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Savings, amount: 25, date: "2026-06-16", description: "Move cash" }), assert: expectObject },
   trial_balance: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },

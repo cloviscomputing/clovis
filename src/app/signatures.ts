@@ -205,6 +205,8 @@ export const TOOL_DEFINITIONS = {
     parameters: [
       ["year", "integer"],
       ["month", "integer"],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["status", "string", { optional: true, defaultValue: "posted" }],
       ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
@@ -215,6 +217,7 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["rollup", "boolean", { optional: true, defaultValue: false }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
       ["quote_asset_id", "string"]
     ],
@@ -224,6 +227,7 @@ export const TOOL_DEFINITIONS = {
     parameters: [
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
       ["status", "string", { optional: true, defaultValue: "posted" }],
       ["quote_asset_id", "string"]
     ],
@@ -262,8 +266,24 @@ export const TOOL_DEFINITIONS = {
       ["liability_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
       ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["earmarks", "object[]", { nullable: true, optional: true, defaultValue: null }],
-      ["include_pending", "boolean", { optional: true, defaultValue: true }],
-      ["include_planned", "boolean", { optional: true, defaultValue: true }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["include_planned", "boolean", { optional: true, defaultValue: false }],
+      ["quote_asset_id", "string"]
+    ],
+    returns: { type: "object" }
+  },
+  "cash_runway": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["liability_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["earmarks", "object[]", { nullable: true, optional: true, defaultValue: null }],
+      ["include_pending", "boolean", { optional: true, defaultValue: false }],
+      ["include_planned", "boolean", { optional: true, defaultValue: false }],
+      ["trailing_months_short", "integer", { optional: true, defaultValue: 3 }],
+      ["trailing_months_long", "integer", { optional: true, defaultValue: 6 }],
+      ["discretionary_multiplier", "number", { optional: true, defaultValue: 0.5 }],
       ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
@@ -533,8 +553,9 @@ export const TOOL_DEFINITIONS = {
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
       ["quote_asset_id", "string"],
-      ["status", "string", { optional: true, defaultValue: "combined" }],
-      ["include_pending", "boolean", { optional: true, defaultValue: true }]
+      ["status", "string", { optional: true, defaultValue: "active" }],
+      ["include_pending", "boolean", { optional: true, defaultValue: true }],
+      ["include_planned", "boolean", { optional: true, defaultValue: false }]
     ],
     returns: { type: "object" }
   },
@@ -996,6 +1017,7 @@ export const TOOL_DEFINITIONS = {
       ["date_format", "string", { optional: true, defaultValue: "auto" }],
       ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
       ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["balance_sign", "string", { nullable: true, optional: true, defaultValue: null }],
       ["transfer_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_tolerance_days", "integer", { optional: true, defaultValue: 1 }],
       ["commit", "boolean", { optional: true, defaultValue: false }],
@@ -1120,6 +1142,7 @@ export const TOOL_DEFINITIONS = {
       ["date_format", "string", { optional: true, defaultValue: "auto" }],
       ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
       ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["balance_sign", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
       ["min_likely_score", "number", { optional: true, defaultValue: 0.72 }],
       ["sample_limit", "integer", { optional: true, defaultValue: 20 }]
@@ -1161,6 +1184,7 @@ export const TOOL_DEFINITIONS = {
       ["date_format", "string", { optional: true, defaultValue: "auto" }],
       ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
       ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["balance_sign", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
       ["row_indexes", "integer[]", { nullable: true, optional: true, defaultValue: null }],
       ["pending_transactions", "object[]", { nullable: true, optional: true, defaultValue: null }],
@@ -1333,7 +1357,9 @@ export const TOOL_DEFINITIONS = {
   },
   "tool_registry": {
     parameters: [
-
+      ["names", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["summary", "boolean", { optional: true, defaultValue: false }],
+      ["safety_filter", "string", { nullable: true, optional: true, defaultValue: null }]
     ],
     returns: { type: "object" }
   },
@@ -1409,7 +1435,7 @@ export const STATUS_FILTER_VALUES = ["posted", "pending", "planned", "void", "ac
 const READ_ONLY_TOOLS = new Set<string>([
   "account_balances", "account_register", "age_of_money", "assert_balance", "assert_balances", "audit_categorization",
   "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "cash_flow",
-  "cash_projection", "compare_scenarios", "count_transactions", "detect_recurring", "export_ledger",
+  "cash_projection", "cash_runway", "compare_scenarios", "count_transactions", "detect_recurring", "export_ledger",
   "export_transactions", "file_access_status", "financial_overview", "financial_picture", "find_pending_duplicates", "forecast",
   "forecast_month_end", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_price",
   "get_transaction", "goal_progress", "holdings", "income_statement", "inspect_transaction", "integrity_check",

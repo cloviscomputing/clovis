@@ -37,7 +37,7 @@ Through the CLI or MCP server, Clovis can act like a local bookkeeping copilot
 over your SQLite ledger:
 
 - answer balance, net worth, income statement, cash-flow, spending, budget, and
-  runway questions
+  conservative cash-runway questions
 - inspect account registers and search transactions by date, description,
   amount, account, category, or status
 - preview, plan, import, and reconcile QFX, OFX, or CSV bank and card statements
@@ -57,6 +57,7 @@ Example prompts for an MCP client:
 - "Give me a financial overview for June 2026 in CAD."
 - "What is my net worth in CAD?"
 - "Show my top spending categories this month."
+- "How many months of cash runway do I have?"
 - "Find uncategorized pending transactions."
 - "Preview this QFX statement and show me what is new."
 - "Reconcile this card statement before committing anything."
@@ -69,8 +70,8 @@ Useful orientation tools:
   safety hints, and file-access configuration
 - `operating_manual`: workflow guidance for imports, reconciliation,
   month-end, runway, categorization, and safety
-- `file_access_status`: allowed local folders for statement imports, exports,
-  and backups
+- `file_access_status`: current file path policy and max file size for
+  statement imports, exports, and backups
 - `integrity_check`: structural health check for the ledger
 
 ## Status
@@ -223,6 +224,23 @@ clovis --db ./ledger.db report balance-sheet --quote CAD
 clovis --db ./ledger.db report income-statement --year 2026 --month 6 --quote CAD
 ```
 
+Runway has a first-class tool because it is easy to answer badly by counting
+planned paycheques, investments, or unconverted balances as spendable cash. By
+default, `cash_runway` uses posted actual cash, deducts selected liabilities,
+excludes planned and pending rows, excludes obvious investment accounts from
+default spendable cash, and returns multiple burn models with the assumptions
+attached.
+
+```sh
+clovis --db ./ledger.db --format json tool cash_runway \
+  --json '{"year":2026,"month":6,"quote_asset_id":"CAD"}'
+```
+
+Use `include_pending:true` or `include_planned:true` only when the answer should
+explicitly become a projection. `cash_projection` follows the same conservative
+default and includes an audit trail of starting cash, liabilities, earmarks,
+remaining budget, and planned income.
+
 Import a QFX, OFX, or CSV statement into an existing account. Prefer QFX or OFX
 when your bank provides them because they usually include a stable institution
 transaction id such as `FITID`; Clovis preserves that id as statement metadata.
@@ -246,10 +264,15 @@ the generic tool interface or MCP:
 clovis --db ./ledger.db --format json tool refresh_statement \
   --json '{"action":"plan","file_path":"./statement.qfx","account_id":"Checking","counterpart_account_id":"Uncategorized","expected_balance":1250.00}'
 clovis --db ./ledger.db --format json tool refresh_statement \
+  --json '{"action":"plan","file_path":"./statement.qfx","account_id":"Checking","counterpart_account_id":"Uncategorized","expected_balance":1250.00,"dry_run":false}'
+clovis --db ./ledger.db --format json tool refresh_statement \
   --json '{"action":"apply","plan_id":"stmtplan_...","dry_run":false}'
 clovis --db ./ledger.db --format json tool refresh_statement \
   --json '{"action":"verify","plan_id":"stmtplan_..."}'
 ```
+
+The first `plan` call is a non-persistent preview. Pass `dry_run:false` to
+stage an immutable plan that can be applied or discarded later.
 
 Export filtered transaction rows:
 
@@ -283,21 +306,13 @@ status.
 Creation tools still require a real lifecycle status: `posted`, `pending`,
 `planned`, or `void`.
 
-File tools only read or write inside configured roots. By default the only root
-is the directory that contains the ledger database. Set `CLOVIS_ALLOWED_ROOT`
-for one workspace folder, or `CLOVIS_ALLOWED_ROOTS` for multiple folders
-separated by your platform path delimiter, `:` on macOS/Linux and `;` on
-Windows.
-
-```sh
-CLOVIS_ALLOWED_ROOTS="$HOME/Desktop/CFO:$HOME/Downloads" \
-  clovis --db ~/.clovis/clovis.db tool file_access_status
-```
+File tools use ordinary filesystem permissions. Suffix checks, overwrite
+protection, and `CLOVIS_MAX_FILE_BYTES` still apply.
 
 Agents can call `file_access_status`, or inspect the `file_access` block in
-`tool_registry`, before asking for a statement path. If a path is blocked,
-Clovis reports the requested path, the allowed roots, and an example
-`CLOVIS_ALLOWED_ROOTS` value to restart with.
+`tool_registry`, to see the active file policy and max file size. For a hard
+filesystem boundary, run Clovis or the agent inside an OS sandbox, container, or
+dedicated user account.
 
 Bulk mutation tools default to dry-run and require `dry_run:false` in the tool
 arguments to apply changes:
@@ -331,17 +346,16 @@ Start the MCP server against a specific local ledger database:
 CLOVIS_DB=./ledger.db clovis-mcp
 ```
 
-`clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools are limited to the
-ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` for one allowed folder,
-or `CLOVIS_ALLOWED_ROOTS` for multiple folders, to allow imports, exports, and
-backups under local workspace directories. MCP and CLI tools share the same
-catalog and behavior: bulk mutation tools preview by default, and callers must
-pass `dry_run:false` or an equivalent commit argument to apply changes.
+`clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools use ordinary filesystem
+permissions. MCP and CLI tools share the same catalog and behavior: bulk
+mutation tools preview by default, and callers must pass `dry_run:false` or an
+equivalent commit argument to apply changes.
 MCP tools include safety annotations such as `readOnlyHint`,
 `destructiveHint`, and `idempotentHint`. The `tool_registry` tool returns the
 full shared schema, rendered signatures, parameter aliases, status convention,
 file-access configuration, and safety metadata through the normal MCP tool-call
-path. The server also exposes the Clovis Operating Manual as MCP instructions,
+path. Use `summary:true`, `names:[...]`, or `safety_filter:"read_only"` when an
+agent only needs a smaller catalog slice. The server also exposes the Clovis Operating Manual as MCP instructions,
 as the read-only `operating_manual` tool, and as Markdown resources at
 `clovis://manual`, `clovis://manual/statement-import`,
 `clovis://manual/month-end`, `clovis://manual/runway`, and
@@ -355,15 +369,12 @@ Example local MCP configuration:
     "clovis": {
       "command": "clovis-mcp",
       "env": {
-        "CLOVIS_DB": "/absolute/path/to/ledger.db",
-        "CLOVIS_ALLOWED_ROOTS": "/absolute/finance/path:/absolute/downloads/path"
+        "CLOVIS_DB": "/absolute/path/to/ledger.db"
       }
     }
   }
 }
 ```
-
-On Windows, separate `CLOVIS_ALLOWED_ROOTS` entries with `;` instead of `:`.
 
 ## Package API
 
