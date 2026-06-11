@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.3
+
+Schema v3 statement plan release.
+
+- Add schema v3 statement import plans with immutable `statement_plans` and `statement_plan_rows` audit tables.
+- Add `refresh_statement` for plan/apply/verify/discard statement workflows across CLI/MCP.
+- Make `process_statement` and `apply_reconciliation_plan` apply only the planner's true unmatched rows instead of relying on external-id-only duplicate checks.
+- Make import dry-runs predictive, including would-create entries, duplicates, tags, balance impact, and validation errors.
+- Preserve pending expense categories through per-row counterparts and match rules, using `Pending Expenses` only as the unresolved fallback.
+- Support QFX/OFX previews, CSV footer skipping, month-name dates, explicit `mdy`/`dmy` parsing, and plan-safe expected-balance checks.
 - Make `project_month_end` accept explicit `asset_account_ids` and `liability_account_ids`, and split mixed `account_ids` into the correct cash-projection buckets.
 - Make `list_transactions compact:true` omit full `entries` and `tags` while retaining scan-friendly counts and account/asset IDs.
 - Make missing `goal_progress` return `{ found:false, goal:null }` instead of throwing.

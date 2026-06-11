@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { Ledger } from "../core/ledger.js";
 import type { Account, AccountType, Asset, Journal, JournalLine, TxStatus } from "../core/types.js";
 import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
@@ -40,7 +40,7 @@ export const TOOL_NAMES = [
   "merge_accounts", "merge_branch", "migrate_asset_entries", "move_transactions", "net_worth", "operating_manual", "pending_summary",
   "plan_transaction", "post_journal_entry", "preview_commit", "preview_import", "process_scheduled", "process_statement",
   "project_balances", "project_month_end", "recategorize_by_pattern", "recategorize_by_patterns", "recategorize_transaction",
-  "recognize_gain_loss", "reconcile_diff", "reconcile_statement", "reconcile_statement_plan", "reconcile_to_balance",
+  "recognize_gain_loss", "reconcile_diff", "reconcile_statement", "reconcile_statement_plan", "reconcile_to_balance", "refresh_statement",
   "record_investment", "record_opening_balance", "record_opening_balances", "record_pending_expenses", "reopen_period",
   "repair_integrity", "rollback_import", "rollback_recategorize", "search_transactions", "set_budget", "set_budgets",
   "set_goal", "spending", "spending_rate", "suggest_budgets", "top_descriptions", "tool_registry", "transfer", "trial_balance",
@@ -455,9 +455,57 @@ function parseCsv(text: string): Row[] {
   return rows.map((line, index) => Object.fromEntries(split(line, index + 2).map((value, i) => [headers[i] || `col_${i}`, value.trim()])).valueOf() as Row & { index: number }).map((row, index) => ({ ...row, index }));
 }
 
-function skipCsvPreamble(text: string, rows: number): string {
-  if (rows <= 0) return text;
-  return text.replace(/^\uFEFF/, "").split(/\r?\n/).slice(rows).join("\n");
+function trimCsvWrapperRows(text: string, skipRows: number, skipFooterRows: number): string {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+  while (lines.length > 0 && String(lines.at(-1) ?? "").trim() === "") lines.pop();
+  const start = Math.max(0, skipRows);
+  const end = skipFooterRows > 0 ? Math.max(start, lines.length - skipFooterRows) : lines.length;
+  return lines.slice(start, end).join("\n");
+}
+
+const MONTHS = new Map([
+  ["january", 1], ["jan", 1],
+  ["february", 2], ["feb", 2],
+  ["march", 3], ["mar", 3],
+  ["april", 4], ["apr", 4],
+  ["may", 5],
+  ["june", 6], ["jun", 6],
+  ["july", 7], ["jul", 7],
+  ["august", 8], ["aug", 8],
+  ["september", 9], ["sep", 9], ["sept", 9],
+  ["october", 10], ["oct", 10],
+  ["november", 11], ["nov", 11],
+  ["december", 12], ["dec", 12]
+]);
+
+function normalizedDate(year: number, month: number, day: number): string {
+  return validateDate(`${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+}
+
+function parseImportDate(value: string, format: unknown, rowIndex: number): string {
+  const text = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return validateDate(text);
+  const mode = String(format ?? "auto").toLowerCase();
+  const monthName = /^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/.exec(text);
+  if (monthName) {
+    const month = MONTHS.get(monthName[1].toLowerCase());
+    if (!month) throw new Error(`Invalid date on row ${rowIndex}: ${value}`);
+    return normalizedDate(Number(monthName[3]), month, Number(monthName[2]));
+  }
+  const numeric = /^(\d{1,4})[/-](\d{1,2})[/-](\d{1,4})$/.exec(text);
+  if (!numeric) throw new Error(`Invalid date on row ${rowIndex}: ${value}`);
+  const first = Number(numeric[1]);
+  const second = Number(numeric[2]);
+  const third = Number(numeric[3]);
+  if (numeric[1].length === 4) return normalizedDate(first, second, third);
+  if (numeric[3].length !== 4) throw new Error(`Invalid date on row ${rowIndex}: ${value}`);
+  if (mode === "mdy") return normalizedDate(third, first, second);
+  if (mode === "dmy") return normalizedDate(third, second, first);
+  if (mode === "iso") throw new Error(`date must be YYYY-MM-DD on row ${rowIndex}`);
+  if (mode !== "auto") throw new Error("date_format must be auto, iso, mdy, or dmy");
+  if (first > 12 && second <= 12) return normalizedDate(third, second, first);
+  if (second > 12 && first <= 12) return normalizedDate(third, first, second);
+  throw new Error(`Ambiguous date on row ${rowIndex}: ${value}; pass date_format mdy or dmy`);
 }
 
 function qfxTag(block: string, tag: string): string {
@@ -494,13 +542,15 @@ function parseQfx(text: string): Row[] {
   });
 }
 
-function parseStatementRows(ledger: Ledger, filePath: string, args: Args = {}): Row[] {
+function parseStatementFile(ledger: Ledger, filePath: string, args: Args = {}): { rows: Row[]; file_name: string; file_sha256: string } {
   const file = resolveToolReadPath(ledger.path, filePath, new Set([".csv", ".qfx", ".ofx"]));
   const text = readFileSync(file, "utf8");
   const extension = extname(file).toLowerCase();
   const statementType = String(args.statement_type ?? "").toLowerCase();
-  if (extension === ".qfx" || extension === ".ofx" || statementType === "qfx" || statementType === "ofx") return parseQfx(text);
-  const rows = parseCsv(skipCsvPreamble(text, Number(args.skip_rows ?? 0)));
+  if (extension === ".qfx" || extension === ".ofx" || statementType === "qfx" || statementType === "ofx") {
+    return { rows: parseQfx(text), file_name: basename(file), file_sha256: createHash("sha256").update(text).digest("hex") };
+  }
+  const rows = parseCsv(trimCsvWrapperRows(text, Number(args.skip_rows ?? 0), Number(args.skip_footer_rows ?? 0)));
   const dateCol = args.date_col || "date";
   const amountCol = args.amount_col || "amount";
   const descCol = args.desc_col || "description";
@@ -508,7 +558,7 @@ function parseStatementRows(ledger: Ledger, filePath: string, args: Args = {}): 
   const outflowCol = args.outflow_col;
   const counterpartCol = args.counterpart_col;
   const tagCols = args.tag_cols ?? {};
-  return rows.map((row, index) => {
+  return { rows: rows.map((row, index) => {
     let amount = amountCol in row ? Number(row[amountCol]) : 0;
     if (inflowCol && row[inflowCol] !== "") amount = Number(row[inflowCol]);
     if (outflowCol && row[outflowCol] !== "") amount = -Math.abs(Number(row[outflowCol]));
@@ -516,13 +566,17 @@ function parseStatementRows(ledger: Ledger, filePath: string, args: Args = {}): 
     if (!Number.isFinite(amount)) throw new Error(`Invalid amount on row ${index}`);
     return {
       index,
-      date: validateDate(String(row[dateCol])),
+      date: parseImportDate(String(row[dateCol]), args.date_format, index),
       amount,
       description: String(row[descCol] ?? ""),
       counterpart_ref: counterpartCol ? String(row[counterpartCol] ?? "") : "",
       tags: Object.fromEntries(Object.entries(tagCols).map(([key, col]) => [key, String(row[String(col)] ?? "")]).filter(([, value]) => value !== ""))
     };
-  });
+  }), file_name: basename(file), file_sha256: createHash("sha256").update(text).digest("hex") };
+}
+
+function parseStatementRows(ledger: Ledger, filePath: string, args: Args = {}): Row[] {
+  return parseStatementFile(ledger, filePath, args).rows;
 }
 
 function selectStatementRows(rows: Row[], args: Args = {}): Row[] {
@@ -603,6 +657,371 @@ function importableStatementDelta(ledger: Ledger, accountId: string, assetId: st
     importable.push(row);
   }
   return { rows: importable, delta };
+}
+
+function safeJson(value: unknown): Row {
+  if (value == null || value === "") return {};
+  if (typeof value === "object") return value as Row;
+  try {
+    const parsed = JSON.parse(String(value));
+    return typeof parsed === "object" && parsed != null ? parsed as Row : {};
+  } catch {
+    return {};
+  }
+}
+
+function statementRowHash(row: Row, quantity: bigint): string {
+  return createHash("sha256").update(JSON.stringify({
+    index: row.index ?? row.row_index ?? null,
+    date: row.date,
+    quantity: quantity.toString(),
+    description: String(row.description ?? "").trim(),
+    external_id: row.external_id ?? null
+  })).digest("hex");
+}
+
+function signedRowEntries(ledger: Ledger, accountId: string, counterpartId: string, assetId: string, row: Row, status: string, amountConvention?: unknown): Row {
+  const signed = signedStatementQuantity(ledger, assetId, row, amountConvention);
+  const abs = signed < 0n ? -signed : signed;
+  const fromAccountId = signed >= 0n ? counterpartId : accountId;
+  const toAccountId = signed >= 0n ? accountId : counterpartId;
+  return {
+    id: null,
+    date: row.date,
+    status,
+    description: String(row.description ?? ""),
+    external_id: row.external_id ?? null,
+    amount_cents: abs,
+    quantity: signed,
+    entries: [
+      { account_id: fromAccountId, asset_id: assetId, quantity: -abs, amount_cents: -abs },
+      { account_id: toAccountId, asset_id: assetId, quantity: abs, amount_cents: abs }
+    ],
+    tags: Object.entries(row.tags ?? {}).map(([key, value]) => ({ key, value }))
+  };
+}
+
+function counterpartForRow(ledger: Ledger, row: Row, fallback?: string | null): string | null {
+  if (row.counterpart_ref) return account(ledger, String(row.counterpart_ref));
+  if (row.counterpart_id) return account(ledger, String(row.counterpart_id));
+  const matched = ledger.autoCategorize(String(row.description ?? ""));
+  if (matched) return matched;
+  return fallback ?? null;
+}
+
+function importPreview(ledger: Ledger, accountId: string, counterpartId: string | null, rows: Row[], options: Args = {}): Row {
+  const status = parseTxStatus(options.status ?? "pending") ?? "pending";
+  const assetId = options.asset_id ? explicitAsset(ledger, options.asset_id) : options.currency ? asset(ledger, null, options.currency) : accountAsset(ledger, accountId);
+  const existing = existingImportFingerprints(ledger, accountId, assetId);
+  const transactions: Row[] = [];
+  const duplicates: Row[] = [];
+  const errors: Row[] = [];
+  let balanceImpact = 0n;
+  rows.forEach((row, index) => {
+    try {
+      const rowCounterpart = counterpartForRow(ledger, row, counterpartId);
+      if (!rowCounterpart) throw new Error("counterpart_id is required");
+      const signed = signedStatementQuantity(ledger, assetId, row, options.amount_convention);
+      const fingerprint = importFingerprint(row, signed);
+      if (!options.skip_dedup && existing.has(fingerprint)) {
+        duplicates.push({ index, row_index: row.index ?? index, fingerprint, date: row.date, quantity: signed, description: row.description });
+        return;
+      }
+      existing.add(fingerprint);
+      balanceImpact += signed;
+      transactions.push({
+        ...signedRowEntries(ledger, accountId, rowCounterpart, assetId, row, status, options.amount_convention),
+        row_index: row.index ?? index,
+        counterpart_account_id: rowCounterpart,
+        would_create: true
+      });
+    } catch (error) {
+      errors.push({ index, row_index: row.index ?? index, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return {
+    created: 0,
+    imported: 0,
+    skipped: duplicates.length,
+    would_create: transactions.length,
+    transactions,
+    duplicates,
+    errors,
+    dry_run: true,
+    batch_id: null,
+    batch_label: options.batch_label ?? null,
+    balance_impact_cents: balanceImpact,
+    transfer_stats: { matched: 0, unmatched: 0 }
+  };
+}
+
+function statementCandidates(ledger: Ledger, accountId: string, assetId: string, row: Row, quantity: bigint, tolerance: number): Journal[] {
+  const rows = ledger.listTransactions({ status: null })
+    .filter((tx) => tx.status !== "void" && ["posted", "pending"].includes(tx.status))
+    .filter((tx) => amountForAccount(ledger, tx.id, accountId, assetId) === quantity);
+  if (row.external_id) {
+    const external = rows.filter((tx) => tx.external_id === String(row.external_id));
+    if (external.length > 0) return external;
+  }
+  const dated = rows.filter((tx) => dateDeltaDays(tx.date, String(row.date)) <= tolerance);
+  if (dated.length <= 1) return dated;
+  const description = String(row.description ?? "").trim().toLowerCase();
+  const sameDescription = dated.filter((tx) => tx.description.trim().toLowerCase() === description);
+  return sameDescription.length === 1 ? sameDescription : dated;
+}
+
+function planRow(row: Row, action: string, quantity: bigint, counterpartId: string | null, reason: string, matchedId?: string | null): Row {
+  return {
+    row_index: Number(row.index ?? row.row_index ?? 0),
+    date: row.date,
+    quantity,
+    description: String(row.description ?? ""),
+    external_id: row.external_id ?? null,
+    row_hash: statementRowHash(row, quantity),
+    action,
+    matched_journal_id: matchedId ?? null,
+    counterpart_account_id: counterpartId,
+    reason,
+    metadata: {
+      amount: row.amount ?? null,
+      tags: row.tags ?? {},
+      source_row: row
+    }
+  };
+}
+
+function planRowsByAction(rows: Row[]): Record<string, Row[]> {
+  const grouped: Record<string, Row[]> = {};
+  for (const row of rows) {
+    const action = String(row.action);
+    grouped[action] = [...(grouped[action] ?? []), row];
+  }
+  return grouped;
+}
+
+function publicPlanRows(rows: Row[]): Row[] {
+  return rows.map((row) => {
+    const metadata = safeJson(row.metadata_json ?? row.metadata);
+    const sourceRow = safeJson(metadata.source_row);
+    const quantity = BigInt(row.quantity as string | number | bigint | boolean);
+    return {
+      ...row,
+      metadata,
+      quantity,
+      amount_cents: quantity,
+      amount: sourceRow.amount ?? metadata.amount ?? null
+    };
+  });
+}
+
+function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = {}): Row {
+  const publicRows = publicPlanRows(rows);
+  const grouped = planRowsByAction(publicRows);
+  const summary = Object.fromEntries(["matched", "pending_to_commit", "new_posted", "new_pending", "stale_pending_to_void", "ambiguous", "ignored"].map((action) => [action, grouped[action]?.length ?? 0]));
+  return {
+    plan_id: plan?.id ?? null,
+    status: plan?.status ?? "preview",
+    account_id: plan?.account_id ?? extra.account_id,
+    asset_id: plan?.asset_id ?? extra.asset_id,
+    expected_balance_cents: plan?.expected_balance ?? extra.expected_balance_cents ?? null,
+    planned_balance_cents: plan?.planned_balance ?? extra.planned_balance_cents ?? null,
+    applied_balance_cents: plan?.applied_balance ?? null,
+    balance_matches: extra.balance_matches ?? null,
+    rows: publicRows.slice(0, extra.sample_limit ?? 20),
+    total_rows: publicRows.length,
+    actions: summary,
+    matched: summary.matched,
+    unmatched: summary.new_posted + summary.new_pending + summary.pending_to_commit + summary.stale_pending_to_void + summary.ambiguous,
+    reconciled: summary.new_posted + summary.new_pending + summary.pending_to_commit + summary.stale_pending_to_void + summary.ambiguous === 0,
+    matched_rows: grouped.matched ?? [],
+    pending_to_commit: grouped.pending_to_commit ?? [],
+    stale_pending_to_void: grouped.stale_pending_to_void ?? [],
+    new_posted: grouped.new_posted ?? [],
+    new_pending: grouped.new_pending ?? [],
+    ambiguous: grouped.ambiguous ?? [],
+    ignored: grouped.ignored ?? [],
+    warnings: summary.ambiguous > 0 ? ["ambiguous rows require manual review"] : [],
+    dry_run: extra.dry_run ?? true,
+    ...extra
+  };
+}
+
+function buildStatementPlan(ledger: Ledger, args: Args, options: { persist?: boolean; targetStatus?: TxStatus | string; rows?: Row[]; file?: Row } = {}): Row {
+  const statementFile = options.file ?? (args.file_path ? parseStatementFile(ledger, args.file_path, args) : { rows: args.transactions ?? [], file_name: "", file_sha256: "" });
+  const selectedRows = selectStatementRows(options.rows ?? statementFile.rows, args);
+  const accountId = account(ledger, args.account_id);
+  const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : accountAsset(ledger, accountId);
+  const targetStatus = parseTxStatus(String(options.targetStatus ?? args.status ?? "posted")) ?? "posted";
+  const counterpartId = args.counterpart_account_id || args.counterpart_id ? account(ledger, args.counterpart_account_id ?? args.counterpart_id) : null;
+  const tolerance = Number(args.date_tolerance_days ?? 3);
+  const planRows: Row[] = [];
+  let plannedDelta = 0n;
+
+  for (const row of selectedRows) {
+    const quantity = signedStatementQuantity(ledger, assetId, row, args.amount_convention);
+    const rowCounterpart = counterpartForRow(ledger, row, counterpartId);
+    const candidates = statementCandidates(ledger, accountId, assetId, row, quantity, tolerance);
+    if (candidates.length === 1) {
+      const matched = candidates[0];
+      if (matched.status === "pending" && targetStatus === "posted") {
+        planRows.push(planRow(row, "pending_to_commit", quantity, rowCounterpart, "matched pending transaction", matched.id));
+        plannedDelta += quantity;
+      } else {
+        planRows.push(planRow(row, "matched", quantity, rowCounterpart, "matched existing transaction", matched.id));
+      }
+    } else if (candidates.length > 1) {
+      planRows.push(planRow(row, "ambiguous", quantity, rowCounterpart, "multiple matching transactions", null));
+    } else if (!rowCounterpart) {
+      planRows.push(planRow(row, "ambiguous", quantity, null, "counterpart account could not be resolved", null));
+    } else if (targetStatus === "pending") {
+      planRows.push(planRow(row, "new_pending", quantity, rowCounterpart, "new pending transaction", null));
+      plannedDelta += quantity;
+    } else {
+      planRows.push(planRow(row, "new_posted", quantity, rowCounterpart, "new posted transaction", null));
+      plannedDelta += quantity;
+    }
+  }
+
+  const usedPending = new Set(planRows.filter((row) => row.action === "pending_to_commit").map((row) => String(row.matched_journal_id)));
+  const syntheticStart = selectedRows.reduce((max, row) => Math.max(max, Number(row.index ?? 0)), -1) + 1;
+  for (const [offset, row] of ((args.pending_transactions ?? []) as Row[]).entries()) {
+    const pendingRow = { ...row, index: syntheticStart + offset, date: parseImportDate(String(row.date), args.date_format, syntheticStart + offset) };
+    const quantity = signedStatementQuantity(ledger, assetId, pendingRow, "unsigned_charges");
+    const pendingFallback = args.counterpart_id || args.counterpart_account_id
+      ? account(ledger, args.counterpart_id ?? args.counterpart_account_id)
+      : ledger.findAccount("Pending Expenses")?.id ?? null;
+    const rowCounterpart = counterpartForRow(ledger, pendingRow, pendingFallback);
+    planRows.push(planRow(pendingRow, rowCounterpart ? "new_pending" : "ambiguous", quantity, rowCounterpart, rowCounterpart ? "new pending transaction" : "counterpart account could not be resolved", null));
+    if (targetStatus === "pending" && rowCounterpart) plannedDelta += quantity;
+  }
+
+  if (args.void_stale_pending === true) {
+    const dateValues = selectedRows.map((row) => String(row.date)).sort();
+    const dateFrom = args.date_from ?? dateValues[0] ?? null;
+    const dateTo = args.date_to ?? dateValues.at(-1) ?? null;
+    let staleIndex = syntheticStart + ((args.pending_transactions ?? []) as Row[]).length;
+    for (const tx of ledger.listTransactions({ status: "pending", dateFrom, dateTo })) {
+      if (usedPending.has(tx.id)) continue;
+      const quantity = amountForAccount(ledger, tx.id, accountId, assetId);
+      if (quantity === 0n) continue;
+      planRows.push(planRow({ index: staleIndex++, date: tx.date, description: tx.description, external_id: tx.external_id }, "stale_pending_to_void", quantity, null, "pending transaction not present in refreshed statement", tx.id));
+    }
+  }
+
+  const baseStatus = targetStatus === "pending" ? "pending" : "posted";
+  const plannedBalance = ledger.balanceTree(accountId, assetId, null, baseStatus) + plannedDelta;
+  const expected = args.expected_balance == null ? null : amountToQuantity(ledger, assetId, args.expected_balance);
+  const balanceMatches = expected == null ? null : expected === plannedBalance;
+  if (expected != null && !balanceMatches && args.require_balance_match !== false) throw new Error(`expected_balance mismatch: expected ${expected}, actual ${plannedBalance}`);
+  const metadata = {
+    target_status: targetStatus,
+    amount_convention: args.amount_convention ?? "signed",
+    date_tolerance_days: tolerance,
+    void_stale_pending: args.void_stale_pending === true,
+    statement_type: args.statement_type ?? null
+  };
+  const persisted = options.persist ? ledger.createStatementPlan({
+    account_id: accountId,
+    asset_id: assetId,
+    statement_kind: args.statement_type ?? "statement",
+    file_name: statementFile.file_name,
+    file_sha256: statementFile.file_sha256,
+    expected_balance: expected,
+    planned_balance: plannedBalance,
+    metadata
+  }, planRows) : null;
+  const persistedRows = persisted ? ledger.listStatementPlanRows(String(persisted.id)) : planRows;
+  return statementPlanOutput(persisted, persistedRows, { account_id: accountId, asset_id: assetId, expected_balance_cents: expected, planned_balance_cents: plannedBalance, balance_matches: balanceMatches, sample_limit: args.sample_limit ?? args.preview_rows ?? 20, dry_run: !options.persist, metadata });
+}
+
+function applyStatementPlan(ledger: Ledger, planId: string, args: Args = {}): Row {
+  const plan = ledger.getStatementPlan(planId);
+  if (!plan) throw new Error(`Statement plan '${planId}' not found`);
+  if (String(plan.status) !== "planned") throw new Error(`Statement plan '${planId}' is ${String(plan.status)}`);
+  const rows = publicPlanRows(ledger.listStatementPlanRows(planId));
+  if (rows.some((row) => row.action === "ambiguous")) throw new Error("Statement plan has ambiguous rows; resolve them before applying");
+  const accountId = String(plan.account_id);
+  const assetId = String(plan.asset_id);
+  const metadata = safeJson(plan.metadata_json);
+  const targetStatus = String(metadata.target_status ?? "posted");
+  const effectiveRows = rows.filter((row) => ["pending_to_commit", "new_posted", "new_pending", "stale_pending_to_void"].includes(String(row.action)));
+  if (args.dry_run !== false) {
+    return statementPlanOutput(plan, rows, { dry_run: true, would_apply: effectiveRows.length, sample_limit: args.sample_limit ?? 20 });
+  }
+  let created = 0;
+  let committed = 0;
+  let voided = 0;
+  const createdTransactions: Row[] = [];
+  const sourceId = ledger.runInTransaction(() => {
+    const batchId = batch(ledger, args.batch_label ?? `Statement plan ${planId}`, { statement_plan_id: planId, statement_type: plan.statement_kind }, targetStatus === "posted" ? "posted_import" : "pending_import");
+    for (const row of rows) {
+      if (row.action === "matched" || row.action === "ignored") continue;
+      if (row.action === "pending_to_commit") {
+        const tx = ledger.getTx(String(row.matched_journal_id));
+        if (!tx || tx.status !== "pending") throw new Error(`Matched pending transaction '${String(row.matched_journal_id)}' changed before apply`);
+        if (amountForAccount(ledger, tx.id, accountId, assetId) !== BigInt(row.quantity)) throw new Error(`Matched pending transaction '${tx.id}' amount changed before apply`);
+        ledger.updateTxStatus(tx.id, "posted");
+        ledger.updateTransactionSource(tx.id, batchId);
+        tagTx(ledger, tx.id, "statement_plan", planId);
+        committed += 1;
+      } else if (row.action === "stale_pending_to_void") {
+        const tx = ledger.getTx(String(row.matched_journal_id));
+        if (!tx || tx.status !== "pending") throw new Error(`Stale pending transaction '${String(row.matched_journal_id)}' changed before apply`);
+        ledger.voidTx(tx.id);
+        tagTx(ledger, tx.id, "statement_plan", planId);
+        voided += 1;
+      } else if (row.action === "new_posted" || row.action === "new_pending") {
+        const counterpartId = row.counterpart_account_id ? String(row.counterpart_account_id) : null;
+        if (!counterpartId) throw new Error(`Plan row ${String(row.id)} has no counterpart account`);
+        const status = row.action === "new_posted" ? "posted" : "pending";
+        const quantity = BigInt(row.quantity);
+        const tx = quantity >= 0n
+          ? ledger.recordTransaction(String(row.date), quantity, counterpartId, accountId, assetId, String(row.description ?? ""), status, { sourceId: batchId, externalId: row.external_id ? String(row.external_id) : null })
+          : ledger.recordTransaction(String(row.date), -quantity, accountId, counterpartId, assetId, String(row.description ?? ""), status, { sourceId: batchId, externalId: row.external_id ? String(row.external_id) : null });
+        ledger.setStatementPlanRowCreatedJournal(String(row.id), tx.id);
+        tagTx(ledger, tx.id, "import_batch", batchId);
+        tagTx(ledger, tx.id, "statement_plan", planId);
+        for (const [key, value] of Object.entries(safeJson(row.metadata).tags ?? {})) tagTx(ledger, tx.id, key, String(value));
+        createdTransactions.push(txPublic(ledger, ledger.getTx(tx.id)!));
+        created += 1;
+      }
+    }
+    ledger.markStatementPlanApplied(planId, batchId, ledger.balanceTree(accountId, assetId, null, targetStatus === "pending" ? "pending" : "posted"));
+    return batchId;
+  });
+  const appliedPlan = ledger.getStatementPlan(planId)!;
+  const appliedRows = ledger.listStatementPlanRows(planId);
+  return {
+    ...statementPlanOutput(appliedPlan, appliedRows, { dry_run: false }),
+    batch_id: sourceId,
+    created,
+    committed,
+    voided,
+    skipped: appliedRows.filter((row) => row.action === "matched").length,
+    imported: created,
+    transactions: createdTransactions,
+    balance_matches: appliedPlan.expected_balance == null ? null : BigInt(appliedPlan.expected_balance as string | number | bigint | boolean) === BigInt(appliedPlan.applied_balance as string | number | bigint | boolean),
+    actual_balance_cents: appliedPlan.applied_balance
+  };
+}
+
+function verifyStatementPlan(ledger: Ledger, planId: string): Row {
+  const plan = ledger.getStatementPlan(planId);
+  if (!plan) throw new Error(`Statement plan '${planId}' not found`);
+  const rows = publicPlanRows(ledger.listStatementPlanRows(planId));
+  const mismatches: Row[] = [];
+  for (const row of rows) {
+    const txId = row.created_journal_id ?? row.matched_journal_id;
+    if (!txId || ["new_posted", "new_pending", "pending_to_commit", "stale_pending_to_void", "matched"].includes(String(row.action)) === false) continue;
+    const tx = ledger.getTx(String(txId));
+    if (!tx) mismatches.push({ row_id: row.id, tx_id: txId, error: "transaction missing" });
+    else if (row.action === "stale_pending_to_void" && tx.status !== "void") mismatches.push({ row_id: row.id, tx_id: txId, error: `expected void, got ${tx.status}` });
+    else if (row.action === "pending_to_commit" && tx.status !== "posted") mismatches.push({ row_id: row.id, tx_id: txId, error: `expected posted, got ${tx.status}` });
+    else if (row.action === "new_posted" && tx.status !== "posted") mismatches.push({ row_id: row.id, tx_id: txId, error: `expected posted, got ${tx.status}` });
+    else if (row.action === "new_pending" && tx.status !== "pending") mismatches.push({ row_id: row.id, tx_id: txId, error: `expected pending, got ${tx.status}` });
+    else if (row.action !== "stale_pending_to_void" && amountForAccount(ledger, tx.id, String(plan.account_id), String(plan.asset_id)) !== BigInt(row.quantity)) mismatches.push({ row_id: row.id, tx_id: txId, error: "quantity changed" });
+  }
+  return { ...statementPlanOutput(plan, rows, { dry_run: false }), verified: mismatches.length === 0, mismatches };
 }
 
 function transactionMagnitude(ledger: Ledger, txId: string, accountId?: string | null): bigint {
@@ -746,8 +1165,8 @@ function ageOfMoney(ledger: Ledger, args: Args): Row {
   };
 }
 
-function batch(ledger: Ledger, label?: string | null, metadata: Row = {}): string {
-  return ledger.createSource("import", label, metadata);
+function batch(ledger: Ledger, label?: string | null, metadata: Row = {}, status = "open"): string {
+  return ledger.createSource("import", label, metadata, status);
 }
 
 function txIdsForBatch(ledger: Ledger, batchId: string): string[] {
@@ -1366,9 +1785,11 @@ const handlers: Record<ToolName, Handler> = {
 
   import_transactions: (ledger, args) => {
     if (args.date_tolerance_days != null && args.date_tolerance_days !== 1) unsupportedArguments({ date_tolerance_days: args.date_tolerance_days });
-    if (args.dry_run) return { created: 0, transactions: [], errors: [], dry_run: true, batch_id: null, imported: 0, skipped: 0, transfer_stats: { matched: 0, unmatched: 0 } };
+    if (args.dry_run) return importPreview(ledger, account(ledger, args.account_id), account(ledger, args.counterpart_id), args.transactions ?? [], args);
     const result = importTransactionRows(ledger, account(ledger, args.account_id), account(ledger, args.counterpart_id), args.transactions ?? [], { ...args, source_id: null });
-    const batchId = result.created > 0 ? batch(ledger, args.batch_label, { statement_type: args.statement_type }) : null;
+    const status = parseTxStatus(args.status ?? "pending") ?? "pending";
+    const batchStatus = status === "posted" ? "posted_import" : status === "pending" ? "pending_import" : `${status}_import`;
+    const batchId = result.created > 0 ? batch(ledger, args.batch_label, { statement_type: args.statement_type }, batchStatus) : null;
     for (const tx of result.transactions) {
       if (batchId) {
         ledger.updateTransactionSource(String(tx.id), batchId);
@@ -1377,7 +1798,8 @@ const handlers: Record<ToolName, Handler> = {
       }
       for (const [key, value] of Object.entries(args.tags ?? {})) tagTx(ledger, String(tx.id), key, String(value));
     }
-    return { ...result, batch_id: batchId, imported: result.created, skipped: result.skipped, transfer_stats: { matched: 0, unmatched: 0 } };
+    const transactions = result.transactions.map((tx) => txPublic(ledger, ledger.getTx(String(tx.id))!));
+    return { ...result, transactions, batch_id: batchId, imported: result.created, skipped: result.skipped, transfer_stats: { matched: 0, unmatched: 0 } };
   },
   import_file: (ledger, args) => {
     const rows = parseStatementRows(ledger, args.file_path, args);
@@ -1388,20 +1810,16 @@ const handlers: Record<ToolName, Handler> = {
     return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true };
   },
   process_statement: (ledger, args) => {
-    if (args.date_tolerance_days != null && args.date_tolerance_days !== 1) unsupportedArguments({ date_tolerance_days: args.date_tolerance_days });
     unsupportedArguments({ transfer_account_id: args.transfer_account_id });
-    const rows = parseStatementRows(ledger, args.file_path, args);
-    const accountId = account(ledger, args.account_id);
-    const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : accountAsset(ledger, accountId);
-    const importable = importableStatementDelta(ledger, accountId, assetId, rows, args);
-    const actualBalance = ledger.balanceTree(accountId, assetId, null, "posted") + importable.delta;
-    const expected = args.expected_balance == null ? null : amountToQuantity(ledger, assetId, args.expected_balance);
-    if (expected != null && actualBalance !== expected) {
-      throw new Error(`expected_balance mismatch: expected ${expected}, actual ${actualBalance}`);
-    }
-    const preview = { rows: rows.slice(0, args.preview_rows ?? 10), transactions: rows.slice(0, args.preview_rows ?? 10), total_rows: rows.length, would_import: importable.rows.length, skipped_duplicates: rows.length - importable.rows.length, warnings: [], dry_run: !args.commit };
-    const imported = args.commit ? handlers.import_file(ledger, { ...args, status: "posted" }) as Row : { created: 0, transactions: [] };
-    return { ...preview, ...imported, balance_matches: expected == null ? null : true, actual_balance_cents: actualBalance, expected_balance_cents: expected };
+    const plan = buildStatementPlan(ledger, { ...args, status: "posted" }, { persist: Boolean(args.commit), targetStatus: "posted" });
+    const preview = {
+      ...plan,
+      transactions: [...(plan.new_posted ?? []), ...(plan.pending_to_commit ?? [])].slice(0, args.preview_rows ?? 10),
+      would_import: (plan.actions?.new_posted ?? 0) + (plan.actions?.pending_to_commit ?? 0),
+      skipped_duplicates: plan.actions?.matched ?? 0,
+      dry_run: !args.commit
+    };
+    return args.commit ? { ...preview, ...applyStatementPlan(ledger, String(plan.plan_id), { dry_run: false, batch_label: args.batch_label }) } : { ...preview, created: 0 };
   },
   list_import_batches: (ledger, args) => {
     const rows = new Map<string, Row>();
@@ -1632,11 +2050,30 @@ const handlers: Record<ToolName, Handler> = {
   },
   operating_manual: (_ledger, args) => operatingManual(args.topic),
   record_pending_expenses: (ledger, args) => {
-    const pendingBucket = args.dry_run === false ? ledger.getOrCreateAccount("Pending Expenses", "expense") : "Pending Expenses";
+    const accountId = account(ledger, args.account_id);
+    const explicitFallback = args.counterpart_id ? account(ledger, args.counterpart_id) : null;
+    const rows = (args.transactions ?? []).map((row: Row) => {
+      const matched = counterpartForRow(ledger, row, explicitFallback);
+      return matched ? { ...row, counterpart_id: matched } : row;
+    });
+    const hasUnresolved = rows.some((row: Row) => !row.counterpart_id);
+    if (args.dry_run !== false) {
+      const previewFallback = hasUnresolved ? ledger.findAccount("Pending Expenses")?.id ?? "__pending_expenses__" : explicitFallback ?? null;
+      const previewRows = hasUnresolved ? rows.map((row: Row) => row.counterpart_id ? row : { ...row, counterpart_id: previewFallback }) : rows;
+      const preview = importPreview(ledger, accountId, previewFallback, previewRows, { ...args, status: "pending", amount_convention: "unsigned_charges" });
+      const usesSyntheticFallback = (preview.transactions as Row[]).some((tx) => (tx.entries as Row[]).some((entry) => entry.account_id === "__pending_expenses__"));
+      return {
+        ...preview,
+        would_create_account: usesSyntheticFallback ? "Pending Expenses" : null
+      };
+    }
+    const fallback = hasUnresolved ? ledger.getOrCreateAccount("Pending Expenses", "expense") : explicitFallback ?? String(rows.find((row: Row) => row.counterpart_id)?.counterpart_id ?? "");
+    if (!fallback && rows.length === 0) return { created: 0, transactions: [], errors: [], skipped: 0, dry_run: false, batch_id: null, imported: 0, transfer_stats: { matched: 0, unmatched: 0 } };
+    const importRows = rows.map((row: Row) => row.counterpart_id ? row : { ...row, counterpart_id: fallback });
     return handlers.import_transactions(ledger, {
       account_id: args.account_id,
-      counterpart_id: pendingBucket,
-      transactions: args.transactions ?? [],
+      counterpart_id: fallback,
+      transactions: importRows,
       status: "pending",
       dry_run: args.dry_run !== false,
       batch_label: args.batch_label,
@@ -1778,52 +2215,21 @@ const handlers: Record<ToolName, Handler> = {
     return { matched: (args.transactions ?? []).length - unmatched.length, unmatched: unmatched.length, unmatched_rows: unmatched, reconciled: unmatched.length === 0 };
   },
   reconcile_statement_plan: (ledger, args) => {
-    const rows = parseStatementRows(ledger, args.file_path, args);
-    return { ...(handlers.reconcile_statement(ledger, {
-      account_id: args.account_id,
-      counterpart_id: args.counterpart_account_id ?? args.account_id,
-      transactions: rows,
-      amount_convention: args.amount_convention,
-      statement_type: args.statement_type,
-      date_tolerance_days: args.date_tolerance_days,
-      asset_id: args.asset_id,
-      currency: args.currency
-    }) as Row), rows: rows.slice(0, args.sample_limit ?? 20) };
+    return buildStatementPlan(ledger, { ...args, status: "posted" }, { persist: false, targetStatus: "posted" });
   },
   apply_reconciliation_plan: (ledger, args) => {
-    const rows = selectStatementRows(parseStatementRows(ledger, args.file_path, args), args);
-    const plan = handlers.reconcile_statement(ledger, {
-      account_id: args.account_id,
-      counterpart_id: args.counterpart_account_id ?? args.account_id,
-      transactions: rows,
-      amount_convention: args.amount_convention,
-      statement_type: args.statement_type,
-      date_tolerance_days: args.date_tolerance_days,
-      asset_id: args.asset_id,
-      currency: args.currency
-    }) as Row;
-    if (args.dry_run !== false) return { ...plan, rows: rows.slice(0, args.sample_limit ?? 20), dry_run: true };
-
-    const accountId = account(ledger, args.account_id);
-    const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : accountAsset(ledger, accountId);
-    const importable = importableStatementDelta(ledger, accountId, assetId, rows, args);
-    const actualBalance = ledger.balanceTree(accountId, assetId, null, "posted") + importable.delta;
-    const expected = args.expected_balance == null ? null : amountToQuantity(ledger, assetId, args.expected_balance);
-    const balanceMatches = expected == null ? null : actualBalance === expected;
-    if (expected != null && balanceMatches === false && args.require_balance_match !== false) {
-      throw new Error(`expected_balance mismatch: expected ${expected}, actual ${actualBalance}`);
-    }
-    const imported = handlers.import_transactions(ledger, {
-      account_id: args.account_id,
-      counterpart_id: args.counterpart_account_id,
-      transactions: rows,
-      status: args.status ?? "pending",
-      currency: args.currency,
-      asset_id: args.asset_id,
-      amount_convention: args.amount_convention ?? "signed",
-      statement_type: args.statement_type
-    }) as Row;
-    return { ...plan, ...imported, balance_matches: balanceMatches, actual_balance_cents: actualBalance, expected_balance_cents: expected };
+    const targetStatus = args.status ?? "pending";
+    if (args.plan_id) return applyStatementPlan(ledger, args.plan_id, args);
+    const plan = buildStatementPlan(ledger, { ...args, status: targetStatus }, { persist: args.dry_run === false, targetStatus });
+    return args.dry_run === false ? applyStatementPlan(ledger, String(plan.plan_id), args) : plan;
+  },
+  refresh_statement: (ledger, args) => {
+    const action = String(args.action ?? "plan");
+    if (action === "plan") return buildStatementPlan(ledger, { ...args, status: args.status ?? "posted" }, { persist: true, targetStatus: args.status ?? "posted" });
+    if (action === "apply") return applyStatementPlan(ledger, args.plan_id, args);
+    if (action === "verify") return verifyStatementPlan(ledger, args.plan_id);
+    if (action === "discard") return ledger.discardStatementPlan(args.plan_id);
+    throw new Error("action must be plan, apply, verify, or discard");
   },
   reconcile_diff: (ledger, args) => {
     unsupportedArguments({ branch: args.branch });
@@ -1933,10 +2339,9 @@ const handlers: Record<ToolName, Handler> = {
   },
 
   backup_now: (ledger, args) => {
-    unsupportedArguments({ compact: args.compact });
     const target = args.output_path ? resolveToolWritePath(ledger.path, args.output_path, new Set([".db", ".sqlite", ".sqlite3"])) : null;
     const result = ledger.backupNow(target);
-    return { ...result, path: redactToolPath(ledger.path, result.path) };
+    return { ...result, path: redactToolPath(ledger.path, result.path), compact: args.compact !== false };
   },
   backup_status: (ledger) => {
     const backups = handlers.list_backups(ledger, {}) as Row[];

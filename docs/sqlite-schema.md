@@ -22,11 +22,11 @@ Current database format:
 
 ```ts
 export const DEFAULT_BOOK_ID = "book_default";
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 ```
 
-Fresh databases are created directly at schema version 2. Opening a ledger also
-migrates schema version 1 files to version 2, records the migration in
+Fresh databases are created directly at schema version 3. Opening a ledger also
+migrates older v1/v2 files forward, records each migration in
 `migration_history`, and creates the default `Actual` book if it is missing.
 
 ## Start Here
@@ -109,7 +109,11 @@ books
   |-- targets ------- accounts + assets
   |-- recurrences --- accounts + assets
   |-- period_closes
-  `-- lots ---------- accounts + assets + journals
+  |-- lots ---------- accounts + assets + journals
+  `-- statement_plans ---- statement_plan_rows
+          |                    |
+          |                    `-- journals + accounts
+          `-- sources
 
 annotations can point at many entity types
 rules point at accounts
@@ -128,12 +132,17 @@ erDiagram
   BOOKS ||--o{ PERIOD_CLOSES : owns
   BOOKS ||--o{ LOTS : owns
   BOOKS ||--o{ PRICES : owns
+  BOOKS ||--o{ STATEMENT_PLANS : owns
 
   ACCOUNTS ||--o{ ACCOUNTS : parent_of
   ACCOUNTS ||--o{ JOURNAL_LINES : receives
+  ACCOUNTS ||--o{ STATEMENT_PLANS : statement_account
+  ACCOUNTS ||--o{ STATEMENT_PLAN_ROWS : counterpart
   JOURNALS ||--o{ JOURNAL_LINES : contains
   SOURCES ||--o{ JOURNALS : produced
+  SOURCES ||--o{ STATEMENT_PLANS : applied_as
   ASSETS ||--o{ JOURNAL_LINES : denominates
+  ASSETS ||--o{ STATEMENT_PLANS : denominates
   ASSETS ||--o{ PRICES : priced_asset
   ASSETS ||--o{ PRICES : quote_asset
   ACCOUNTS ||--o{ TARGETS : planned_for
@@ -144,16 +153,18 @@ erDiagram
   ACCOUNTS ||--o{ LOTS : holds
   ASSETS ||--o{ LOTS : held_asset
   JOURNALS ||--o{ LOTS : opened_or_closed_by
+  STATEMENT_PLANS ||--o{ STATEMENT_PLAN_ROWS : has_rows
+  JOURNALS ||--o{ STATEMENT_PLAN_ROWS : matched_or_created
   ACCOUNTS ||--o{ RULES : categorizes_to
 ```
 
-The schema has fifteen application tables:
+The schema has seventeen application tables:
 
 | Family | Tables | Job |
 | --- | --- | --- |
 | Identity | `meta`, `migration_history`, `books` | Say what database this is, how it was upgraded, and which book rows belong to. |
 | Accounting core | `assets`, `accounts`, `journals`, `journal_lines` | Store durable accounting facts. |
-| Workflow memory | `sources`, `annotations`, `rules` | Remember imports, tags, and categorization rules. |
+| Workflow memory | `sources`, `statement_plans`, `statement_plan_rows`, `annotations`, `rules` | Remember imports, reconciliation plans, tags, and categorization rules. |
 | Planning and control | `targets`, `recurrences`, `period_closes` | Store budgets, goals, schedules, and closed periods. |
 | Valuation and investments | `prices`, `lots` | Convert assets and track investment cost basis. |
 
@@ -235,7 +246,7 @@ Current important row:
 
 ```text
 key = schema_version
-value = 2
+value = 3
 ```
 
 Columns:
@@ -248,7 +259,7 @@ Columns:
 Why it exists:
 
 The code can open a database and ask, "What format is this file?" Right now the
-answer is schema version 2.
+answer is schema version 3.
 
 ## `migration_history`
 
@@ -307,6 +318,7 @@ Connects to:
 - `recurrences`
 - `period_closes`
 - `lots`
+- `statement_plans`
 
 Why it exists:
 
@@ -577,6 +589,125 @@ Why it exists:
 
 Imports are workflows, not just transactions. You may want to commit, roll back,
 or inspect an import batch. `sources` gives that workflow a durable identity.
+
+## `statement_plans`
+
+Think of a statement plan as a locked worksheet.
+
+The bank statement says, "Here are the rows I believe happened." The ledger
+says, "Here are the rows I already know." A statement plan stores the comparison
+before Clovis writes anything new.
+
+Example:
+
+```text
+id = stmtplan_abc
+account_id = Visa
+status = planned
+expected_balance = -125000
+planned_balance = -125000
+file_sha256 = ...
+```
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Statement plan ID. |
+| `book_id` | Owning book. |
+| `account_id` | Statement account being reconciled. |
+| `asset_id` | Currency/unit for the plan. |
+| `source_id` | Import batch/source created when the plan is applied. |
+| `status` | `planned`, `applied`, or `discarded`. |
+| `statement_kind` | File/workflow kind, such as bank, card, QFX, or CSV. |
+| `file_name` | Source filename, not the full local path. |
+| `file_sha256` | Hash of the source file content. |
+| `expected_balance` | Optional outside balance supplied by the statement. |
+| `planned_balance` | Ledger balance after applying the plan. |
+| `applied_balance` | Actual balance recorded after apply. |
+| `created_at` | Plan creation timestamp. |
+| `applied_at` | Apply timestamp, null until applied. |
+| `discarded_at` | Discard timestamp, null unless discarded. |
+| `metadata_json` | JSON options used to build the plan. |
+
+Connects to:
+
+- `accounts`
+- `assets`
+- `sources`
+- `statement_plan_rows`
+
+Why it exists:
+
+Imports should be plan-first. A durable plan lets Clovis show exact matches,
+pending rows that will become posted, stale pending rows that will be voided,
+true new rows, ambiguous rows, expected balance math, and the later verification
+handle.
+
+Important detail:
+
+Statement plans are audit records. SQLite triggers block deletes and block
+semantic edits after creation. A plan can move from `planned` to `applied` or
+`discarded`, but not back.
+
+## `statement_plan_rows`
+
+Think of statement plan rows as the individual marks on the worksheet.
+
+Each row answers one question:
+
+```text
+What should Clovis do with this statement line?
+```
+
+Common answers:
+
+| Action | Meaning |
+| --- | --- |
+| `matched` | A posted ledger transaction already explains the statement row. |
+| `pending_to_commit` | A pending ledger transaction matches and should become posted. |
+| `new_posted` | The statement row is new and should be posted. |
+| `new_pending` | A fresh pending row should be recorded for later review. |
+| `stale_pending_to_void` | A pending row is no longer on the refreshed statement. |
+| `ambiguous` | Clovis found no safe automatic answer. |
+| `ignored` | The row is intentionally not applied. |
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `id` | Plan row ID. |
+| `book_id` | Owning book. |
+| `plan_id` | Parent statement plan. |
+| `row_index` | Source-row order inside the plan. |
+| `date` | Statement row date. |
+| `quantity` | Signed atomic quantity from the statement account's view. |
+| `description` | Statement row description. |
+| `external_id` | Stable statement ID such as QFX/OFX `FITID`, if present. |
+| `row_hash` | Hash of the normalized source row. |
+| `action` | Planned action. |
+| `matched_journal_id` | Existing journal used by `matched`, `pending_to_commit`, or stale-pending actions. |
+| `created_journal_id` | Journal created when the row is applied. |
+| `counterpart_account_id` | Other side of a new transaction, if needed. |
+| `reason` | Human-readable reason for the action. |
+| `metadata_json` | Source amount, tags, and parser context. |
+
+Connects to:
+
+- `statement_plans`
+- `journals`
+- `accounts`
+
+Why it exists:
+
+Without this table, a dry run is just a promise. With this table, the dry run
+becomes durable: the exact rows reviewed are the exact rows applied.
+
+Important detail:
+
+`row_hash` is indexed but not unique. Real bank statements can contain two
+identical same-day charges. Clovis uses `(plan_id, row_index)` for one-row-one-
+decision identity instead of pretending identical charges cannot happen.
 
 ## `prices`
 
@@ -890,9 +1021,9 @@ When code opens a ledger:
 3. Open SQLite with `readBigInts: true`.
 4. Enable foreign keys.
 5. Detect the current schema version.
-6. If the file is v1, migrate it to v2.
+6. If the file is older than v3, run each needed migration in order.
 7. Execute the schema DDL.
-8. Insert `schema_version = 2` if missing.
+8. Insert `schema_version = 3` if missing.
 9. Insert the default `Actual` book if missing.
 
 That means opening a new file creates a usable empty ledger. Opening an existing
@@ -929,26 +1060,40 @@ then finalize.
 
 Imports do not create a separate kind of transaction.
 
-They create normal `journals` and `journal_lines`, then add source metadata.
+When rows are actually written, they become normal `journals` and
+`journal_lines`, then receive source metadata. Before that write, statement
+workflows should create a plan.
+
 When a bank offers QFX or OFX, prefer that over CSV because those files usually
 carry a bank-provided transaction id such as `FITID`. Clovis keeps that id on
 the imported transaction metadata. CSV is still supported and is the practical
 fallback when QFX/OFX is unavailable, incomplete, or malformed.
 
-Import flow:
+Plan-first import flow:
 
 1. Parse QFX, OFX, or CSV statement rows.
-2. Resolve the statement account, counterpart account, and asset.
+2. Resolve the statement account, counterpart accounts, and asset.
 3. Turn each amount into a signed quantity from the statement account's point of
    view.
-4. Skip duplicates unless disabled.
-5. Write normal balanced transactions.
-6. Create a `sources` batch.
-7. Attach the batch through `journals.source_id` and `annotations`.
+4. Compare each row with posted and pending ledger history.
+5. Store a `statement_plans` row and one `statement_plan_rows` decision per
+   source row.
+6. Refuse to apply while any row is ambiguous.
+7. Apply the exact reviewed plan: commit matched pending rows, void stale
+   pending rows, and write only true new rows.
+8. Create a `sources` batch and link created/committed transactions.
+9. Verify the plan against the final ledger state.
+
+Direct imports still create normal transactions, but the safest statement
+workflow is:
+
+```text
+preview -> plan_id -> apply(plan_id) -> verify(plan_id)
+```
 
 This is why imported transactions can later be committed, voided,
 recategorized, exported, or reported exactly like manually entered
-transactions.
+transactions, while the statement plan still explains why they were created.
 
 ## Reading Balances
 
@@ -1034,13 +1179,13 @@ That is safe, but it is not always convenient. Bank downloads, exports, and
 agent workspaces often live somewhere else. For that, start Clovis with:
 
 ```sh
-CLOVIS_ALLOWED_ROOT=/Users/you/Desktop/CFO
+CLOVIS_ALLOWED_ROOT="$HOME/Desktop/CFO"
 ```
 
 or multiple roots:
 
 ```sh
-CLOVIS_ALLOWED_ROOTS="/Users/you/Desktop/CFO:/Users/you/Downloads"
+CLOVIS_ALLOWED_ROOTS="$HOME/Desktop/CFO:$HOME/Downloads"
 ```
 
 On Windows, the separator is `;` instead of `:`.
@@ -1071,6 +1216,7 @@ SQLite is good at simple durable facts:
 | Finalized journal immutability | Lines cannot be inserted, updated, or deleted after finalization. |
 | Finalized journal balancing | A journal cannot be finalized unless its lines balance per asset. |
 | Closed-period protection | A journal cannot be finalized or reopened inside an active closed period. |
+| Statement plan immutability | Planned statement rows cannot be semantically edited or deleted after review. |
 
 The engine is good at accounting policy:
 
@@ -1429,6 +1575,101 @@ CREATE TABLE IF NOT EXISTS lots (
   FOREIGN KEY(opened_journal_id, book_id) REFERENCES journals(id, book_id),
   FOREIGN KEY(closed_journal_id, book_id) REFERENCES journals(id, book_id)
 );
+CREATE TABLE IF NOT EXISTS statement_plans (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL REFERENCES assets(id),
+  source_id TEXT,
+  status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned', 'applied', 'discarded')),
+  statement_kind TEXT NOT NULL DEFAULT '',
+  file_name TEXT NOT NULL DEFAULT '',
+  file_sha256 TEXT NOT NULL DEFAULT '',
+  expected_balance INTEGER,
+  planned_balance INTEGER NOT NULL,
+  applied_balance INTEGER,
+  created_at TEXT NOT NULL,
+  applied_at TEXT,
+  discarded_at TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(id, book_id),
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(account_id, book_id) REFERENCES accounts(id, book_id),
+  FOREIGN KEY(source_id, book_id) REFERENCES sources(id, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_statement_plans_account_status ON statement_plans(book_id, account_id, status, created_at);
+CREATE TABLE IF NOT EXISTS statement_plan_rows (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  row_index INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  external_id TEXT,
+  row_hash TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('matched', 'pending_to_commit', 'new_posted', 'new_pending', 'stale_pending_to_void', 'ambiguous', 'ignored')),
+  matched_journal_id TEXT,
+  created_journal_id TEXT,
+  counterpart_account_id TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(plan_id, row_index),
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(plan_id, book_id) REFERENCES statement_plans(id, book_id) ON DELETE CASCADE,
+  FOREIGN KEY(matched_journal_id, book_id) REFERENCES journals(id, book_id),
+  FOREIGN KEY(created_journal_id, book_id) REFERENCES journals(id, book_id),
+  FOREIGN KEY(counterpart_account_id, book_id) REFERENCES accounts(id, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_statement_plan_rows_plan_action ON statement_plan_rows(plan_id, action, row_index);
+CREATE INDEX IF NOT EXISTS idx_statement_plan_rows_hash ON statement_plan_rows(book_id, row_hash);
+CREATE TRIGGER IF NOT EXISTS trg_statement_plans_no_identity_update
+BEFORE UPDATE OF book_id, account_id, asset_id, statement_kind, file_name, file_sha256, expected_balance, planned_balance, metadata_json, created_at ON statement_plans
+BEGIN
+  SELECT RAISE(ABORT, 'statement plan identity is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_statement_plans_status_transition
+BEFORE UPDATE OF status ON statement_plans
+WHEN OLD.status != NEW.status
+BEGIN
+  SELECT CASE
+    WHEN OLD.status != 'planned'
+    THEN RAISE(ABORT, 'statement plan status is final')
+  END;
+  SELECT CASE
+    WHEN NEW.status NOT IN ('applied', 'discarded')
+    THEN RAISE(ABORT, 'invalid statement plan status transition')
+  END;
+  SELECT CASE
+    WHEN NEW.status = 'applied' AND NEW.applied_at IS NULL
+    THEN RAISE(ABORT, 'applied statement plan requires applied_at')
+  END;
+  SELECT CASE
+    WHEN NEW.status = 'discarded' AND NEW.discarded_at IS NULL
+    THEN RAISE(ABORT, 'discarded statement plan requires discarded_at')
+  END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_statement_plans_no_delete
+BEFORE DELETE ON statement_plans
+BEGIN
+  SELECT RAISE(ABORT, 'statement plans are audit records');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_statement_plan_rows_no_semantic_update
+BEFORE UPDATE OF book_id, plan_id, row_index, date, quantity, description, external_id, row_hash, action, matched_journal_id, counterpart_account_id, reason, metadata_json ON statement_plan_rows
+BEGIN
+  SELECT RAISE(ABORT, 'statement plan rows are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_statement_plan_rows_created_once
+BEFORE UPDATE OF created_journal_id ON statement_plan_rows
+WHEN OLD.created_journal_id IS NOT NULL OR NEW.created_journal_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'created_journal_id can only be set once');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_statement_plan_rows_no_delete
+BEFORE DELETE ON statement_plan_rows
+BEGIN
+  SELECT RAISE(ABORT, 'statement plan rows are audit records');
+END;
 CREATE TRIGGER IF NOT EXISTS trg_journals_no_finalized_insert
 BEFORE INSERT ON journals
 WHEN NEW.finalized_at IS NOT NULL

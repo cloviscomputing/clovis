@@ -90,6 +90,38 @@ describe("CFO workflow SQLite oracle audit", () => {
     expect(projection.available_cash_cents).toBe(8200);
   });
 
+  it("preserves pending expense categories from match rules and per-row counterparts", () => {
+    const ctx = createWorkflowContext();
+    const { ledger, accounts, assets } = ctx;
+    const dining = ledger.createAccount("Dining", "expense");
+    const shopping = ledger.createAccount("Shopping", "expense");
+    for (const accountId of [dining, shopping]) ledger.createAnnotation("account", accountId, "default_asset", assets.usd);
+    callTool("add_match_rule", { account_id: dining, pattern: "Coffee" }, ledger);
+
+    const preview = callTool("record_pending_expenses", {
+      account_id: accounts["Credit Card"],
+      transactions: [
+        { date: "2026-06-10", amount: 6.75, description: "Coffee House" },
+        { date: "2026-06-11", amount: 22, description: "Book Store", counterpart_id: shopping }
+      ]
+    }, ledger) as Row;
+    expect(preview).toMatchObject({ dry_run: true, would_create: 2, created: 0, would_create_account: null });
+    expect(ledger.listAccounts().some((account) => account.name === "Pending Expenses")).toBe(false);
+
+    const result = callTool("record_pending_expenses", {
+      account_id: accounts["Credit Card"],
+      transactions: [
+        { date: "2026-06-10", amount: 6.75, description: "Coffee House" },
+        { date: "2026-06-11", amount: 22, description: "Book Store", counterpart_id: shopping }
+      ],
+      dry_run: false
+    }, ledger) as Row;
+    expect(result.created).toBe(2);
+    expect(entries(ctx, String(result.transactions[0].id)).some((entry) => entry.account_id === dining && entry.quantity === 675n)).toBe(true);
+    expect(entries(ctx, String(result.transactions[1].id)).some((entry) => entry.account_id === shopping && entry.quantity === 2200n)).toBe(true);
+    expect(ledger.listAccounts().some((account) => account.name === "Pending Expenses")).toBe(false);
+  });
+
   it("processes statement expected balances from posted balance plus importable rows", () => {
     const ctx = createWorkflowContext();
     const { ledger, accounts, assets, dir } = ctx;

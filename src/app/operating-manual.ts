@@ -44,7 +44,7 @@ type ManualResource = {
 export const OPERATING_MANUAL_INSTRUCTIONS = [
   "Use live Clovis data as the source of truth; do not answer from old chat memory when a read-only tool can check the ledger.",
   "Prefer QFX or OFX statement files when available because stable statement ids make duplicate detection safer; CSV remains supported as a fallback.",
-  "Import new statement rows as pending first, reconcile against the source statement, inspect duplicates or categorization surprises, then commit only after the plan is clean.",
+  "Create a statement plan before applying statement rows; inspect matches, pending-to-posted rows, stale pending rows, new rows, and ambiguous rows before committing.",
   "Do not treat transfers, credit-card payments, debt movement, or balance moves as spending. Keep cash, liabilities, earmarks, income, and expenses separate.",
   "Use read-only tools and dry-run-capable tools before mutating the ledger. Destructive or bulk tools should be run with explicit intent."
 ].join("\n");
@@ -53,18 +53,20 @@ const SECTIONS = {
   statement_import: {
     topic: "statement_import",
     title: "Statement Import",
-    summary: "A statement file is a pile of bank facts. Clovis turns those facts into pending ledger transactions so you can review them before they become accounting history.",
+    summary: "A statement file is a pile of bank facts. Clovis turns those facts into a review plan first, then writes pending or posted ledger transactions only when the plan is applied.",
     guidance: [
       "Use QFX or OFX when the bank offers it. Those files usually include stable ids such as FITID, which help Clovis recognize the same bank row later.",
       "Use CSV when QFX or OFX is unavailable, incomplete, or malformed. CSV works, but the bank often leaves out stable ids, so date, amount, and description matching matters more.",
       "Preview the file before importing. The preview answers: can Clovis read the file, which columns did it understand, and what rows will it create?",
-      "Import statement rows as pending by default. Pending means the row is visible and useful, but not yet trusted as final bookkeeping.",
-      "Before committing, reconcile the pending rows against the statement and check duplicate candidates. A clean import is boring: expected rows, expected balance, no unexplained extras.",
+      "Use refresh_statement when you need the safest path. It creates a plan that separates already-matched rows, pending rows to commit, true new rows, stale pending rows to void, and ambiguous rows that need review.",
+      "Import direct rows as pending by default. Pending means the row is visible and useful, but not yet trusted as final bookkeeping.",
+      "Before committing, reconcile against the statement and check duplicate candidates. A clean plan is boring: expected rows, expected balance, no unexplained extras.",
       "Commit only after review. If the import looks wrong, discard the batch or fix the mapping instead of posting bad rows and cleaning them up later."
     ],
     recommended_tools: [
       "file_access_status",
       "preview_import",
+      "refresh_statement",
       "reconcile_statement_plan",
       "process_statement",
       "import_file",
@@ -93,6 +95,7 @@ const SECTIONS = {
     ],
     recommended_tools: [
       "reconcile_statement_plan",
+      "refresh_statement",
       "reconcile_diff",
       "reconcile_statement",
       "inspect_transaction",

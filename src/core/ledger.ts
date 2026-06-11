@@ -215,6 +215,7 @@ export class Ledger {
   readonly path: string;
   readonly bookId: string;
   private readonly db: DatabaseSync;
+  private transactionDepth = 0;
 
   constructor(path: string, options: LedgerOptions = {}) {
     let dbPath = path;
@@ -274,6 +275,7 @@ export class Ledger {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (currentVersion < 2) this.migrateToV2();
+      if (currentVersion < 3) this.migrateToV3();
       this.db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
       this.db.exec("COMMIT");
     } catch (error) {
@@ -301,6 +303,11 @@ export class Ledger {
     `);
     this.db.exec("UPDATE journals SET finalized_at = posted_at WHERE finalized_at IS NULL");
     this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (2, 'add finalized journals and account default assets', ?)").run(now());
+  }
+
+  private migrateToV3(): void {
+    this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
+    this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (3, 'add statement import plans', ?)").run(now());
   }
 
   createAsset(symbol: string, type: AssetType | string = "currency", scale = 2, name = ""): string {
@@ -519,6 +526,115 @@ export class Ledger {
     }
     for (const txId of this.listAnnotationEntityIds("tx", "import_batch", sourceId)) ids.add(txId);
     return [...ids].sort();
+  }
+
+  createStatementPlan(input: Row, rows: Row[]): Row {
+    const planId = String(input.id ?? id("stmtplan"));
+    const createdAt = String(input.created_at ?? now());
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`
+        INSERT INTO statement_plans(
+          id, book_id, account_id, asset_id, source_id, status, statement_kind, file_name, file_sha256,
+          expected_balance, planned_balance, applied_balance, created_at, applied_at, discarded_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        planId,
+        this.bookId,
+        String(input.account_id),
+        String(input.asset_id),
+        input.source_id == null ? null : String(input.source_id),
+        String(input.status ?? "planned"),
+        String(input.statement_kind ?? ""),
+        String(input.file_name ?? ""),
+        String(input.file_sha256 ?? ""),
+        input.expected_balance == null ? null : BigInt(input.expected_balance as string | number | bigint | boolean),
+        BigInt(input.planned_balance as string | number | bigint | boolean),
+        input.applied_balance == null ? null : BigInt(input.applied_balance as string | number | bigint | boolean),
+        createdAt,
+        input.applied_at == null ? null : String(input.applied_at),
+        input.discarded_at == null ? null : String(input.discarded_at),
+        JSON.stringify(input.metadata ?? input.metadata_json ?? {})
+      );
+      for (const row of rows) {
+        this.db.prepare(`
+          INSERT INTO statement_plan_rows(
+            id, book_id, plan_id, row_index, date, quantity, description, external_id, row_hash, action,
+            matched_journal_id, created_journal_id, counterpart_account_id, reason, metadata_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          String(row.id ?? id("stmtrow")),
+          this.bookId,
+          planId,
+          Number(row.row_index),
+          dateOnly(String(row.date)),
+          BigInt(row.quantity as string | number | bigint | boolean),
+          String(row.description ?? ""),
+          row.external_id == null || row.external_id === "" ? null : String(row.external_id),
+          String(row.row_hash),
+          String(row.action),
+          row.matched_journal_id == null ? null : String(row.matched_journal_id),
+          row.created_journal_id == null ? null : String(row.created_journal_id),
+          row.counterpart_account_id == null ? null : String(row.counterpart_account_id),
+          String(row.reason ?? ""),
+          JSON.stringify(row.metadata ?? row.metadata_json ?? {})
+        );
+      }
+      this.db.exec("COMMIT");
+      return this.getStatementPlan(planId)!;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getStatementPlan(planId: string): Row | null {
+    return (this.db.prepare("SELECT * FROM statement_plans WHERE book_id = ? AND id = ?").get(this.bookId, planId) as Row | undefined) ?? null;
+  }
+
+  listStatementPlanRows(planId: string): Row[] {
+    return this.db.prepare("SELECT * FROM statement_plan_rows WHERE book_id = ? AND plan_id = ? ORDER BY row_index, id").all(this.bookId, planId) as Row[];
+  }
+
+  markStatementPlanApplied(planId: string, sourceId: string | null, appliedBalance: bigint | number): Row {
+    this.db.prepare("UPDATE statement_plans SET status = 'applied', source_id = ?, applied_balance = ?, applied_at = ? WHERE book_id = ? AND id = ?").run(
+      sourceId,
+      BigInt(appliedBalance),
+      now(),
+      this.bookId,
+      planId
+    );
+    return this.getStatementPlan(planId)!;
+  }
+
+  discardStatementPlan(planId: string): Row {
+    this.db.prepare("UPDATE statement_plans SET status = 'discarded', discarded_at = ? WHERE book_id = ? AND id = ?").run(now(), this.bookId, planId);
+    return this.getStatementPlan(planId)!;
+  }
+
+  setStatementPlanRowCreatedJournal(rowId: string, journalId: string): void {
+    this.db.prepare("UPDATE statement_plan_rows SET created_journal_id = ? WHERE book_id = ? AND id = ?").run(journalId, this.bookId, rowId);
+  }
+
+  runInTransaction<T>(fn: () => T): T {
+    return this.transaction(fn);
+  }
+
+  private transaction<T>(fn: () => T): T {
+    const outer = this.transactionDepth === 0;
+    if (outer) this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth += 1;
+    let result: T;
+    try {
+      result = fn();
+    } catch (error) {
+      this.transactionDepth -= 1;
+      if (outer) this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.transactionDepth -= 1;
+    if (outer) this.db.exec("COMMIT");
+    return result;
   }
 
   tableNames(): string[] {
@@ -1128,15 +1244,7 @@ export class Ledger {
     const normalized = lines.map(([accountId, assetId, quantity]) => [accountId, assetId, BigInt(quantity)] as [string, string, bigint]);
     validateLines(normalized);
     this.validateLineRefs(normalized);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const txId = this.insertTx(txDate, statusValue, description, normalized, options);
-      this.db.exec("COMMIT");
-      return txId;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    return this.transaction(() => this.insertTx(txDate, statusValue, description, normalized, options));
   }
 
   recordTransaction(date: string, amount: bigint | number, fromAccountId: string, toAccountId: string, assetId: string, description = "", status: TxStatus | string = "pending", options: PostTxOptions = {}): Journal & { entries: JournalLine[] } {

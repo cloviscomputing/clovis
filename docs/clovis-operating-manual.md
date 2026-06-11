@@ -21,9 +21,9 @@ This guide is operational guidance, not financial, tax, or legal advice.
 
 ## Statement Import
 
-A statement file is a pile of bank facts. Clovis turns those facts into pending
-ledger transactions so you can review them before they become accounting
-history.
+A statement file is a pile of bank facts. Clovis turns those facts into a
+review plan first, then writes pending or posted ledger transactions only when
+the plan is applied.
 
 Use QFX or OFX when the bank offers it. Those files usually include stable ids
 such as `FITID`, which help Clovis recognize the same bank row later.
@@ -35,12 +35,16 @@ matters more.
 Preview the file before importing. The preview answers: can Clovis read the
 file, which columns did it understand, and what rows will it create?
 
-Import statement rows as pending by default. Pending means the row is visible
-and useful, but not yet trusted as final bookkeeping.
+Use `refresh_statement` when you need the safest path. It creates a plan that
+separates already-matched rows, pending rows to commit, true new rows, stale
+pending rows to void, and ambiguous rows that need review.
 
-Before committing, reconcile the pending rows against the statement and check
-duplicate candidates. A clean import is boring: expected rows, expected balance,
-no unexplained extras.
+Import direct rows as pending by default. Pending means the row is visible and
+useful, but not yet trusted as final bookkeeping.
+
+Before committing, reconcile against the statement and check duplicate
+candidates. A clean plan is boring: expected rows, expected balance, no
+unexplained extras.
 
 Commit only after review. If the import looks wrong, discard the batch or fix
 the mapping instead of posting bad rows and cleaning them up later.
@@ -49,6 +53,7 @@ Recommended tools:
 
 - `file_access_status`
 - `preview_import`
+- `refresh_statement`
 - `reconcile_statement_plan`
 - `process_statement`
 - `import_file`
@@ -92,6 +97,7 @@ row, duplicate row, wrong account, wrong sign, or wrong status.
 Recommended tools:
 
 - `reconcile_statement_plan`
+- `refresh_statement`
 - `reconcile_diff`
 - `reconcile_statement`
 - `inspect_transaction`

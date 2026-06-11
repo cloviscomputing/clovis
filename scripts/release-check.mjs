@@ -35,6 +35,7 @@ function allowedPackedFile(file) {
     file === "RELEASING.md" ||
     file === "LICENSE" ||
     file === "package.json" ||
+    (file.startsWith("docs/") && file.endsWith(".md")) ||
     (file.startsWith("dist/") && (file.endsWith(".js") || file.endsWith(".d.ts") || file.endsWith(".js.map")));
 }
 

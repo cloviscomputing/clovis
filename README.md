@@ -40,7 +40,7 @@ over your SQLite ledger:
   runway questions
 - inspect account registers and search transactions by date, description,
   amount, account, category, or status
-- preview, import, and reconcile QFX, OFX, or CSV bank and card statements
+- preview, plan, import, and reconcile QFX, OFX, or CSV bank and card statements
 - find duplicate, pending, uncategorized, unmatched-transfer, and suspicious
   categorization rows
 - recategorize transactions by pattern, apply match rules, and roll back import
@@ -75,12 +75,12 @@ Useful orientation tools:
 
 ## Status
 
-The database format is versioned. The current schema is `SCHEMA_VERSION = 2`.
-Fresh databases are created directly with schema v2. Schema v1 ledgers are
+The database format is versioned. The current schema is `SCHEMA_VERSION = 3`.
+Fresh databases are created directly with schema v3. Older v1/v2 ledgers are
 migrated on open. Ledger JSON snapshots can be exported and imported with
 `export_ledger` and `import_ledger`.
 
-Patch releases in the `0.x` line should keep reading schema v1 and v2
+Patch releases in the `0.x` line should keep reading schema v1, v2, and v3
 databases, preserve public package entrypoints, and avoid removing MCP tools.
 Minor releases may revise behavior or database shape, but the changelog should
 document the compatibility impact and upgrade path.
@@ -237,6 +237,18 @@ clovis --db ./ledger.db import --file ./statement.qfx \
   --account "Checking" --counterpart "Uncategorized"
 clovis --db ./ledger.db import --file ./statement.csv \
   --account "Checking" --counterpart "Uncategorized"
+```
+
+For higher-safety statement workflows, use the plan/apply/verify path through
+the generic tool interface or MCP:
+
+```sh
+clovis --db ./ledger.db --format json tool refresh_statement \
+  --json '{"action":"plan","file_path":"./statement.qfx","account_id":"Checking","counterpart_account_id":"Uncategorized","expected_balance":1250.00}'
+clovis --db ./ledger.db --format json tool refresh_statement \
+  --json '{"action":"apply","plan_id":"stmtplan_...","dry_run":false}'
+clovis --db ./ledger.db --format json tool refresh_statement \
+  --json '{"action":"verify","plan_id":"stmtplan_..."}'
 ```
 
 Export filtered transaction rows:
@@ -445,6 +457,8 @@ Support tables keep workflow concerns out of the journal core:
 - `recurrences`: scheduled transactions.
 - `period_closes`: closed accounting periods.
 - `lots`: investment lots and cost basis.
+- `statement_plans` and `statement_plan_rows`: immutable import/reconciliation
+  plans.
 - `meta`: schema version and database metadata.
 - `migration_history`: applied schema upgrades.
 

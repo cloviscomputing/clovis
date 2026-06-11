@@ -42,15 +42,15 @@ describe("ledger core", () => {
     expect(debitCredit(-1200n)).toEqual({ debit: 0n, credit: 1200n });
   });
 
-  it("creates schema v2 and default book", () => {
+  it("creates schema v3 and default book", () => {
     const ledger = tempLedger();
     try {
       const tables = new Set((ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
-      for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences", "migration_history"]) {
+      for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences", "migration_history", "statement_plans", "statement_plan_rows"]) {
         expect(tables.has(table)).toBe(true);
       }
       const columns = (table: string) => new Set((ledger.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
-      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("2");
+      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("3");
       expect(columns("journal_lines").has("quantity")).toBe(true);
       expect(columns("journal_lines").has("book_id")).toBe(true);
       expect(columns("journals").has("finalized_at")).toBe(true);
@@ -63,6 +63,8 @@ describe("ledger core", () => {
       expect(columns("recurrences").has("quantity")).toBe(true);
       expect(columns("lots").has("opened_journal_id")).toBe(true);
       expect(columns("lots").has("status")).toBe(true);
+      expect(columns("statement_plans").has("planned_balance")).toBe(true);
+      expect(columns("statement_plan_rows").has("row_hash")).toBe(true);
     } finally {
       ledger.close();
     }
@@ -180,11 +182,12 @@ describe("ledger core", () => {
 
     const ledger = new Ledger(dbPath);
     try {
-      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("2");
+      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("3");
       expect(ledger.getAccount("acct_checking")?.default_asset_id).toBe("asset_usd");
       expect((ledger.db.prepare("SELECT finalized_at FROM journals WHERE id = 'tx_legacy'").get() as any).finalized_at).toBe("2026-06-01T00:00:00Z");
       expect(ledger.listTransactions({ status: null }).map((tx) => tx.id)).toContain("tx_legacy");
       expect((ledger.db.prepare("SELECT count(*) AS c FROM migration_history WHERE version = 2").get() as any).c).toBe(1n);
+      expect((ledger.db.prepare("SELECT count(*) AS c FROM migration_history WHERE version = 3").get() as any).c).toBe(1n);
       expect(ledger.listSources("import", null)).toHaveLength(1);
       expect(ledger.listPrices()).toHaveLength(1);
       expect(ledger.listRules("match")).toHaveLength(1);
@@ -1455,6 +1458,179 @@ describe("app and package surface", () => {
     }
   });
 
+  it("stores hardened immutable statement plans", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-statement-plan-"));
+      dirs.push(dir);
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
+      try {
+        const usd = ledger.createAsset("USD", "currency", 2);
+        const checking = ledger.createAccount("Checking", "asset");
+        const equity = ledger.createAccount("Equity", "equity");
+        for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+        writeFileSync(join(dir, "statement.csv"), "date,amount,description\n2026-06-01,25.00,Deposit\n", "utf8");
+
+        const plan = callTool("refresh_statement", { action: "plan", file_path: "statement.csv", account_id: checking, counterpart_account_id: equity }, ledger) as any;
+        expect(plan.plan_id).toEqual(expect.stringMatching(/^stmtplan_/));
+        expect(plan.actions.new_posted).toBe(1);
+        expect((ledger.db.prepare("SELECT count(*) AS count FROM statement_plan_rows WHERE plan_id = ?").get(plan.plan_id) as any).count).toBe(1n);
+        expect(() => ledger.db.prepare("UPDATE statement_plan_rows SET description = 'changed' WHERE plan_id = ?").run(plan.plan_id)).toThrow(/immutable/);
+        expect(() => ledger.db.prepare("DELETE FROM statement_plans WHERE id = ?").run(plan.plan_id)).toThrow(/audit records/);
+      } finally {
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("plans, applies, and verifies a full statement refresh lifecycle", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-refresh-"));
+      dirs.push(dir);
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
+      try {
+        const usd = ledger.createAsset("USD", "currency", 2);
+        const checking = ledger.createAccount("Checking", "asset");
+        const equity = ledger.createAccount("Equity", "equity");
+        for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+        const pending = ledger.recordTransaction("2026-06-01", 500n, equity, checking, usd, "Pending deposit", "pending");
+        const stale = ledger.recordTransaction("2026-06-02", 200n, equity, checking, usd, "Stale pending", "pending");
+        writeFileSync(join(dir, "statement.csv"), "date,amount,description\n2026-06-01,5.00,Pending deposit\n2026-06-03,3.00,New deposit\n", "utf8");
+
+        const plan = callTool("refresh_statement", {
+          action: "plan",
+          file_path: "statement.csv",
+          account_id: checking,
+          counterpart_account_id: equity,
+          expected_balance: 8,
+          void_stale_pending: true,
+          pending_transactions: [{ date: "2026-06-04", amount: 1.5, description: "Fresh pending" }]
+        }, ledger) as any;
+        expect(plan.actions).toMatchObject({ pending_to_commit: 1, new_posted: 1, new_pending: 1, stale_pending_to_void: 1, ambiguous: 0 });
+        expect(plan.balance_matches).toBe(true);
+
+        const preview = callTool("refresh_statement", { action: "apply", plan_id: plan.plan_id }, ledger) as any;
+        expect(preview).toMatchObject({ dry_run: true, would_apply: 4 });
+        expect(ledger.getTx(pending.id)?.status).toBe("pending");
+        expect(ledger.getTx(stale.id)?.status).toBe("pending");
+
+        const applied = callTool("refresh_statement", { action: "apply", plan_id: plan.plan_id, dry_run: false }, ledger) as any;
+        expect(applied).toMatchObject({ created: 2, committed: 1, voided: 1, balance_matches: true });
+        expect(applied.actual_balance_cents).toBe(800);
+        expect(ledger.getTx(pending.id)?.status).toBe("posted");
+        expect(ledger.getTx(stale.id)?.status).toBe("void");
+        expect(ledger.balanceTree(checking, usd, null, "posted")).toBe(800n);
+        expect(ledger.balanceTree(checking, usd, null, "pending")).toBe(-150n);
+
+        const verified = callTool("refresh_statement", { action: "verify", plan_id: plan.plan_id }, ledger) as any;
+        expect(verified).toMatchObject({ verified: true, mismatches: [] });
+        expect(() => callTool("refresh_statement", { action: "apply", plan_id: plan.plan_id, dry_run: false }, ledger)).toThrow(/is applied/);
+      } finally {
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("process_statement applies only true unmatched rows from duplicate-rich statements", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-safe-process-"));
+      dirs.push(dir);
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
+      try {
+        const usd = ledger.createAsset("USD", "currency", 2);
+        const checking = ledger.createAccount("Checking", "asset");
+        const equity = ledger.createAccount("Equity", "equity");
+        for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+        ledger.recordTransaction("2026-06-01", 2500n, equity, checking, usd, "Older row without FITID", "posted");
+        writeFileSync(join(dir, "statement.csv"), "date,amount,description\n2026-06-01,25.00,Older row without FITID\n2026-06-02,5.00,New row\n", "utf8");
+
+        const result = callTool("process_statement", { file_path: "statement.csv", account_id: checking, counterpart_account_id: equity, expected_balance: 30, commit: true }, ledger) as any;
+        expect(result.actions).toMatchObject({ matched: 1, new_posted: 1 });
+        expect(result.created).toBe(1);
+        expect(result.skipped).toBe(1);
+        expect(ledger.listTransactions({ status: "posted" }).filter((tx) => tx.description === "Older row without FITID")).toHaveLength(1);
+        expect(ledger.balanceTree(checking, usd, null, "posted")).toBe(3000n);
+      } finally {
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("previews import writes without mutating and returns tags after real imports", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+
+      const dryRun = callTool("import_transactions", {
+        account_id: checking,
+        counterpart_id: equity,
+        asset_id: usd,
+        dry_run: true,
+        transactions: [{ date: "2026-06-01", amount: 25, description: "Preview deposit", tags: { kind: "preview" } }]
+      }, ledger) as any;
+      expect(dryRun).toMatchObject({ dry_run: true, would_create: 1, created: 0 });
+      expect(dryRun.transactions[0].entries).toHaveLength(2);
+      expect(ledger.listTransactions({ status: null })).toHaveLength(0);
+
+      const imported = callTool("import_transactions", {
+        account_id: checking,
+        counterpart_id: equity,
+        asset_id: usd,
+        tags: { import_kind: "manual" },
+        transactions: [{ date: "2026-06-01", amount: 25, description: "Preview deposit", tags: { row_kind: "statement" } }]
+      }, ledger) as any;
+      expect(imported.created).toBe(1);
+      expect(imported.transactions[0].tags).toContainEqual(expect.objectContaining({ key: "import_kind", value: "manual" }));
+      expect(imported.transactions[0].tags).toContainEqual(expect.objectContaining({ key: "row_kind", value: "statement" }));
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("parses CSV date wrappers and requires explicit ambiguous numeric date formats", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-flex-csv-"));
+      dirs.push(dir);
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
+      process.env.CLOVIS_ALLOWED_ROOT = dir;
+      try {
+        const usd = ledger.createAsset("USD", "currency", 2);
+        const checking = ledger.createAccount("Checking", "asset");
+        const equity = ledger.createAccount("Equity", "equity");
+        for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+
+        writeFileSync(join(dir, "wrapped.csv"), "Downloaded from Bank\ndate,amount,description\n\"June 10, 2026\",12.34,Named date\nFooter disclaimer\n", "utf8");
+        const wrapped = callTool("preview_import", { file_path: "wrapped.csv", account_id: checking, counterpart_account_id: equity, skip_rows: 1, skip_footer_rows: 1 }, ledger) as any;
+        expect(wrapped.rows).toHaveLength(1);
+        expect(wrapped.rows[0]).toMatchObject({ date: "2026-06-10", amount: 12.34, description: "Named date" });
+
+        writeFileSync(join(dir, "ambiguous.csv"), "date,amount,description\n06/10/2026,1.00,Ambiguous\n", "utf8");
+        expect(() => callTool("preview_import", { file_path: "ambiguous.csv", account_id: checking, counterpart_account_id: equity }, ledger)).toThrow(/Ambiguous date/);
+        const explicit = callTool("preview_import", { file_path: "ambiguous.csv", account_id: checking, counterpart_account_id: equity, date_format: "mdy" }, ledger) as any;
+        expect(explicit.rows[0].date).toBe("2026-06-10");
+      } finally {
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("honors reconciliation plan row controls before writing", () => {
     const ledger = tempLedger();
     try {
@@ -1492,7 +1668,8 @@ describe("app and package surface", () => {
 
         writeFileSync(join(dir, "nearby.csv"), "date,amount,description\n2026-06-04,20.00,Second\n", "utf8");
         const plan = callTool("reconcile_statement_plan", { file_path: "nearby.csv", account_id: checking, counterpart_account_id: equity, date_tolerance_days: 3 }, ledger) as any;
-        expect(plan).toMatchObject({ matched: 1, unmatched: 0, reconciled: true });
+        expect(plan).toMatchObject({ matched: 0, unmatched: 1, reconciled: false });
+        expect(plan.actions.pending_to_commit).toBe(1);
       } finally {
         if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
       }

@@ -358,6 +358,9 @@ const CASES = {
   reconcile_statement: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, counterpart_id: ctx.accounts["Opening Balances"], transactions: [{ date: "2026-06-01", amount_cents: 100000, description: "June Pay" }] }), assert: expectObject },
   reconcile_statement_plan: { mutation: "read", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"] }), assert: expectObject },
   reconcile_to_balance: { mutation: "dry-run", args: (ctx) => ({ account_id: ctx.accounts.Checking, target_balance: 1000, offset_account_id: ctx.accounts["Opening Balances"], date: "2026-06-30", dry_run: true }), assert: expectObject },
+  refresh_statement: { mutation: "write", args: (ctx) => ({ action: "plan", file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], status: "posted" }), assert: (result) => {
+    expect(result.plan_id).toEqual(expect.stringMatching(/^stmtplan_/));
+  } },
   record_investment: { mutation: "write", args: (ctx) => ({ date: "2026-06-15", amount: 100, investment_account_id: ctx.accounts.Brokerage, source_account_id: ctx.accounts.Checking, description: "Investment transfer" }), assert: expectObject },
   record_opening_balance: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Brokerage, amount: 200, date: "2026-05-31", status: "posted" }), assert: expectObject },
   record_opening_balances: { mutation: "write", args: (ctx) => ({ balances: [{ account_id: ctx.accounts.Brokerage, amount: 200 }], date: "2026-05-31", status: "posted" }), assert: expectObject },
