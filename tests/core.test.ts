@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
@@ -998,9 +998,10 @@ describe("app and package surface", () => {
       expect(picture.budget_position.total_spent_cents).toBe(1500);
       expect(picture.include_planned).toBe(false);
       expect(picture.warnings).toEqual([]);
-      expect(picture.current_snapshot.as_of).toBeNull();
+      expect(picture.current_snapshot).not.toHaveProperty("as_of");
       expect(picture.current_snapshot.as_of_basis).toBe("current_open_ended");
-      expect(picture.current_snapshot.ledger_as_of).toBe("9999-12-31");
+      expect(picture.current_snapshot.as_of_description).toContain("Open-ended");
+      expect(picture.current_snapshot).not.toHaveProperty("ledger_as_of");
       expect(picture.actual_cash_cents).toBe(9000);
       expect(picture.planned_cash_cents).toBe(0);
 
@@ -1329,9 +1330,26 @@ describe("app and package surface", () => {
       expect(runway.burn_models[0].source_summary).toBeDefined();
       expect(runway.models).toBeUndefined();
       expect(runway.missing_conversions).toHaveLength(1);
-      expect(runway.conversion_warning).toMatchObject({ severity: "unknown", missing_count: 1 });
+      expect(runway.missing_conversions[0]).toMatchObject({
+        account_name: "Shopping",
+        asset_symbol: "CAD",
+        quote_asset_symbol: "USD",
+        affected_sections: ["trailing_actuals.short", "trailing_actuals.long"],
+        affected_models: ["trailing_3_month_actual", "trailing_6_month_actual"],
+        materiality: "unknown",
+        materiality_basis: "missing_price"
+      });
+      expect(runway.conversion_warning).toMatchObject({
+        severity: "unknown",
+        missing_count: 1,
+        affected_models: ["trailing_3_month_actual", "trailing_6_month_actual"],
+        recommended_model: "trailing_3_month_actual",
+        recommended_model_affected: true
+      });
       expect(runway.burn_models.find((row: any) => row.model === "budget_burn")).toMatchObject({ monthly_burn_cents: 35000, runway_months: 0.71 });
+      expect(runway.burn_models.find((row: any) => row.model === "budget_burn")).toMatchObject({ valuation_complete: true, missing_conversion_count: 0 });
       expect(runway.burn_models.find((row: any) => row.model === "trailing_3_month_actual")).toMatchObject({ monthly_burn_cents: 13333, runway_months: 1.88 });
+      expect(runway.burn_models.find((row: any) => row.model === "trailing_3_month_actual")).toMatchObject({ valuation_complete: false, missing_conversion_count: 1 });
       expect(runway.burn_models.find((row: any) => row.model === "fixed_obligation_burn")).toMatchObject({ monthly_burn_cents: 20000, runway_months: 1.25 });
       expect(runway.burn_models.find((row: any) => row.model === "discretionary_adjusted_burn")).toMatchObject({ monthly_burn_cents: 27500, runway_months: 0.91 });
 
@@ -1342,6 +1360,7 @@ describe("app and package surface", () => {
       const withSources = callTool("cash_runway", { year: 2026, month: 6, as_of: "2026-06-11", include_sources: true, quote_asset_id: usd }, ledger) as any;
       expect(withSources.include_sources).toBe(true);
       expect(withSources.burn_models[0].source).toBeDefined();
+      expect(withSources.burn_models.find((row: any) => row.model === "trailing_3_month_actual").missing_conversions).toHaveLength(1);
 
       const withPlanned = callTool("cash_runway", { year: 2026, month: 6, as_of: "2026-06-11", include_planned: true, quote_asset_id: usd }, ledger) as any;
       expect(withPlanned.spendable_cash_cents).toBe(55000);
@@ -2163,6 +2182,31 @@ describe("app and package surface", () => {
       expect(() => callTool("delete_account", { id: "missing" })).toThrow(/not found/);
     } finally {
       if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
+    }
+  });
+
+  it("lists backup database files without treating SQLite sidecars as standalone backups", () => {
+    const ledger = tempLedger();
+    try {
+      const backup = callTool("backup_now", {}, ledger) as any;
+      expect(String(backup.path)).toContain("backups");
+      const backupDir = join(dirname(ledger.path), "backups");
+      const manual = join(backupDir, "manual.db");
+      writeFileSync(manual, "backup");
+      writeFileSync(`${manual}-wal`, "");
+      writeFileSync(`${manual}-shm`, "sidecar");
+      writeFileSync(join(backupDir, "orphan.db-wal"), "");
+
+      const backups = callTool("list_backups", {}, ledger) as any[];
+      expect(backups.some((row) => String(row.path).endsWith(".db-wal"))).toBe(false);
+      expect(backups.some((row) => String(row.path).endsWith(".db-shm"))).toBe(false);
+      expect(backups.some((row) => String(row.path).includes("orphan.db-wal"))).toBe(false);
+      const manualBackup = backups.find((row) => String(row.path).endsWith("manual.db"));
+      expect(manualBackup).toBeDefined();
+      expect(manualBackup.sidecars.map((row: any) => row.type).sort()).toEqual(["shm", "wal"]);
+      expect(manualBackup.sidecars.find((row: any) => row.type === "wal").size_bytes).toBe(0);
+    } finally {
+      ledger.close();
     }
   });
 

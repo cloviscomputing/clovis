@@ -432,7 +432,7 @@ function incomeStatementRows(ledger: Ledger, year: number, month: number | null,
   };
 }
 
-function conversionSeverity(missing: Row[]): Row {
+function conversionSeverity(missing: Row[], options: { recommendedModel?: string | null } = {}): Row {
   if (missing.length === 0) {
     return {
       severity: "none",
@@ -441,26 +441,77 @@ function conversionSeverity(missing: Row[]): Row {
       message: "All requested balances converted into the report currency."
     };
   }
+  const affectedSections = uniqueStrings(missing.flatMap((row) => row.affected_sections ?? []));
+  const affectedModels = uniqueStrings(missing.flatMap((row) => row.affected_models ?? []));
+  const recommendedModel = options.recommendedModel ?? null;
+  const recommendedModelAffected = recommendedModel ? affectedModels.includes(recommendedModel) : null;
   return {
-    severity: "unknown",
+    severity: recommendedModelAffected === false && affectedModels.length > 0 ? "warning" : "unknown",
     materiality: "unknown",
+    materiality_basis: "missing_price",
     missing_count: missing.length,
-    message: "One or more balances could not be converted into the report currency, so materiality cannot be calculated safely."
+    affected_sections: affectedSections,
+    affected_models: affectedModels,
+    recommended_model: recommendedModel,
+    recommended_model_affected: recommendedModelAffected,
+    message: recommendedModelAffected === false
+      ? "One or more balances could not be converted, but the recommended runway model is not directly affected."
+      : "One or more balances could not be converted into the report currency, so materiality cannot be calculated safely."
   };
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  return [...new Set(values.flatMap((value) => Array.isArray(value) ? value : [value]).map((value) => String(value ?? "")).filter(Boolean))];
+}
+
+function missingConversionKey(row: Row): string {
+  return [
+    row.tx_id ?? "",
+    row.account_id ?? "",
+    row.asset_id ?? "",
+    row.quote_asset_id ?? "",
+    String(row.quantity ?? ""),
+    row.error ?? ""
+  ].join("|");
+}
+
+function enrichMissingConversion(ledger: Ledger, row: Row): Row {
+  const accountRow = row.account_id ? ledger.getAccount(String(row.account_id)) : null;
+  const assetRow = row.asset_id ? ledger.getAsset(String(row.asset_id)) : null;
+  const quoteRow = row.quote_asset_id ? ledger.getAsset(String(row.quote_asset_id)) : null;
+  const quantity = row.quantity == null ? null : BigInt(row.quantity);
+  return {
+    ...row,
+    account_name: accountRow?.name ?? null,
+    account_type: accountRow?.account_type ?? null,
+    asset_symbol: assetRow?.symbol ?? null,
+    quote_asset_symbol: quoteRow?.symbol ?? null,
+    quantity_display: quantity == null || !row.asset_id ? null : display(ledger, quantity, String(row.asset_id)),
+    absolute_quantity_display: quantity == null || !row.asset_id ? null : display(ledger, quantity < 0n ? -quantity : quantity, String(row.asset_id)),
+    materiality: "unknown",
+    materiality_basis: "missing_price"
+  };
+}
+
+function scopedMissingConversions(ledger: Ledger, sources: Array<{ rows?: Row[] | null; section: string; affectedModels?: string[] }>): Row[] {
+  const byKey = new Map<string, Row>();
+  for (const source of sources) {
+    for (const row of source.rows ?? []) {
+      const key = missingConversionKey(row);
+      const current = byKey.get(key) ?? enrichMissingConversion(ledger, row);
+      current.affected_sections = uniqueStrings([...(current.affected_sections ?? []), source.section]);
+      current.affected_models = uniqueStrings([...(current.affected_models ?? []), ...(source.affectedModels ?? [])]);
+      byKey.set(key, current);
+    }
+  }
+  return [...byKey.values()];
 }
 
 function dedupeMissingConversions(rows: Row[]): Row[] {
   const seen = new Set<string>();
   const deduped: Row[] = [];
   for (const row of rows) {
-    const key = [
-      row.tx_id ?? "",
-      row.account_id ?? "",
-      row.asset_id ?? "",
-      row.quote_asset_id ?? "",
-      String(row.quantity ?? ""),
-      row.error ?? ""
-    ].join("|");
+    const key = missingConversionKey(row);
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(row);
@@ -1869,9 +1920,9 @@ const handlers: Record<ToolName, Handler> = {
     const projectedCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
     const currentSnapshot = overview.current_snapshot as Row;
     if (currentSnapshot.as_of === "9999-12-31") {
-      currentSnapshot.ledger_as_of = currentSnapshot.as_of;
-      currentSnapshot.as_of = null;
+      delete currentSnapshot.as_of;
       currentSnapshot.as_of_basis = "current_open_ended";
+      currentSnapshot.as_of_description = "Open-ended current snapshot; no calendar cutoff was applied.";
     }
     return {
       ...overview,
@@ -2032,18 +2083,39 @@ const handlers: Record<ToolName, Handler> = {
     const fixedBurn = BigInt(budget.fixed_budget_cents);
     const discretionaryBurn = BigInt(budget.discretionary_budget_cents);
     const discretionaryAdjusted = fixedBurn + scaleBigint(discretionaryBurn, discretionaryMultiplier);
+    const shortModelName = `trailing_${shortMonths}_month_actual`;
+    const longModelName = `trailing_${longMonths}_month_actual`;
+    const budgetModelNames = ["budget_burn", "fixed_obligation_burn", "discretionary_adjusted_burn"];
+    const burnModelNames = [...budgetModelNames.slice(0, 1), shortModelName, longModelName, ...budgetModelNames.slice(1)];
+    const projectionMissing = projection.missing_conversions as Row[];
+    const budgetMissing = ((budget.budget as Row).missing_conversions ?? []) as Row[];
+    const shortMissing = trailingShort.missing_conversions as Row[];
+    const longMissing = trailingLong.missing_conversions as Row[];
+    const missing = scopedMissingConversions(ledger, [
+      { section: "cash_projection", affectedModels: burnModelNames, rows: projectionMissing },
+      { section: "budget", affectedModels: budgetModelNames, rows: budgetMissing },
+      { section: "trailing_actuals.short", affectedModels: [shortModelName], rows: shortMissing },
+      { section: "trailing_actuals.long", affectedModels: [longModelName], rows: longMissing }
+    ]);
+    const missingForModel = (name: string) => missing.filter((row) => ((row.affected_models as string[] | undefined) ?? []).includes(name));
     const withSource = (source: Row, sourceSummary: Row) => includeSources ? { source } : { source_summary: sourceSummary };
-    const model = (name: string, label: string, monthlyBurn: bigint, source: Row, sourceSummary: Row) => ({
-      model: name,
-      label,
-      monthly_burn_cents: monthlyBurn,
-      runway_months: runwayMonths(runwayCash, monthlyBurn),
-      ...withSource(source, sourceSummary)
-    });
+    const model = (name: string, label: string, monthlyBurn: bigint, source: Row, sourceSummary: Row) => {
+      const modelMissing = missingForModel(name);
+      return {
+        model: name,
+        label,
+        monthly_burn_cents: monthlyBurn,
+        runway_months: runwayMonths(runwayCash, monthlyBurn),
+        valuation_complete: modelMissing.length === 0,
+        missing_conversion_count: modelMissing.length,
+        ...(includeSources && modelMissing.length > 0 ? { missing_conversions: modelMissing } : {}),
+        ...withSource(source, sourceSummary)
+      };
+    };
     const burnModels = [
       model("budget_burn", "Budget burn", BigInt(budget.monthly_burn_cents), budget.budget as Row, budgetSummary(budget.budget as Row)),
-      model(`trailing_${shortMonths}_month_actual`, `Trailing ${shortMonths}-month actual burn`, BigInt(trailingShort.monthly_burn_cents), trailingShort, trailingSummary(trailingShort)),
-      model(`trailing_${longMonths}_month_actual`, `Trailing ${longMonths}-month actual burn`, BigInt(trailingLong.monthly_burn_cents), trailingLong, trailingSummary(trailingLong)),
+      model(shortModelName, `Trailing ${shortMonths}-month actual burn`, BigInt(trailingShort.monthly_burn_cents), trailingShort, trailingSummary(trailingShort)),
+      model(longModelName, `Trailing ${longMonths}-month actual burn`, BigInt(trailingLong.monthly_burn_cents), trailingLong, trailingSummary(trailingLong)),
       model("fixed_obligation_burn", "Fixed-obligation burn", fixedBurn, { fixed_budget_rows: budget.fixed_budget_rows }, { fixed_budget_count: (budget.fixed_budget_rows as Row[]).length, fixed_budget_cents: fixedBurn }),
       model("discretionary_adjusted_burn", "Fixed plus reduced discretionary burn", discretionaryAdjusted, {
         fixed_budget_cents: fixedBurn,
@@ -2059,12 +2131,6 @@ const handlers: Record<ToolName, Handler> = {
       ?? burnModels.find((row) => row.model === "budget_burn" && row.runway_months != null)
       ?? burnModels.find((row) => row.runway_months != null)
       ?? burnModels[0];
-    const missing = dedupeMissingConversions([
-      ...projection.missing_conversions as Row[],
-      ...trailingShort.missing_conversions as Row[],
-      ...trailingLong.missing_conversions as Row[],
-      ...((budget.budget as Row).missing_conversions ?? []) as Row[]
-    ]);
     return {
       year,
       month,
@@ -2114,7 +2180,7 @@ const handlers: Record<ToolName, Handler> = {
       },
       valuation_complete: missing.length === 0,
       missing_conversions: missing,
-      conversion_warning: conversionSeverity(missing)
+      conversion_warning: conversionSeverity(missing, { recommendedModel: String(recommended.model) })
     };
   },
 
@@ -2868,7 +2934,40 @@ const handlers: Record<ToolName, Handler> = {
   list_backups: (ledger) => {
     const dir = join(dirname(ledger.path), "backups");
     if (!existsSync(dir)) return [];
-    return readdirSync(dir).map((file) => join(dir, file)).filter((path) => statSync(path).isFile()).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs).map((path) => ({ path: redactToolPath(ledger.path, path), size_bytes: statSync(path).size, modified_at: statSync(path).mtime.toISOString() }));
+    const backups = new Map<string, { path: string; sidecars: Row[] }>();
+    const sidecars: Array<{ parent: string; row: Row }> = [];
+    for (const file of readdirSync(dir)) {
+      const path = join(dir, file);
+      const stat = statSync(path);
+      if (!stat.isFile()) continue;
+      const sidecar = file.match(/^(.+\.(?:db|sqlite|sqlite3))-(wal|shm)$/);
+      if (sidecar) {
+        sidecars.push({
+          parent: join(dir, sidecar[1]),
+          row: {
+            type: sidecar[2],
+            path: redactToolPath(ledger.path, path),
+            size_bytes: stat.size,
+            modified_at: stat.mtime.toISOString()
+          }
+        });
+        continue;
+      }
+      if (![".db", ".sqlite", ".sqlite3"].includes(extname(file))) continue;
+      backups.set(path, { path, sidecars: [] });
+    }
+    for (const sidecar of sidecars) backups.get(sidecar.parent)?.sidecars.push(sidecar.row);
+    return [...backups.values()]
+      .sort((a, b) => statSync(b.path).mtimeMs - statSync(a.path).mtimeMs)
+      .map((backup) => {
+        const stat = statSync(backup.path);
+        return {
+          path: redactToolPath(ledger.path, backup.path),
+          size_bytes: stat.size,
+          modified_at: stat.mtime.toISOString(),
+          sidecars: backup.sidecars.sort((a, b) => String(a.type).localeCompare(String(b.type)))
+        };
+      });
   },
   init_defaults: (ledger, args) => {
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : args.currency ? asset(ledger, null, args.currency) : null;
