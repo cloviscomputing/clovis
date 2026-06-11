@@ -551,7 +551,7 @@ Example:
 ```text
 id = batch_abc
 type = import
-label = June card CSV
+label = June card QFX
 status = open
 metadata_json = {"statement_type":"credit_card"}
 ```
@@ -930,10 +930,14 @@ then finalize.
 Imports do not create a separate kind of transaction.
 
 They create normal `journals` and `journal_lines`, then add source metadata.
+When a bank offers QFX or OFX, prefer that over CSV because those files usually
+carry a bank-provided transaction id such as `FITID`. Clovis keeps that id on
+the imported transaction metadata. CSV is still supported and is the practical
+fallback when QFX/OFX is unavailable, incomplete, or malformed.
 
 Import flow:
 
-1. Parse CSV rows.
+1. Parse QFX, OFX, or CSV statement rows.
 2. Resolve the statement account, counterpart account, and asset.
 3. Turn each amount into a signed quantity from the statement account's point of
    view.

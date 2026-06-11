@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodTypeAny } from "zod";
 import { callTool } from "../app/catalog.js";
+import { OPERATING_MANUAL_INSTRUCTIONS, OPERATING_MANUAL_RESOURCES, operatingManualMarkdown } from "../app/operating-manual.js";
 import { TOOL_DEFINITIONS, normalizeToolInput, parameterAliasesForTool, toolAnnotations, type ToolDefinition, type ToolParameterDefinition } from "../app/signatures.js";
 import { VERSION } from "../version.js";
 
@@ -94,7 +95,23 @@ export function parseToolInput(name: string, input: Record<string, unknown> = {}
 }
 
 export function createClovisMcpServer(): McpServer {
-  const server = new McpServer({ name: "clovis", version: VERSION });
+  const server = new McpServer({ name: "clovis", version: VERSION }, { instructions: OPERATING_MANUAL_INSTRUCTIONS });
+  for (const resource of OPERATING_MANUAL_RESOURCES) {
+    server.registerResource(
+      resource.name,
+      resource.uri,
+      { title: resource.title, description: resource.description, mimeType: "text/markdown" },
+      async () => ({
+        contents: [
+          {
+            uri: resource.uri,
+            mimeType: "text/markdown",
+            text: operatingManualMarkdown(resource.topic)
+          }
+        ]
+      })
+    );
+  }
   for (const [name, definition] of Object.entries(TOOL_DEFINITIONS)) {
     (server as any).registerTool(
       name,

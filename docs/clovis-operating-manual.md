@@ -1,0 +1,296 @@
+# Clovis Operating Manual
+
+Clovis is a local-first bookkeeping system for people and agents. It keeps
+financial facts in a SQLite double-entry ledger and exposes a CLI, Node API,
+and MCP server over the same app catalog.
+
+The main idea is simple: let the ledger remember facts, let pending rows hold
+uncertainty, let reconciliation decide trust, and let reports explain only the
+universe they actually queried.
+
+This guide is operational guidance, not financial, tax, or legal advice.
+
+## First Principles
+
+- Live Clovis data is the source of truth. Chat history is not.
+- Pending is review. Posted is history. Planned is intent.
+- QFX and OFX are preferred for imports when available because stable ids make
+  duplicate detection safer. CSV remains supported.
+- Transfers move balances. Expenses consume money. Do not mix them.
+- Read-only and dry-run tools should come before mutation.
+
+## Statement Import
+
+A statement file is a pile of bank facts. Clovis turns those facts into pending
+ledger transactions so you can review them before they become accounting
+history.
+
+Use QFX or OFX when the bank offers it. Those files usually include stable ids
+such as `FITID`, which help Clovis recognize the same bank row later.
+
+Use CSV when QFX or OFX is unavailable, incomplete, or malformed. CSV works, but
+the bank often leaves out stable ids, so date, amount, and description matching
+matters more.
+
+Preview the file before importing. The preview answers: can Clovis read the
+file, which columns did it understand, and what rows will it create?
+
+Import statement rows as pending by default. Pending means the row is visible
+and useful, but not yet trusted as final bookkeeping.
+
+Before committing, reconcile the pending rows against the statement and check
+duplicate candidates. A clean import is boring: expected rows, expected balance,
+no unexplained extras.
+
+Commit only after review. If the import looks wrong, discard the batch or fix
+the mapping instead of posting bad rows and cleaning them up later.
+
+Recommended tools:
+
+- `file_access_status`
+- `preview_import`
+- `reconcile_statement_plan`
+- `process_statement`
+- `import_file`
+- `find_pending_duplicates`
+- `commit_batch`
+- `discard_batch`
+- `void_by_filter`
+
+Watch outs:
+
+- Do not commit a fresh import just because parsing succeeded. Parsing only
+  proves the file was readable.
+- If a path is blocked, call `file_access_status` and restart the agent host
+  with the needed `CLOVIS_ALLOWED_ROOTS` value.
+- If CSV descriptions change between exports, duplicate detection is weaker
+  than QFX/OFX stable-id matching.
+
+## Reconciliation
+
+Reconciliation is the part where Clovis proves that its ledger story agrees
+with an outside source, usually a bank or card statement.
+
+Start from the source statement. The statement is the receipt for what the bank
+says happened.
+
+Compare statement rows with posted and pending ledger rows for the same account,
+date range, and currency.
+
+Treat duplicate candidates as questions, not automatic truth. Same date and
+amount can be a duplicate, but it can also be two real purchases.
+
+Use expected ending balance when you have it. Matching rows plus matching
+balance is much stronger than matching rows alone.
+
+Preserve transfer intent. A payment from Checking to Visa is not dining, rent,
+or shopping; it is debt movement between accounts.
+
+When reconciliation finds a mismatch, fix the narrowest cause: mapping, missing
+row, duplicate row, wrong account, wrong sign, or wrong status.
+
+Recommended tools:
+
+- `reconcile_statement_plan`
+- `reconcile_diff`
+- `reconcile_statement`
+- `inspect_transaction`
+- `list_transactions`
+- `find_pending_duplicates`
+- `integrity_check`
+
+Watch outs:
+
+- A balanced journal can still be the wrong journal. Double-entry prevents
+  broken math, not bad categorization.
+- Do not resolve reconciliation mismatches by changing historical posted data
+  unless you know which source fact was wrong.
+- Transfers should explain movement between balance-sheet accounts; they should
+  not inflate expense reports.
+
+## Month End
+
+Month end is a snapshot exercise: what came in, what went out, what is still
+pending, what cash is spendable, and what obligations remain.
+
+Separate assets from liabilities. Cash in Checking and debt on Visa are both
+real, but they answer different questions.
+
+Use liability-aware projections for credit cards and debt. Spendable cash is
+not the same thing as gross cash.
+
+Include earmarks and goals when explaining available money. Money can be
+present but already assigned.
+
+Check pending rows before judging the month. Pending card charges and imports
+can change the practical picture.
+
+Use budgets to explain variance, not just totals. A month-end answer should say
+which categories are driving the result.
+
+Run integrity checks before giving final numbers. If the ledger is structurally
+unhealthy, the report is not ready.
+
+Recommended tools:
+
+- `cash_projection`
+- `project_month_end`
+- `financial_picture`
+- `financial_overview`
+- `budget_summary`
+- `budget_status`
+- `pending_summary`
+- `integrity_check`
+
+Watch outs:
+
+- Do not call all cash spendable when liabilities or earmarks are waiting to be
+  paid.
+- Do not mix planned, pending, and posted rows without saying which universe the
+  answer uses.
+- Month-end projections are assumptions. State expected inflows, expected
+  outflows, included accounts, and quote asset.
+
+## Runway
+
+Runway is how long the usable money lasts under a stated burn rate. The hard
+part is deciding what money is truly usable.
+
+Start with liquid assets, then subtract liabilities and near-term obligations
+when the question is survival cash.
+
+Remove earmarked money when it is not available for general spending. A tax
+reserve or rent reserve is not free cash.
+
+Estimate burn from actual spending over a relevant period, then adjust for known
+changes.
+
+Separate recurring fixed costs from optional variable spend. Cutting coffee does
+not fix a rent-sized problem.
+
+State the quote asset, included accounts, included statuses, and burn
+assumptions in the answer.
+
+Use scenarios for what-if work instead of rewriting actual history.
+
+Recommended tools:
+
+- `cash_projection`
+- `spending_rate`
+- `spending`
+- `net_worth`
+- `balance_sheet`
+- `forecast`
+- `compare_scenarios`
+
+Watch outs:
+
+- Net worth is not runway. Illiquid investments and unpaid card balances can
+  make net worth look better than cash reality.
+- Average spend can hide annual or irregular obligations. Look for rent, taxes,
+  insurance, subscriptions, and debt payments.
+- Runway answers should be ranges when inputs are uncertain.
+
+## Categorization
+
+Categorization names what a transaction means. The ledger already knows money
+moved; categories explain why it moved.
+
+Categorize the economic event, not just the merchant string. A card payment is a
+transfer; a restaurant charge is dining.
+
+Use durable match rules only for stable merchants and stable meanings. A broad
+rule can silently corrupt future imports.
+
+Keep Uncategorized as a review queue, not a permanent home.
+
+Audit repeated descriptions before applying bulk changes. Repetition is a clue,
+not proof.
+
+Prefer dry-run recategorization first so you can see the affected rows.
+
+After bulk categorization, inspect totals and a sample of changed transactions.
+
+Recommended tools:
+
+- `audit_categorization`
+- `apply_match_rules`
+- `recategorize_transaction`
+- `recategorize_by_pattern`
+- `recategorize_by_patterns`
+- `top_descriptions`
+- `list_uncategorized`
+- `inspect_transaction`
+
+Watch outs:
+
+- Do not create catch-all rules that classify every unknown merchant as real
+  spending.
+- Do not categorize transfers, refunds, reimbursements, or credit-card payments
+  as ordinary expenses without checking both sides.
+- Bulk recategorization should be dry-run first unless the affected rows were
+  already inspected.
+
+## Safety
+
+Safety means Clovis should be useful to agents without making it easy for an
+agent to damage the ledger by accident.
+
+Prefer read-only tools first. They are safe for discovery, diagnosis, and
+explanation.
+
+Read MCP annotations before routing calls. `readOnlyHint`, `destructiveHint`,
+and `idempotentHint` are machine-readable safety labels.
+
+Use dry-run-capable tools in preview mode before applying changes. The preview
+is the change request.
+
+Back up before destructive or broad edits. Backups are cheap compared with
+manual reconstruction.
+
+Use `file_access_status` when a statement path fails. The allowed roots are
+deliberate so agents cannot read arbitrary local files by surprise.
+
+Run doctor or integrity checks after upgrades and before important month-end
+work.
+
+Recommended tools:
+
+- `tool_registry`
+- `file_access_status`
+- `backup_status`
+- `backup_now`
+- `integrity_check`
+- `preview_commit`
+
+Watch outs:
+
+- Destructive tools should not be called speculatively.
+- A dry-run result is not a committed result. The caller must pass the explicit
+  commit or `dry_run:false` argument to apply supported mutations.
+- Clovis can organize bookkeeping facts, but it is not a bank, tax advisor,
+  custody system, or substitute for professional review.
+
+## MCP Surface
+
+The same manual is exposed to MCP clients in three ways:
+
+- server instructions, returned during MCP initialization
+- the read-only `operating_manual` tool
+- Markdown resources:
+  - `clovis://manual`
+  - `clovis://manual/statement-import`
+  - `clovis://manual/month-end`
+  - `clovis://manual/runway`
+  - `clovis://manual/safety`
+
+Agents that support MCP resources can read the Markdown directly. Agents that
+only support tool calls can call:
+
+```sh
+clovis --db ./ledger.db --format json tool operating_manual \
+  --json '{"topic":"statement_import"}'
+```
+
+Allowed topics are `all`, `statement_import`, `reconciliation`, `month_end`,
+`runway`, `categorization`, and `safety`.

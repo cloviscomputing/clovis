@@ -905,6 +905,12 @@ export const TOOL_DEFINITIONS = {
     ],
     returns: { type: "object" }
   },
+  "operating_manual": {
+    parameters: [
+      ["topic", "string", { optional: true, defaultValue: "all" }]
+    ],
+    returns: { type: "object" }
+  },
   "pending_summary": {
     parameters: [
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
@@ -1007,7 +1013,10 @@ export const TOOL_DEFINITIONS = {
       ["expected_outflows", "object[]", { nullable: true, optional: true, defaultValue: null }],
       ["expected_paychecks", "object[]", { nullable: true, optional: true, defaultValue: null }],
       ["include_pending", "boolean", { optional: true, defaultValue: true }],
+      ["include_planned", "boolean", { optional: true, defaultValue: true }],
       ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["liability_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
       ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
@@ -1361,7 +1370,7 @@ const READ_ONLY_TOOLS = new Set<string>([
   "get_transaction", "goal_progress", "holdings", "income_statement", "inspect_transaction", "integrity_check",
   "list_accounts", "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries",
   "list_entries_by_asset", "list_goals", "list_import_batches", "list_match_rules", "list_prices", "list_scheduled",
-  "list_tags", "list_transactions", "list_uncategorized", "list_unmatched_transfers", "net_worth", "pending_summary",
+  "list_tags", "list_transactions", "list_uncategorized", "list_unmatched_transfers", "net_worth", "operating_manual", "pending_summary",
   "preview_commit", "preview_import", "project_balances", "project_month_end", "reconcile_diff", "reconcile_statement",
   "reconcile_statement_plan", "search_transactions", "spending", "spending_rate", "suggest_budgets",
   "top_descriptions", "tool_registry", "trial_balance", "unbudgeted_spending"

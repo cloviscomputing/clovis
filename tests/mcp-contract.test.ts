@@ -334,6 +334,10 @@ const CASES = {
   migrate_asset_entries: { mutation: "dry-run", args: (ctx) => ({ from_asset_id: ctx.assets.usd, to_asset_id: ctx.assets.unused }), assert: expectObject },
   move_transactions: { mutation: "dry-run", args: (ctx) => ({ from_account: ctx.accounts.Uncategorized, to_account: ctx.accounts.Groceries }), assert: expectObject },
   net_worth: { mutation: "read", args: (ctx) => ({ date: "2026-06-30", quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  operating_manual: { mutation: "read", args: () => ({ topic: "statement_import" }), assert: (result) => {
+    expect(result.name).toBe("Clovis Operating Manual");
+    expect(result.recommended_tools).toContain("preview_import");
+  } },
   pending_summary: { mutation: "read", args: () => ({ year: 2026, month: 6 }), assert: expectObject },
   plan_transaction: { mutation: "write", args: (ctx) => ({ date: "2026-06-30", amount: 75, from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Rent, description: "Future rent" }), assert: expectObject },
   post_journal_entry: { mutation: "write", args: (ctx) => ({ date: "2026-06-13", description: "Manual journal", legs: [{ account_id: ctx.accounts.Checking, amount: 10 }, { account_id: ctx.accounts["Opening Balances"], amount: -10 }] }), assert: expectObject },
@@ -342,7 +346,10 @@ const CASES = {
   process_scheduled: { mutation: "write", setup: ensureSchedule, args: () => ({ through_date: "2026-06-30" }), assert: expectObject },
   process_statement: { mutation: "dry-run", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], expected_balance: null }), assert: expectObject },
   project_balances: { mutation: "read", setup: ensureGoal, args: (ctx) => ({ through: "2026-06-30", include_goals: true, quote_asset_id: ctx.assets.usd }), assert: expectObject },
-  project_month_end: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, expected_inflows: [{ amount: 100 }], expected_outflows: [{ amount: 25 }], quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  project_month_end: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, asset_account_ids: [ctx.accounts.Checking], liability_account_ids: [ctx.accounts["Credit Card"]], expected_inflows: [{ amount: 100 }], expected_outflows: [{ amount: 25 }], quote_asset_id: ctx.assets.usd }), assert: (result, ctx) => {
+    expect(result.asset_account_ids).toEqual([ctx.accounts.Checking]);
+    expect(result.liability_account_ids).toEqual([ctx.accounts["Credit Card"]]);
+  } },
   recategorize_by_pattern: { mutation: "dry-run", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
   recategorize_by_patterns: { mutation: "dry-run", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
   recategorize_transaction: { mutation: "write", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"] }), assert: expectObject },
@@ -462,6 +469,28 @@ describe("MCP contract matrix", () => {
       expect(byName.delete_transaction.annotations.destructiveHint).toBe(true);
       expect(byName.void_by_filter.annotations.destructiveHint).toBe(true);
       expect(byName.create_transaction.annotations.readOnlyHint).toBe(false);
+      expect(byName.operating_manual.annotations.readOnlyHint).toBe(true);
+    });
+  });
+
+  it("exposes operating manual instructions and MCP resources", async () => {
+    const ctx = createContext();
+    await withMcpClient(ctx, async (client) => {
+      expect(client.getInstructions()).toContain("Use live Clovis data");
+      const resources = await client.listResources();
+      const byUri = Object.fromEntries(resources.resources.map((resource) => [resource.uri, resource]));
+      expect(byUri["clovis://manual"].mimeType).toBe("text/markdown");
+      expect(byUri["clovis://manual/statement-import"].title).toBe("Clovis Statement Import Manual");
+
+      const full = await client.readResource({ uri: "clovis://manual" });
+      const fullText = "text" in full.contents[0] ? full.contents[0].text : "";
+      expect(fullText).toContain("Clovis Operating Manual");
+      expect(fullText).toContain("QFX");
+
+      const importGuide = await client.readResource({ uri: "clovis://manual/statement-import" });
+      const importText = "text" in importGuide.contents[0] ? importGuide.contents[0].text : "";
+      expect(importText).toContain("Statement Import");
+      expect(importText).toContain("preview_import");
     });
   });
 

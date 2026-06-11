@@ -181,12 +181,18 @@ clovis --db ./ledger.db report balance-sheet --quote CAD
 clovis --db ./ledger.db report income-statement --year 2026 --month 6 --quote CAD
 ```
 
-Import a CSV, QFX, or OFX statement into an existing account. If `--currency`
-is omitted, the import uses the account `default_asset`; pass `--currency`
-when the file needs to create or use a different explicit asset. CLI imports
-default to `pending` so rows can be reviewed before posting.
+Import a QFX, OFX, or CSV statement into an existing account. Prefer QFX or OFX
+when your bank provides them because they usually include a stable institution
+transaction id such as `FITID`; Clovis preserves that id as statement metadata.
+CSV remains supported and is the right fallback for banks or exports that do
+not provide usable QFX/OFX files. If `--currency` is omitted, the import uses
+the account `default_asset`; pass `--currency` when the file needs to create or
+use a different explicit asset. CLI imports default to `pending` so rows can be
+reviewed before posting.
 
 ```sh
+clovis --db ./ledger.db import --file ./statement.qfx \
+  --account "Checking" --counterpart "Uncategorized"
 clovis --db ./ledger.db import --file ./statement.csv \
   --account "Checking" --counterpart "Uncategorized"
 ```
@@ -259,6 +265,10 @@ clovis --db ./ledger.db doctor --read-only-tools --quote CAD
 The doctor checks the tool registry, status semantics, filtered exports,
 integrity, and quote-report paths without mutating the ledger.
 
+For agent-facing workflow guidance, Clovis ships the
+[Clovis Operating Manual](docs/clovis-operating-manual.md). The same guidance
+is available through the read-only `operating_manual` tool.
+
 ## MCP
 
 Start the MCP server against a specific local ledger database:
@@ -277,7 +287,11 @@ MCP tools include safety annotations such as `readOnlyHint`,
 `destructiveHint`, and `idempotentHint`. The `tool_registry` tool returns the
 full shared schema, rendered signatures, parameter aliases, status convention,
 file-access configuration, and safety metadata through the normal MCP tool-call
-path.
+path. The server also exposes the Clovis Operating Manual as MCP instructions,
+as the read-only `operating_manual` tool, and as Markdown resources at
+`clovis://manual`, `clovis://manual/statement-import`,
+`clovis://manual/month-end`, `clovis://manual/runway`, and
+`clovis://manual/safety`.
 
 Example local MCP configuration:
 
@@ -393,7 +407,9 @@ Support tables keep workflow concerns out of the journal core:
 - `migration_history`: applied schema upgrades.
 
 For the complete SQLite schema, persistence flow, and design rationale, see
-[docs/sqlite-schema.md](docs/sqlite-schema.md).
+[docs/sqlite-schema.md](docs/sqlite-schema.md). For the agent workflow model
+that sits on top of the ledger, see
+[docs/clovis-operating-manual.md](docs/clovis-operating-manual.md).
 
 ## License
 

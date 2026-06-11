@@ -785,6 +785,13 @@ describe("app and package surface", () => {
       const listed = callTool("list_transactions", { status: "all", compact: true, limit: 100 }, ledger) as any;
       expect(listed.total).toBe(3);
       expect(listed.transactions.map((tx: any) => tx.status).sort()).toEqual(["pending", "planned", "posted"]);
+      expect(listed.transactions[0]).not.toHaveProperty("entries");
+      expect(listed.transactions[0]).not.toHaveProperty("tags");
+      expect(listed.transactions[0].entry_count).toBe(2);
+      expect(listed.transactions[0].account_ids).toHaveLength(2);
+      const fullListed = callTool("list_transactions", { status: "all", compact: false, limit: 1 }, ledger) as any;
+      expect(fullListed.transactions[0].entries).toHaveLength(2);
+      expect(fullListed.transactions[0].tags).toEqual([]);
       expect((callTool("count_transactions", { status: "all" }, ledger) as any).count).toBe(3);
       expect((callTool("count_transactions", { status: null }, ledger) as any).count).toBe(3);
       expect((callTool("get_balance", { account_id: accounts.Checking, status: "all" }, ledger) as any).balance_cents).toBe(17500);
@@ -934,6 +941,7 @@ describe("app and package surface", () => {
       expect(byName.list_accounts.safety.readOnlyHint).toBe(true);
       expect(byName.delete_transaction.safety.destructiveHint).toBe(true);
       expect(byName.balance_sheet.aliases.currency).toBe("quote_asset_id");
+      expect(byName.operating_manual.safety.readOnlyHint).toBe(true);
       expect(byName.tool_registry.safety.idempotentHint).toBe(true);
       expect(registry.file_access.allowed_roots).toContain(realpathSync(dirname(ledger.path)));
       expect(registry.file_access.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
@@ -941,6 +949,20 @@ describe("app and package surface", () => {
       const sheet = callTool("balance_sheet", { currency: "USD", status: "all" }, ledger) as any;
       expect(sheet.quote_asset_id).toBe((callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id);
       expect(sheet.total_assets).toBe(10000);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("exposes the Clovis Operating Manual as a read-only app tool", () => {
+    const ledger = tempLedger();
+    try {
+      const manual = callTool("operating_manual", { topic: "statement_import" }, ledger) as any;
+      expect(manual.name).toBe("Clovis Operating Manual");
+      expect(manual.topic).toBe("statement_import");
+      expect(manual.recommended_tools).toContain("preview_import");
+      expect(manual.guidance.join(" ")).toContain("pending");
+      expect(() => callTool("operating_manual", { topic: "nonsense" }, ledger)).toThrow(/Unsupported operating manual topic/);
     } finally {
       ledger.close();
     }
@@ -1162,6 +1184,10 @@ describe("app and package surface", () => {
 
       const goal = callTool("set_goal", { account: accounts.Savings, target: 500, name: "Emergency" }, ledger) as any;
       expect(goal.target_cents).toBe(50000);
+      const missingGoal = callTool("goal_progress", { account: accounts.Checking }, ledger) as any;
+      expect(missingGoal).toMatchObject({ found: false, account_id: accounts.Checking, goal: null, target_cents: null });
+      const progress = callTool("goal_progress", { account: accounts.Savings }, ledger) as any;
+      expect(progress).toMatchObject({ found: true, account_id: accounts.Savings, target_cents: 50000 });
       expect(callTool("list_import_batches", {}, ledger)).toEqual([]);
     } finally {
       ledger.close();
@@ -1202,6 +1228,15 @@ describe("app and package surface", () => {
       expect(full.liability_effect_cents).toBe(-7500);
       expect(full.available_cash_cents).toBe(406843);
       expect(full.available_cash_cents).not.toBe(base.available_cash_cents);
+
+      const monthEndMixed = callTool("project_month_end", { year: 2026, month: 6, account_ids: [checking, visa], quote_asset_id: usd }, ledger) as any;
+      expect(monthEndMixed.asset_account_ids).toEqual([checking]);
+      expect(monthEndMixed.liability_account_ids).toEqual([visa]);
+      expect(monthEndMixed.available_cash_cents).toBe(full.available_cash_cents);
+      expect(monthEndMixed.projected_month_end_cents).toBe(full.available_cash_cents);
+
+      const monthEndExplicit = callTool("project_month_end", { year: 2026, month: 6, asset_account_ids: [checking], liability_account_ids: [visa], expected_inflows: [{ amount: 100 }], expected_outflows: [{ amount: 25 }], quote_asset_id: usd }, ledger) as any;
+      expect(monthEndExplicit.projected_month_end_cents).toBe(full.available_cash_cents + 7500);
     } finally {
       ledger.close();
     }

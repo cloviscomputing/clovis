@@ -8,6 +8,7 @@ import { normalAmount } from "../core/accounting.js";
 import { openMcpLedger } from "./context.js";
 import { publicize, stringifyPublic } from "./json.js";
 import { assertToolDataSize, fileAccessStatus, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
+import { operatingManual } from "./operating-manual.js";
 import { normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety } from "./signatures.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
@@ -36,7 +37,7 @@ export const TOOL_NAMES = [
   "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries", "list_entries_by_asset",
   "list_goals", "list_import_batches", "list_match_rules", "list_prices", "list_scheduled", "list_tags",
   "list_transactions", "list_uncategorized", "list_unmatched_transfers", "match_transfer_pairs", "match_transfers",
-  "merge_accounts", "merge_branch", "migrate_asset_entries", "move_transactions", "net_worth", "pending_summary",
+  "merge_accounts", "merge_branch", "migrate_asset_entries", "move_transactions", "net_worth", "operating_manual", "pending_summary",
   "plan_transaction", "post_journal_entry", "preview_commit", "preview_import", "process_scheduled", "process_statement",
   "project_balances", "project_month_end", "recategorize_by_pattern", "recategorize_by_patterns", "recategorize_transaction",
   "recognize_gain_loss", "reconcile_diff", "reconcile_statement", "reconcile_statement_plan", "reconcile_to_balance",
@@ -177,6 +178,29 @@ function nonOverlappingAccounts(ledger: Ledger, refs: string[], allowedTypes?: s
   });
 }
 
+function splitProjectionAccounts(ledger: Ledger, args: Args): { asset_account_ids?: string[]; liability_account_ids?: string[] } {
+  let assetRefs = args.asset_account_ids == null ? null : [...args.asset_account_ids as string[]];
+  let liabilityRefs = args.liability_account_ids == null ? null : [...args.liability_account_ids as string[]];
+  for (const ref of args.account_ids ?? []) {
+    const accountId = account(ledger, ref);
+    const row = ledger.getAccount(accountId);
+    if (!row) throw new Error(`Account '${accountId}' not found`);
+    if (row.account_type === "asset") {
+      assetRefs ??= [];
+      assetRefs.push(accountId);
+    } else if (row.account_type === "liability") {
+      liabilityRefs ??= [];
+      liabilityRefs.push(accountId);
+    } else {
+      throw new Error(`Account '${row.name}' must be asset or liability`);
+    }
+  }
+  return {
+    asset_account_ids: assetRefs ?? undefined,
+    liability_account_ids: liabilityRefs ?? undefined
+  };
+}
+
 function assetScale(ledger: Ledger, assetId?: string | null): number {
   return ledger.getAsset(assetId || "")?.scale ?? 2;
 }
@@ -219,15 +243,30 @@ function txPublic(ledger: Ledger, tx: Journal, compact = false): Row {
   const entries = entriesPublic(ledger, tx.id);
   const main = entries.toSorted((a, b) => Number(BigInt(b.quantity) ** 2n - BigInt(a.quantity) ** 2n))[0];
   const amount = main ? (BigInt(main.quantity) < 0n ? -BigInt(main.quantity) : BigInt(main.quantity)) : 0n;
+  const tags = ledger.listAnnotations("tx", tx.id);
+  if (compact) {
+    const { entries: _entries, tags: _tags, ...header } = tx as Row;
+    void _entries;
+    void _tags;
+    return {
+      ...header,
+      amount,
+      amount_cents: amount,
+      amount_display: main ? display(ledger, amount, String(main.asset_id)) : 0,
+      entry_count: entries.length,
+      tag_count: tags.length,
+      account_ids: [...new Set(entries.map((entry) => String(entry.account_id)))],
+      asset_ids: [...new Set(entries.map((entry) => String(entry.asset_id)))]
+    };
+  }
   const out: Row = {
     ...tx,
     entries,
     amount,
     amount_cents: amount,
     amount_display: main ? display(ledger, amount, String(main.asset_id)) : 0,
-    tags: ledger.listAnnotations("tx", tx.id)
+    tags
   };
-  if (compact) for (const entry of out.entries as Row[]) delete entry.id;
   return out;
 }
 
@@ -1290,11 +1329,38 @@ const handlers: Record<ToolName, Handler> = {
   list_goals: (ledger) => ledger.listGoalTargets().map((row) => ({ ...row, target_quantity: row.quantity, target_cents: row.quantity, ...handlers.goal_progress(ledger, { account: row.account_id }) as Row })),
   goal_progress: (ledger, args) => {
     const acct = account(ledger, args.account);
+    const accountRow = ledger.getAccount(acct)!;
     const row = ledger.getGoalTarget(acct);
-    if (!row) throw new Error("Goal not found");
+    if (!row) {
+      return {
+        found: false,
+        account_id: acct,
+        account_name: accountRow.name,
+        goal: null,
+        asset_id: null,
+        name: null,
+        target_quantity: null,
+        target_cents: null,
+        current_cents: null,
+        remaining_cents: null,
+        progress_pct: null
+      };
+    }
     const balance = ledger.balanceTree(acct, String(row.asset_id), null, null);
     const target = BigInt(row.quantity as string | number | bigint | boolean);
-    return { account_id: acct, asset_id: row.asset_id, name: row.name, target_quantity: target, target_cents: target, current_cents: balance, remaining_cents: target > balance ? target - balance : 0n, progress_pct: target ? Number(balance) / Number(target) * 100 : 0 };
+    return {
+      found: true,
+      account_id: acct,
+      account_name: accountRow.name,
+      goal: row,
+      asset_id: row.asset_id,
+      name: row.name,
+      target_quantity: target,
+      target_cents: target,
+      current_cents: balance,
+      remaining_cents: target > balance ? target - balance : 0n,
+      progress_pct: target ? Number(balance) / Number(target) * 100 : 0
+    };
   },
   delete_goal: (ledger, args) => ({ deleted: ledger.deleteGoal(account(ledger, args.account)), account_id: account(ledger, args.account) }),
 
@@ -1564,6 +1630,7 @@ const handlers: Record<ToolName, Handler> = {
     const rows = ledger.listTransactions({ status: "pending", dateFrom: date_from, dateTo: date_to }).map((tx) => txPublic(ledger, tx));
     return { count: rows.length, transactions: rows, total_cents: rows.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n) };
   },
+  operating_manual: (_ledger, args) => operatingManual(args.topic),
   record_pending_expenses: (ledger, args) => {
     const pendingBucket = args.dry_run === false ? ledger.getOrCreateAccount("Pending Expenses", "expense") : "Pending Expenses";
     return handlers.import_transactions(ledger, {
@@ -1625,7 +1692,8 @@ const handlers: Record<ToolName, Handler> = {
     return { affected_accounts: rows, total_accounts: rows.length };
   },
   project_month_end: (ledger, args) => {
-    const projection = handlers.cash_projection(ledger, { ...args, asset_account_ids: args.asset_account_ids ?? args.account_ids }) as Row;
+    const projectionAccounts = splitProjectionAccounts(ledger, args);
+    const projection = handlers.cash_projection(ledger, { ...args, ...projectionAccounts }) as Row;
     const quote = reportAsset(ledger, args.quote_asset_id);
     const inflows = [...(args.expected_inflows ?? []), ...(args.expected_paychecks ?? [])].reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
     const outflows = (args.expected_outflows ?? []).reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);

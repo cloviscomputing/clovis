@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Make `project_month_end` accept explicit `asset_account_ids` and `liability_account_ids`, and split mixed `account_ids` into the correct cash-projection buckets.
+- Make `list_transactions compact:true` omit full `entries` and `tags` while retaining scan-friendly counts and account/asset IDs.
+- Make missing `goal_progress` return `{ found:false, goal:null }` instead of throwing.
+- Recommend QFX/OFX statement imports when available while keeping CSV documented as a supported fallback.
+- Add the Clovis Operating Manual as public docs, MCP server instructions, MCP Markdown resources, and the read-only `operating_manual` tool.
+
 ## 0.2.2
 
 Agent file-access configuration release.

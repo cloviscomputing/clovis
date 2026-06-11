@@ -556,7 +556,10 @@ const READ_CASES: ReadCase[] = [
   {
     name: "goal_progress",
     args: (ctx) => ({ account: ctx.accounts.Savings }),
-    oracle: (result, ctx) => expect(result.target_cents).toBe(Number(get(ctx, "SELECT quantity FROM targets WHERE type = 'goal' AND account_id = ?", ctx.accounts.Savings).quantity))
+    oracle: (result, ctx) => {
+      expect(result.found).toBe(true);
+      expect(result.target_cents).toBe(Number(get(ctx, "SELECT quantity FROM targets WHERE type = 'goal' AND account_id = ?", ctx.accounts.Savings).quantity));
+    }
   },
   {
     name: "holdings",
@@ -671,6 +674,16 @@ const READ_CASES: ReadCase[] = [
     oracle: (result) => expect(result.net_worth).toBe(result.total_assets + result.total_liabilities)
   },
   {
+    name: "operating_manual",
+    args: () => ({ topic: "safety" }),
+    oracle: (result) => {
+      expect(result.name).toBe("Clovis Operating Manual");
+      expect(result.topic).toBe("safety");
+      expect(result.recommended_tools).toContain("tool_registry");
+      expect(result.warnings.join(" ")).toContain("dry-run");
+    }
+  },
+  {
     name: "pending_summary",
     args: () => ({ year: 2026, month: 6 }),
     oracle: (result, ctx) => {
@@ -699,8 +712,12 @@ const READ_CASES: ReadCase[] = [
   },
   {
     name: "project_month_end",
-    args: (ctx) => ({ year: 2026, month: 6, expected_inflows: [{ amount: 100 }], expected_outflows: [{ amount: 25 }], quote_asset_id: ctx.assets.usd }),
-    oracle: (result) => expect(result.projected_month_end_cents).toBe(result.available_cash_cents + 7500)
+    args: (ctx) => ({ year: 2026, month: 6, account_ids: [ctx.accounts.Checking, ctx.accounts["Credit Card"]], expected_inflows: [{ amount: 100 }], expected_outflows: [{ amount: 25 }], quote_asset_id: ctx.assets.usd }),
+    oracle: (result, ctx) => {
+      expect(result.asset_account_ids).toEqual([ctx.accounts.Checking]);
+      expect(result.liability_account_ids).toEqual([ctx.accounts["Credit Card"]]);
+      expect(result.projected_month_end_cents).toBe(result.available_cash_cents + 7500);
+    }
   },
   {
     name: "reconcile_diff",
@@ -787,7 +804,7 @@ describe("read tool SQLite oracle audit", () => {
   it("has a raw SQLite oracle for every read-only tool", () => {
     const readNames = new Set(READ_CASES.map((row) => row.name));
     expect(readNames.size).toBe(READ_CASES.length);
-    expect(readNames.size).toBe(68);
+    expect(readNames.size).toBe(69);
     for (const name of readNames) expect(TOOL_NAMES).toContain(name);
   });
 
