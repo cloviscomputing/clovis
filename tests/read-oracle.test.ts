@@ -424,6 +424,7 @@ const READ_CASES: ReadCase[] = [
     oracle: (result, ctx) => {
       expect(result.budgets[0].budgeted_cents).toBe(Number(get(ctx, "SELECT quantity FROM targets WHERE type = 'budget' AND account_id = ?", ctx.accounts.Groceries).quantity));
       expect(result.budgets[0].spent_cents).toBe(Number(expenseByAccount(ctx).get(ctx.accounts.Groceries) ?? 0n));
+      expect(result.total_remaining_cents).toBe(result.total_budgeted_cents - result.total_spent_cents);
     }
   },
   {
@@ -454,11 +455,14 @@ const READ_CASES: ReadCase[] = [
   },
   {
     name: "cash_runway",
-    args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }),
+    args: (ctx) => ({ year: 2026, month: 6, as_of: "2026-06-11", quote_asset_id: ctx.assets.usd }),
     oracle: (result) => {
       expect(result.include_pending).toBe(false);
       expect(result.include_planned).toBe(false);
+      expect(result.include_sources).toBe(false);
       expect(result.assumptions.conservative_default).toBe(true);
+      expect(result.assumptions.partial_month_excluded_from_trailing_actuals_by_default).toBe(true);
+      expect(result.trailing_window.basis).toBe("last_complete_months");
       expect(result.burn_models.map((row: Row) => row.model)).toEqual(expect.arrayContaining([
         "budget_burn",
         "trailing_3_month_actual",
@@ -466,6 +470,8 @@ const READ_CASES: ReadCase[] = [
         "fixed_obligation_burn",
         "discretionary_adjusted_burn"
       ]));
+      expect(result.burn_models[0].source).toBeUndefined();
+      expect(result.burn_models[0].source_summary).toBeDefined();
       expect(result.recommended_model).toBeTruthy();
     }
   },
@@ -520,6 +526,8 @@ const READ_CASES: ReadCase[] = [
     oracle: (result, ctx) => {
       expect(result.monthly_activity.income).toBe(Number(incomeExpense(ctx, "active").income));
       expect(result.include_planned).toBe(false);
+      expect(result.current_snapshot.as_of).toBeNull();
+      expect(result.current_snapshot.as_of_basis).toBe("current_open_ended");
       expect(result.cash_position.actual.include_planned).toBe(false);
     }
   },
@@ -803,6 +811,7 @@ const READ_CASES: ReadCase[] = [
       expect(result.count).toBe(TOOL_NAMES.length);
       expect(result.tools.find((tool: Row) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
       expect(result.tools.find((tool: Row) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
+      expect(result.unknown_names).toEqual([]);
       expect(result.file_access.mode).toBe("unrestricted");
     },
     cli: false

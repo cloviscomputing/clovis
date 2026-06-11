@@ -33,6 +33,7 @@ function allowedPackedFile(file) {
   // along in a published tarball.
   return file === "README.md" ||
     file === "RELEASING.md" ||
+    file === "CHANGELOG.md" ||
     file === "LICENSE" ||
     file === "package.json" ||
     (file.startsWith("docs/") && file.endsWith(".md")) ||

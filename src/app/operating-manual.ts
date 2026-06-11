@@ -143,6 +143,9 @@ const SECTIONS = {
     summary: "Cash runway is how long spendable cash lasts under explicit burn assumptions. Clovis treats this as a conservative report, not a net-worth shortcut.",
     guidance: [
       "Start with cash_runway. It defaults to posted actual cash, deducts liabilities, excludes planned and pending rows, and keeps obvious investment accounts out of default spendable cash.",
+      "By default, trailing actual burn uses the last complete months, not the current partial month. Use include_partial_month:true only when a partial month should be part of the denominator.",
+      "Runway cash reserves the remaining current-month budget by default. Use reserve_remaining_budget:false only when you intentionally want raw available cash.",
+      "cash_runway omits heavy source rows by default. Use include_sources:true for audit/debug views after the compact answer is understood.",
       "Use include_pending:true or include_planned:true only when the answer should explicitly become a projection.",
       "Read the burn models separately: budget burn, trailing actual burn, fixed-obligation burn, and discretionary-adjusted burn answer different questions.",
       "Use cash_projection when you need the audit trail behind spendable cash: starting cash, liabilities, earmarks, remaining budget, and planned income.",

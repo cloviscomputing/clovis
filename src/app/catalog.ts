@@ -81,6 +81,10 @@ function addMonths(year: number, month: number, delta: number): { year: number; 
   return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 };
 }
 
+function monthEnd(year: number, month: number): string {
+  return new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
+}
+
 function dateDeltaDays(left: string, right: string): number {
   return Math.abs((Date.parse(`${left}T00:00:00Z`) - Date.parse(`${right}T00:00:00Z`)) / 86400000);
 }
@@ -494,14 +498,26 @@ function spendableAssetAccountDefaults(ledger: Ledger): { selected: string[]; ex
   };
 }
 
-function trailingSpend(ledger: Ledger, year: number, month: number, months: number, quote: string): Row {
+function trailingWindowEnd(year: number, month: number, asOf: string, includePartialMonth: boolean): Row {
+  if (includePartialMonth || monthEnd(year, month) < asOf) {
+    return { year, month, basis: includePartialMonth ? "requested_month_including_partial" : "requested_month_complete", excluded_partial_month: null };
+  }
+  const previous = addMonths(year, month, -1);
+  return {
+    ...previous,
+    basis: "last_complete_months",
+    excluded_partial_month: { year, month, as_of: asOf }
+  };
+}
+
+function trailingSpend(ledger: Ledger, year: number, month: number, months: number, quote: string, includeSources = false): Row {
   const monthRows: Row[] = [];
   const missing: Row[] = [];
   for (let offset = months - 1; offset >= 0; offset -= 1) {
     const period = addMonths(year, month, -offset);
     const result = spendingRows(ledger, period.year, period.month, "posted", quote, true) as { rows: Row[]; missing: Row[] };
     const total = result.rows.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n);
-    monthRows.push({ year: period.year, month: period.month, spending_cents: total, categories: result.rows });
+    monthRows.push({ year: period.year, month: period.month, spending_cents: total, ...(includeSources ? { categories: result.rows } : {}) });
     missing.push(...result.missing);
   }
   const total = monthRows.reduce((sum, row) => sum + BigInt(row.spending_cents), 0n);
@@ -512,6 +528,47 @@ function trailingSpend(ledger: Ledger, year: number, month: number, months: numb
     month_rows: monthRows,
     missing_conversions: missing
   };
+}
+
+function trailingSummary(row: Row): Row {
+  return {
+    months: row.months,
+    total_cents: row.total_cents,
+    monthly_burn_cents: row.monthly_burn_cents,
+    month_rows: row.month_rows,
+    missing_conversion_count: (row.missing_conversions as Row[] ?? []).length
+  };
+}
+
+function budgetSummary(row: Row): Row {
+  return {
+    total_budgeted_cents: row.total_budgeted_cents ?? 0n,
+    total_spent_cents: row.total_spent_cents ?? 0n,
+    total_remaining_cents: row.total_remaining_cents ?? 0n,
+    budget_count: (row.budgets as Row[] ?? []).length,
+    valuation_complete: row.valuation_complete,
+    missing_conversion_count: (row.missing_conversions as Row[] ?? []).length
+  };
+}
+
+function cashProjectionSummary(row: Row): Row {
+  return {
+    basis: row.basis,
+    actual_available_cash_cents: row.actual_available_cash_cents,
+    available_cash_cents: row.available_cash_cents,
+    pending_available_delta_cents: row.pending_available_delta_cents,
+    planned_available_delta_cents: row.planned_available_delta_cents,
+    earmarks_cents: row.earmarks_cents,
+    liability_effect_cents: row.liability_effect_cents,
+    remaining_budget_cents: row.remaining_budget_cents,
+    planned_income_cents: row.planned_income_cents,
+    valuation_complete: row.valuation_complete,
+    missing_conversion_count: (row.missing_conversions as Row[] ?? []).length
+  };
+}
+
+function positive(value: bigint): bigint {
+  return value > 0n ? value : 0n;
 }
 
 function budgetBurn(ledger: Ledger, year: number, month: number, quote: string, includePending: boolean): Row {
@@ -1212,15 +1269,14 @@ function recurringDateRange(args: Args): [string | null, string | null] {
   return [start.toISOString().slice(0, 10), end.toISOString().slice(0, 10)];
 }
 
-function registryNames(args: Args): ToolName[] {
-  if (args.names == null) return [...TOOL_NAMES];
+function registryNames(args: Args): { names: ToolName[]; unknown_names: string[] } {
+  if (args.names == null) return { names: [...TOOL_NAMES], unknown_names: [] };
   const requested = Array.isArray(args.names)
     ? args.names.map((name) => String(name))
     : String(args.names).split(",").map((name) => name.trim()).filter(Boolean);
   const known = new Set<string>(TOOL_NAMES);
   const unknown = requested.filter((name) => !known.has(name));
-  if (unknown.length > 0) throw new Error(`Unknown tool name(s): ${unknown.join(", ")}`);
-  return requested as ToolName[];
+  return { names: requested.filter((name) => known.has(name)) as ToolName[], unknown_names: unknown };
 }
 
 function registrySafetyMatches(name: ToolName, args: Args): boolean {
@@ -1777,8 +1833,15 @@ const handlers: Record<ToolName, Handler> = {
     const month = args.month ?? new Date().getUTCMonth() + 1;
     const actualCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: false, include_planned: false }) as Row;
     const projectedCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
+    const currentSnapshot = overview.current_snapshot as Row;
+    if (currentSnapshot.as_of === "9999-12-31") {
+      currentSnapshot.ledger_as_of = currentSnapshot.as_of;
+      currentSnapshot.as_of = null;
+      currentSnapshot.as_of_basis = "current_open_ended";
+    }
     return {
       ...overview,
+      current_snapshot: currentSnapshot,
       basis: includePlanned ? "planned_projection" : includePending ? "current_active" : "current_actual",
       report_status: status,
       include_pending: includePending,
@@ -1900,8 +1963,10 @@ const handlers: Record<ToolName, Handler> = {
     const nowDate = new Date();
     const year = Number(args.year ?? nowDate.getUTCFullYear());
     const month = Number(args.month ?? nowDate.getUTCMonth() + 1);
+    const asOf = args.as_of ? validateDate(String(args.as_of)) : today();
     const includePending = args.include_pending === true;
     const includePlanned = args.include_planned === true;
+    const includeSources = args.include_sources === true && args.summary !== true;
     const shortMonths = Number(args.trailing_months_short ?? 3);
     const longMonths = Number(args.trailing_months_long ?? 6);
     if (!Number.isInteger(shortMonths) || shortMonths < 1) throw new Error("trailing_months_short must be a positive integer");
@@ -1923,25 +1988,33 @@ const handlers: Record<ToolName, Handler> = {
       quote_asset_id: quote
     }) as Row;
     const budget = budgetBurn(ledger, year, month, quote, includePending);
-    const trailingShort = trailingSpend(ledger, year, month, shortMonths, quote);
-    const trailingLong = trailingSpend(ledger, year, month, longMonths, quote);
+    const trailingEnd = trailingWindowEnd(year, month, asOf, args.include_partial_month === true);
+    const trailingShort = trailingSpend(ledger, Number(trailingEnd.year), Number(trailingEnd.month), shortMonths, quote, includeSources);
+    const trailingLong = trailingSpend(ledger, Number(trailingEnd.year), Number(trailingEnd.month), longMonths, quote, includeSources);
+    const currentMonthBudgetReserve = args.reserve_remaining_budget === false ? 0n : positive(BigInt((budget.budget as Row).total_remaining_cents ?? 0));
     const available = BigInt(projection.available_cash_cents);
+    const runwayCash = positive(available - currentMonthBudgetReserve);
     const fixedBurn = BigInt(budget.fixed_budget_cents);
     const discretionaryBurn = BigInt(budget.discretionary_budget_cents);
     const discretionaryAdjusted = fixedBurn + scaleBigint(discretionaryBurn, discretionaryMultiplier);
-    const model = (name: string, label: string, monthlyBurn: bigint, source: Row) => ({
+    const withSource = (source: Row, sourceSummary: Row) => includeSources ? { source } : { source_summary: sourceSummary };
+    const model = (name: string, label: string, monthlyBurn: bigint, source: Row, sourceSummary: Row) => ({
       model: name,
       label,
       monthly_burn_cents: monthlyBurn,
-      runway_months: runwayMonths(available, monthlyBurn),
-      source
+      runway_months: runwayMonths(runwayCash, monthlyBurn),
+      ...withSource(source, sourceSummary)
     });
     const burnModels = [
-      model("budget_burn", "Budget burn", BigInt(budget.monthly_burn_cents), budget.budget as Row),
-      model(`trailing_${shortMonths}_month_actual`, `Trailing ${shortMonths}-month actual burn`, BigInt(trailingShort.monthly_burn_cents), trailingShort),
-      model(`trailing_${longMonths}_month_actual`, `Trailing ${longMonths}-month actual burn`, BigInt(trailingLong.monthly_burn_cents), trailingLong),
-      model("fixed_obligation_burn", "Fixed-obligation burn", fixedBurn, { fixed_budget_rows: budget.fixed_budget_rows }),
+      model("budget_burn", "Budget burn", BigInt(budget.monthly_burn_cents), budget.budget as Row, budgetSummary(budget.budget as Row)),
+      model(`trailing_${shortMonths}_month_actual`, `Trailing ${shortMonths}-month actual burn`, BigInt(trailingShort.monthly_burn_cents), trailingShort, trailingSummary(trailingShort)),
+      model(`trailing_${longMonths}_month_actual`, `Trailing ${longMonths}-month actual burn`, BigInt(trailingLong.monthly_burn_cents), trailingLong, trailingSummary(trailingLong)),
+      model("fixed_obligation_burn", "Fixed-obligation burn", fixedBurn, { fixed_budget_rows: budget.fixed_budget_rows }, { fixed_budget_count: (budget.fixed_budget_rows as Row[]).length, fixed_budget_cents: fixedBurn }),
       model("discretionary_adjusted_burn", "Fixed plus reduced discretionary burn", discretionaryAdjusted, {
+        fixed_budget_cents: fixedBurn,
+        discretionary_budget_cents: discretionaryBurn,
+        discretionary_multiplier: discretionaryMultiplier
+      }, {
         fixed_budget_cents: fixedBurn,
         discretionary_budget_cents: discretionaryBurn,
         discretionary_multiplier: discretionaryMultiplier
@@ -1960,12 +2033,18 @@ const handlers: Record<ToolName, Handler> = {
     return {
       year,
       month,
+      as_of: asOf,
       quote_asset_id: quote,
       basis: includePlanned ? "projection" : includePending ? "actual_plus_pending" : "conservative_actual",
+      summary: args.summary === true,
+      include_sources: includeSources,
       include_pending: includePending,
       include_planned: includePlanned,
       actual_cash_cents: projection.actual_available_cash_cents,
-      spendable_cash_cents: projection.available_cash_cents,
+      available_cash_cents: available,
+      current_month_budget_reserve_cents: currentMonthBudgetReserve,
+      spendable_cash_cents: runwayCash,
+      runway_cash_cents: runwayCash,
       planned_cash_cents: projection.planned_cash_cents,
       pending_cash_delta_cents: projection.pending_available_delta_cents,
       earmarks_cents: projection.earmarks_cents,
@@ -1979,19 +2058,25 @@ const handlers: Record<ToolName, Handler> = {
         planned_cash_excluded_unless_requested: true,
         pending_cash_excluded_unless_requested: true,
         investments_excluded_by_default_when_named_as_investment_accounts: true,
+        current_month_budget_reserved_by_default: args.reserve_remaining_budget !== false,
+        partial_month_excluded_from_trailing_actuals_by_default: args.include_partial_month !== true,
         trailing_months_short: shortMonths,
         trailing_months_long: longMonths,
+        trailing_window_basis: trailingEnd.basis,
+        trailing_window_end_year: trailingEnd.year,
+        trailing_window_end_month: trailingEnd.month,
         discretionary_multiplier: discretionaryMultiplier
       },
+      trailing_window: trailingEnd,
       recommended_model: recommended.model,
       runway_months: recommended.runway_months,
       burn_models: burnModels,
       models: burnModels,
-      cash_projection: projection,
-      budget: budget.budget,
+      cash_projection: includeSources ? projection : cashProjectionSummary(projection),
+      budget: includeSources ? budget.budget : budgetSummary(budget.budget as Row),
       trailing_actuals: {
-        short: trailingShort,
-        long: trailingLong
+        short: includeSources ? trailingShort : trailingSummary(trailingShort),
+        long: includeSources ? trailingLong : trailingSummary(trailingLong)
       },
       valuation_complete: missing.length === 0,
       missing_conversions: missing,
@@ -2043,12 +2128,15 @@ const handlers: Record<ToolName, Handler> = {
       return [{ account_id: budget.account_id, account_name: ledger.getAccount(String(budget.account_id))?.name ?? "", asset_id: quote, source_budget_id: budget.id, budgeted_cents: budgeted, spent_cents: spent, remaining_cents: budgeted - spent, percent_used: budgeted ? Number(spent) / Number(budgeted) * 100 : 0 }];
     });
     const coveredSpendingAccountIds = new Set(rows.flatMap((row) => spendingAccountIdsForBudget(String(row.account_id))));
+    const totalBudgeted = rows.reduce((s, r) => s + r.budgeted_cents, 0n);
+    const totalSpent = [...coveredSpendingAccountIds].reduce((sum, id) => sum + BigInt(spending.get(id)?.amount_cents ?? 0), 0n);
     return {
       year,
       month,
       budgets: rows,
-      total_budgeted_cents: rows.reduce((s, r) => s + r.budgeted_cents, 0n),
-      total_spent_cents: [...coveredSpendingAccountIds].reduce((sum, id) => sum + BigInt(spending.get(id)?.amount_cents ?? 0), 0n),
+      total_budgeted_cents: totalBudgeted,
+      total_spent_cents: totalSpent,
+      total_remaining_cents: totalBudgeted - totalSpent,
       shadowed_budget_count: effective.shadowed.length,
       shadowed_budgets: effective.shadowed.map((row) => ({ id: row.id, account_id: row.account_id, asset_id: row.asset_id, quantity: row.quantity, period: row.period, year: row.year, month: row.month })),
       valuation_complete: missing.length === 0,
@@ -2776,12 +2864,14 @@ const handlers: Record<ToolName, Handler> = {
     return { matched: tags.length, deleted: dryRun ? 0 : tags.length, dry_run: dryRun };
   },
   tool_registry: (ledger, args) => {
-    const names = registryNames(args).filter((name) => registrySafetyMatches(name, args));
+    const selection = registryNames(args);
+    const names = selection.names.filter((name) => registrySafetyMatches(name, args));
     const summary = args.summary === true;
     return {
       version: 1,
       count: TOOL_NAMES.length,
       returned_count: names.length,
+      unknown_names: selection.unknown_names,
       summary,
       file_access: fileAccessStatus(ledger.path),
       status_filter: {
@@ -2798,7 +2888,8 @@ const handlers: Record<ToolName, Handler> = {
       },
       filters: {
         names: args.names ?? null,
-        safety_filter: args.safety_filter ?? null
+        safety_filter: args.safety_filter ?? null,
+        unknown_names: selection.unknown_names
       },
       tools: names.map((name) => registryEntry(name, summary))
     };

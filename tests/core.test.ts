@@ -952,6 +952,10 @@ describe("app and package surface", () => {
       expect(filtered).toMatchObject({ count: TOOL_NAMES.length, returned_count: 1, summary: true });
       expect(filtered.tools).toEqual([expect.objectContaining({ name: "list_accounts", signature: expect.any(String) })]);
       expect(filtered.tools[0].definition).toBeUndefined();
+      const partial = callTool("tool_registry", { names: ["list_accounts", "not_a_tool"], summary: true }, ledger) as any;
+      expect(partial.returned_count).toBe(1);
+      expect(partial.unknown_names).toEqual(["not_a_tool"]);
+      expect(partial.tools[0].name).toBe("list_accounts");
 
       const sheet = callTool("balance_sheet", { currency: "USD", status: "all" }, ledger) as any;
       expect(sheet.quote_asset_id).toBe((callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id);
@@ -993,6 +997,9 @@ describe("app and package surface", () => {
       expect(picture.current_snapshot.total_assets).toBe(13500);
       expect(picture.budget_position.total_spent_cents).toBe(1500);
       expect(picture.include_planned).toBe(false);
+      expect(picture.current_snapshot.as_of).toBeNull();
+      expect(picture.current_snapshot.as_of_basis).toBe("current_open_ended");
+      expect(picture.current_snapshot.ledger_as_of).toBe("9999-12-31");
       expect(picture.actual_cash_cents).toBe(9000);
       expect(picture.planned_cash_cents).toBe(0);
 
@@ -1285,16 +1292,20 @@ describe("app and package surface", () => {
       ledger.recordTransaction("2026-06-10", 5000n, checking, shopping, usd, "Pending shopping", "pending");
       ledger.recordTransaction("2026-06-20", 30000n, salary, checking, usd, "Planned pay", "planned");
       callTool("set_budget", { account: rent, amount: 200, asset_id: usd, year: 2026, month: 6 }, ledger);
-      callTool("set_budget", { account: shopping, amount: 100, asset_id: usd, year: 2026, month: 6 }, ledger);
+      callTool("set_budget", { account: shopping, amount: 150, asset_id: usd, year: 2026, month: 6 }, ledger);
 
-      const runway = callTool("cash_runway", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      const runway = callTool("cash_runway", { year: 2026, month: 6, as_of: "2026-06-11", quote_asset_id: usd }, ledger) as any;
       expect(runway.include_pending).toBe(false);
       expect(runway.include_planned).toBe(false);
+      expect(runway.include_sources).toBe(false);
       expect(runway.asset_account_ids).toEqual([checking]);
       expect(runway.excluded_asset_account_ids).toContain(brokerage);
       expect(runway.actual_cash_cents).toBe(30000);
-      expect(runway.spendable_cash_cents).toBe(30000);
+      expect(runway.available_cash_cents).toBe(30000);
+      expect(runway.current_month_budget_reserve_cents).toBe(5000);
+      expect(runway.spendable_cash_cents).toBe(25000);
       expect(runway.planned_cash_cents).toBe(0);
+      expect(runway.trailing_window).toMatchObject({ year: 2026, month: 5, basis: "last_complete_months", excluded_partial_month: { year: 2026, month: 6, as_of: "2026-06-11" } });
       expect(runway.burn_models.map((row: any) => row.model)).toEqual([
         "budget_burn",
         "trailing_3_month_actual",
@@ -1302,12 +1313,23 @@ describe("app and package surface", () => {
         "fixed_obligation_burn",
         "discretionary_adjusted_burn"
       ]);
-      expect(runway.burn_models.find((row: any) => row.model === "budget_burn")).toMatchObject({ monthly_burn_cents: 30000, runway_months: 1 });
-      expect(runway.burn_models.find((row: any) => row.model === "fixed_obligation_burn")).toMatchObject({ monthly_burn_cents: 20000, runway_months: 1.5 });
-      expect(runway.burn_models.find((row: any) => row.model === "discretionary_adjusted_burn")).toMatchObject({ monthly_burn_cents: 25000, runway_months: 1.2 });
+      expect(runway.burn_models[0].source).toBeUndefined();
+      expect(runway.burn_models[0].source_summary).toBeDefined();
+      expect(runway.burn_models.find((row: any) => row.model === "budget_burn")).toMatchObject({ monthly_burn_cents: 35000, runway_months: 0.71 });
+      expect(runway.burn_models.find((row: any) => row.model === "trailing_3_month_actual")).toMatchObject({ monthly_burn_cents: 13333, runway_months: 1.88 });
+      expect(runway.burn_models.find((row: any) => row.model === "fixed_obligation_burn")).toMatchObject({ monthly_burn_cents: 20000, runway_months: 1.25 });
+      expect(runway.burn_models.find((row: any) => row.model === "discretionary_adjusted_burn")).toMatchObject({ monthly_burn_cents: 27500, runway_months: 0.91 });
 
-      const withPlanned = callTool("cash_runway", { year: 2026, month: 6, include_planned: true, quote_asset_id: usd }, ledger) as any;
-      expect(withPlanned.spendable_cash_cents).toBe(60000);
+      const partial = callTool("cash_runway", { year: 2026, month: 6, as_of: "2026-06-11", include_partial_month: true, quote_asset_id: usd }, ledger) as any;
+      expect(partial.trailing_window).toMatchObject({ year: 2026, month: 6, basis: "requested_month_including_partial" });
+      expect(partial.burn_models.find((row: any) => row.model === "trailing_3_month_actual").source_summary.monthly_burn_cents).toBe(23333);
+
+      const withSources = callTool("cash_runway", { year: 2026, month: 6, as_of: "2026-06-11", include_sources: true, quote_asset_id: usd }, ledger) as any;
+      expect(withSources.include_sources).toBe(true);
+      expect(withSources.burn_models[0].source).toBeDefined();
+
+      const withPlanned = callTool("cash_runway", { year: 2026, month: 6, as_of: "2026-06-11", include_planned: true, quote_asset_id: usd }, ledger) as any;
+      expect(withPlanned.spendable_cash_cents).toBe(55000);
       expect(withPlanned.planned_cash_cents).toBe(30000);
     } finally {
       ledger.close();
@@ -1413,6 +1435,7 @@ describe("app and package surface", () => {
       const posted = callTool("budget_status", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
       const active = callTool("budget_status", { year: 2026, month: 6, include_pending: true, quote_asset_id: usd }, ledger) as any;
       expect(active.total_spent_cents).toBe(Number(posted.total_spent_cents) + 500);
+      expect(Number(posted.total_remaining_cents)).toBe(Number(posted.total_budgeted_cents) - Number(posted.total_spent_cents));
 
       const rolled = callTool("budget_status", { year: 2026, month: 6, rollup: true, quote_asset_id: usd }, ledger) as any;
       expect(rolled.budgets.map((row: any) => row.spent_cents)).toEqual(expect.arrayContaining([5200, 4200]));

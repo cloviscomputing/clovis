@@ -245,7 +245,7 @@ const CASES = {
   buy_security: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Brokerage, symbol: "AAPL", shares: 1.25, total_cost_cents: 12345, commission_cents: 55, date: "2026-06-10" }), assert: expectObject },
   cash_flow: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   cash_projection: { mutation: "read", args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
-  cash_runway: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
+  cash_runway: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, as_of: "2026-06-11", quote_asset_id: ctx.assets.usd }), assert: expectObject },
   close_period: { mutation: "write", args: () => ({ name: "May close", as_of: "2026-05-31" }), assert: expectObject },
   commit_batch: { mutation: "write", setup: ensureImportBatch, args: (ctx) => ({ batch_id: ctx.batches.import }), assert: (result) => expect(result.committed).toBeGreaterThan(0) },
   compare_scenarios: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },

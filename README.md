@@ -31,6 +31,10 @@ public surfaces are:
 The project is public and pre-1.0. The package currently defines the local
 database format while the API and schema settle during the `0.x` line.
 
+Release notes are tracked in [CHANGELOG.md](CHANGELOG.md), indexed at
+[docs/changelog.md](docs/changelog.md), and published through
+[GitHub Releases](https://github.com/cloviscomputing/clovis/releases).
+
 ## What You Can Ask Clovis
 
 Through the CLI or MCP server, Clovis can act like a local bookkeeping copilot
@@ -228,18 +232,22 @@ Runway has a first-class tool because it is easy to answer badly by counting
 planned paycheques, investments, or unconverted balances as spendable cash. By
 default, `cash_runway` uses posted actual cash, deducts selected liabilities,
 excludes planned and pending rows, excludes obvious investment accounts from
-default spendable cash, and returns multiple burn models with the assumptions
-attached.
+default spendable cash, reserves remaining current-month budget, and returns
+multiple burn models with the assumptions attached. Trailing actual burn uses
+last complete months by default so a partial current month does not understate
+monthly burn.
 
 ```sh
 clovis --db ./ledger.db --format json tool cash_runway \
   --json '{"year":2026,"month":6,"quote_asset_id":"CAD"}'
 ```
 
-Use `include_pending:true` or `include_planned:true` only when the answer should
-explicitly become a projection. `cash_projection` follows the same conservative
-default and includes an audit trail of starting cash, liabilities, earmarks,
-remaining budget, and planned income.
+Use `include_pending:true`, `include_planned:true`, or
+`include_partial_month:true` only when the answer should explicitly become a
+projection or partial-period view. `cash_runway` omits heavy source rows by
+default; pass `include_sources:true` for audit views. `cash_projection` follows
+the same conservative default and includes an audit trail of starting cash,
+liabilities, earmarks, remaining budget, and planned income.
 
 Import a QFX, OFX, or CSV statement into an existing account. Prefer QFX or OFX
 when your bank provides them because they usually include a stable institution

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.5
+
+Cash runway semantics and changelog packaging release.
+
+- Make `cash_runway` default to last complete trailing months, reserve remaining current-month budget from runway cash, compact source payloads by default, and expose opt-ins for partial months and full sources.
+- Make `budget_status` return top-level `total_remaining_cents`, make `financial_picture.current_snapshot` avoid user-facing `9999-12-31`, and let filtered `tool_registry` return known tools plus `unknown_names`.
+- Add a docs changelog landing page and include `CHANGELOG.md` in packed npm artifacts.
+
 ## 0.2.4
 
 Runtime safety and cash runway release.
