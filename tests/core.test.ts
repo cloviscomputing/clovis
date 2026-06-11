@@ -997,6 +997,7 @@ describe("app and package surface", () => {
       expect(picture.current_snapshot.total_assets).toBe(13500);
       expect(picture.budget_position.total_spent_cents).toBe(1500);
       expect(picture.include_planned).toBe(false);
+      expect(picture.warnings).toEqual([]);
       expect(picture.current_snapshot.as_of).toBeNull();
       expect(picture.current_snapshot.as_of_basis).toBe("current_open_ended");
       expect(picture.current_snapshot.ledger_as_of).toBe("9999-12-31");
@@ -1013,6 +1014,14 @@ describe("app and package surface", () => {
       expect(postedOnly.monthly_activity.income).toBe(10000);
       expect(postedOnly.current_snapshot.total_assets).toBe(9000);
       expect(postedOnly.budget_position.total_spent_cents).toBe(1000);
+
+      const activeConflict = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, status: "active", include_planned: true }, ledger) as any;
+      expect(activeConflict.include_planned).toBe(false);
+      expect(activeConflict.warnings).toContainEqual(expect.objectContaining({ code: "status_overrides_include_planned" }));
+
+      const postedConflict = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, status: "posted", include_pending: true }, ledger) as any;
+      expect(postedConflict.include_pending).toBe(false);
+      expect(postedConflict.warnings).toContainEqual(expect.objectContaining({ code: "status_overrides_include_pending" }));
     } finally {
       ledger.close();
     }
@@ -1274,8 +1283,10 @@ describe("app and package surface", () => {
     const ledger = tempLedger();
     try {
       const usd = ledger.createAsset("USD", "currency", 2);
+      const cad = ledger.createAsset("CAD", "currency", 2);
       const assets = ledger.createAccount("Assets", "asset");
       const checking = ledger.createAccount("Checking", "asset", assets);
+      const foreignReserve = ledger.createAccount("Foreign Reserve", "asset", assets);
       const brokerage = ledger.createAccount("Brokerage", "asset", assets);
       const visa = ledger.createAccount("Visa", "liability");
       const equity = ledger.createAccount("Opening Balances", "equity");
@@ -1287,6 +1298,7 @@ describe("app and package surface", () => {
       ledger.recordTransaction("2026-03-31", 500000n, equity, brokerage, usd, "Brokerage opening", "posted");
       ledger.recordTransaction("2026-04-05", 20000n, checking, rent, usd, "April rent", "posted");
       ledger.recordTransaction("2026-05-05", 20000n, checking, rent, usd, "May rent", "posted");
+      ledger.recordTransaction("2026-05-10", 700n, foreignReserve, shopping, cad, "Unpriced May shopping", "posted");
       ledger.recordTransaction("2026-06-05", 20000n, checking, rent, usd, "June rent", "posted");
       ledger.recordTransaction("2026-06-06", 10000n, visa, shopping, usd, "Posted card shopping", "posted");
       ledger.recordTransaction("2026-06-10", 5000n, checking, shopping, usd, "Pending shopping", "pending");
@@ -1315,6 +1327,9 @@ describe("app and package surface", () => {
       ]);
       expect(runway.burn_models[0].source).toBeUndefined();
       expect(runway.burn_models[0].source_summary).toBeDefined();
+      expect(runway.models).toBeUndefined();
+      expect(runway.missing_conversions).toHaveLength(1);
+      expect(runway.conversion_warning).toMatchObject({ severity: "unknown", missing_count: 1 });
       expect(runway.burn_models.find((row: any) => row.model === "budget_burn")).toMatchObject({ monthly_burn_cents: 35000, runway_months: 0.71 });
       expect(runway.burn_models.find((row: any) => row.model === "trailing_3_month_actual")).toMatchObject({ monthly_burn_cents: 13333, runway_months: 1.88 });
       expect(runway.burn_models.find((row: any) => row.model === "fixed_obligation_burn")).toMatchObject({ monthly_burn_cents: 20000, runway_months: 1.25 });

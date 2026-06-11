@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.6
+
+Cash runway and financial picture cleanup release.
+
+- Remove the duplicate `cash_runway.models` response alias; `burn_models` is now the only burn-model array.
+- Deduplicate `cash_runway.missing_conversions` before returning conversion warnings.
+- Add `financial_picture` warnings when explicit `status` overrides contradictory `include_pending` or `include_planned` flags.
+
 ## 0.2.5
 
 Cash runway semantics and changelog packaging release.

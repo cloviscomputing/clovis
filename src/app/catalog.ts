@@ -449,6 +449,25 @@ function conversionSeverity(missing: Row[]): Row {
   };
 }
 
+function dedupeMissingConversions(rows: Row[]): Row[] {
+  const seen = new Set<string>();
+  const deduped: Row[] = [];
+  for (const row of rows) {
+    const key = [
+      row.tx_id ?? "",
+      row.account_id ?? "",
+      row.asset_id ?? "",
+      row.quote_asset_id ?? "",
+      String(row.quantity ?? ""),
+      row.error ?? ""
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
+}
+
 function runwayMonths(cash: bigint, monthlyBurn: bigint): number | null {
   if (monthlyBurn <= 0n) return null;
   return Math.round((Number(cash) / Number(monthlyBurn)) * 100) / 100;
@@ -1828,6 +1847,21 @@ const handlers: Record<ToolName, Handler> = {
     const status = reportStatus(args, fallbackIncludesPlanned ? "combined" : fallbackIncludesPending ? "active" : "posted");
     const includePending = status == null || status === "active" || status === "combined" || status === "pending";
     const includePlanned = status == null || status === "combined" || status === "planned";
+    const warnings: Row[] = [];
+    if (args.status !== undefined && args.status !== "") {
+      if (args.include_pending !== undefined && Boolean(args.include_pending) !== includePending) {
+        warnings.push({
+          code: "status_overrides_include_pending",
+          message: `Explicit status '${String(args.status)}' overrides include_pending:${Boolean(args.include_pending)}; resolved include_pending:${includePending}.`
+        });
+      }
+      if (args.include_planned !== undefined && Boolean(args.include_planned) !== includePlanned) {
+        warnings.push({
+          code: "status_overrides_include_planned",
+          message: `Explicit status '${String(args.status)}' overrides include_planned:${Boolean(args.include_planned)}; resolved include_planned:${includePlanned}.`
+        });
+      }
+    }
     const overview = handlers.financial_overview(ledger, { ...args, status }) as Row;
     const year = args.year ?? new Date().getUTCFullYear();
     const month = args.month ?? new Date().getUTCMonth() + 1;
@@ -1853,6 +1887,7 @@ const handlers: Record<ToolName, Handler> = {
         actual: actualCash,
         selected: projectedCash
       },
+      warnings,
       conversion_warning: projectedCash.conversion_warning
     };
   },
@@ -2024,12 +2059,12 @@ const handlers: Record<ToolName, Handler> = {
       ?? burnModels.find((row) => row.model === "budget_burn" && row.runway_months != null)
       ?? burnModels.find((row) => row.runway_months != null)
       ?? burnModels[0];
-    const missing = [
+    const missing = dedupeMissingConversions([
       ...projection.missing_conversions as Row[],
       ...trailingShort.missing_conversions as Row[],
       ...trailingLong.missing_conversions as Row[],
       ...((budget.budget as Row).missing_conversions ?? []) as Row[]
-    ];
+    ]);
     return {
       year,
       month,
@@ -2071,7 +2106,6 @@ const handlers: Record<ToolName, Handler> = {
       recommended_model: recommended.model,
       runway_months: recommended.runway_months,
       burn_models: burnModels,
-      models: burnModels,
       cash_projection: includeSources ? projection : cashProjectionSummary(projection),
       budget: includeSources ? budget.budget : budgetSummary(budget.budget as Row),
       trailing_actuals: {

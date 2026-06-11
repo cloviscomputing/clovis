@@ -472,6 +472,7 @@ const READ_CASES: ReadCase[] = [
       ]));
       expect(result.burn_models[0].source).toBeUndefined();
       expect(result.burn_models[0].source_summary).toBeDefined();
+      expect(result.models).toBeUndefined();
       expect(result.recommended_model).toBeTruthy();
     }
   },
@@ -526,6 +527,7 @@ const READ_CASES: ReadCase[] = [
     oracle: (result, ctx) => {
       expect(result.monthly_activity.income).toBe(Number(incomeExpense(ctx, "active").income));
       expect(result.include_planned).toBe(false);
+      expect(result.warnings).toEqual([]);
       expect(result.current_snapshot.as_of).toBeNull();
       expect(result.current_snapshot.as_of_basis).toBe("current_open_ended");
       expect(result.cash_position.actual.include_planned).toBe(false);
