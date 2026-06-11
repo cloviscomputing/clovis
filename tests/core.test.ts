@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
@@ -935,6 +935,8 @@ describe("app and package surface", () => {
       expect(byName.delete_transaction.safety.destructiveHint).toBe(true);
       expect(byName.balance_sheet.aliases.currency).toBe("quote_asset_id");
       expect(byName.tool_registry.safety.idempotentHint).toBe(true);
+      expect(registry.file_access.allowed_roots).toContain(realpathSync(dirname(ledger.path)));
+      expect(registry.file_access.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
 
       const sheet = callTool("balance_sheet", { currency: "USD", status: "all" }, ledger) as any;
       expect(sheet.quote_asset_id).toBe((callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id);
@@ -1767,17 +1769,54 @@ describe("app and package surface", () => {
         expect(String(result.file).endsWith("snapshot.json")).toBe(true);
         expect(String(result.file)).not.toContain(dir);
         expect(() => callTool("export_ledger", { output_path: "snapshot.json" }, ledger)).toThrow(/already exists/);
-        expect(() => callTool("export_ledger", { output_path: "../outside.json" }, ledger)).toThrow(/escapes/);
+        expect(() => callTool("export_ledger", { output_path: "../outside.json" }, ledger)).toThrow(/outside Clovis file access/);
         const outside = mkdtempSync(join(tmpdir(), "clovis-outside-"));
         dirs.push(outside);
         writeFileSync(join(outside, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Escape\n", "utf8");
         symlinkSync(join(outside, "statement.csv"), join(dir, "statement-link.csv"));
         symlinkSync(outside, join(dir, "outside-link"));
-        expect(() => callTool("import_file", { file_path: "statement-link.csv", account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger)).toThrow(/escapes/);
-        expect(() => callTool("export_ledger", { output_path: "outside-link/snapshot.json" }, ledger)).toThrow(/escapes/);
+        expect(() => callTool("import_file", { file_path: "statement-link.csv", account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger)).toThrow(/outside Clovis file access/);
+        expect(() => callTool("export_ledger", { output_path: "outside-link/snapshot.json" }, ledger)).toThrow(/outside Clovis file access/);
       } finally {
         if (previousDb == null) delete process.env.CLOVIS_DB; else process.env.CLOVIS_DB = previousDb;
         if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("exposes file access roots and reads from configured agent workspaces", () => {
+    const ledger = tempLedger();
+    try {
+      const rootA = mkdtempSync(join(tmpdir(), "clovis-root-a-"));
+      const rootB = mkdtempSync(join(tmpdir(), "clovis-root-b-"));
+      const outside = mkdtempSync(join(tmpdir(), "clovis-outside-"));
+      dirs.push(rootA, rootB, outside);
+      const previousRoot = process.env.CLOVIS_ALLOWED_ROOT;
+      const previousRoots = process.env.CLOVIS_ALLOWED_ROOTS;
+      delete process.env.CLOVIS_ALLOWED_ROOT;
+      process.env.CLOVIS_ALLOWED_ROOTS = [rootA, rootB].join(delimiter);
+      try {
+        callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+        writeFileSync(join(rootB, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Allowed\n", "utf8");
+        writeFileSync(join(outside, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Blocked\n", "utf8");
+
+        const status = callTool("file_access_status", {}, ledger) as any;
+        expect(status.allowed_roots).toEqual([realpathSync(rootA), realpathSync(rootB)]);
+        expect(status.configure.delimiter).toBe(delimiter);
+
+        const registry = callTool("tool_registry", {}, ledger) as any;
+        expect(registry.file_access.allowed_roots).toEqual(status.allowed_roots);
+        expect(registry.tools.find((tool: any) => tool.name === "file_access_status").safety.readOnlyHint).toBe(true);
+
+        const preview = callTool("preview_import", { file_path: "statement.csv", account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger) as any;
+        expect(preview.total_rows).toBe(1);
+        expect(preview.rows[0].description).toBe("Allowed");
+        expect(() => callTool("preview_import", { file_path: join(outside, "statement.csv"), account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger)).toThrow(/CLOVIS_ALLOWED_ROOTS/);
+      } finally {
+        if (previousRoot == null) delete process.env.CLOVIS_ALLOWED_ROOT; else process.env.CLOVIS_ALLOWED_ROOT = previousRoot;
+        if (previousRoots == null) delete process.env.CLOVIS_ALLOWED_ROOTS; else process.env.CLOVIS_ALLOWED_ROOTS = previousRoots;
       }
     } finally {
       ledger.close();

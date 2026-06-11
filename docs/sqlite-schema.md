@@ -1003,6 +1003,55 @@ VACUUM INTO ?
 
 By default, backups go into a `backups` folder next to the ledger database.
 
+## File Access For Imports And Exports
+
+File access is not stored in SQLite.
+
+Think of it as the fence around tools that touch files:
+
+```text
+ledger.db can say what happened
+allowed roots say which folders Clovis may read or write
+```
+
+By default, the fence is the ledger directory. If your ledger is here:
+
+```text
+~/.clovis/clovis.db
+```
+
+then file tools can use files under:
+
+```text
+~/.clovis/
+```
+
+That is safe, but it is not always convenient. Bank downloads, exports, and
+agent workspaces often live somewhere else. For that, start Clovis with:
+
+```sh
+CLOVIS_ALLOWED_ROOT=/Users/you/Desktop/CFO
+```
+
+or multiple roots:
+
+```sh
+CLOVIS_ALLOWED_ROOTS="/Users/you/Desktop/CFO:/Users/you/Downloads"
+```
+
+On Windows, the separator is `;` instead of `:`.
+
+The important idea:
+
+```text
+The database stores finance facts.
+The process environment controls which local folders tools may touch.
+```
+
+Agents can call `file_access_status` or read `tool_registry.file_access` before
+asking for a path. If a file is outside the fence, Clovis returns the requested
+path, the active allowed roots, and an example `CLOVIS_ALLOWED_ROOTS` value.
+
 ## What SQLite Enforces Vs What The Engine Enforces
 
 SQLite is good at simple durable facts:

@@ -510,6 +510,12 @@ export const TOOL_DEFINITIONS = {
     ],
     returns: { type: "object" }
   },
+  "file_access_status": {
+    parameters: [
+
+    ],
+    returns: { type: "object" }
+  },
   "financial_overview": {
     parameters: [
       ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
@@ -1350,7 +1356,7 @@ const READ_ONLY_TOOLS = new Set<string>([
   "account_balances", "account_register", "age_of_money", "assert_balance", "assert_balances", "audit_categorization",
   "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "cash_flow",
   "cash_projection", "compare_scenarios", "count_transactions", "detect_recurring", "export_ledger",
-  "export_transactions", "financial_overview", "financial_picture", "find_pending_duplicates", "forecast",
+  "export_transactions", "file_access_status", "financial_overview", "financial_picture", "find_pending_duplicates", "forecast",
   "forecast_month_end", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_price",
   "get_transaction", "goal_progress", "holdings", "income_statement", "inspect_transaction", "integrity_check",
   "list_accounts", "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries",

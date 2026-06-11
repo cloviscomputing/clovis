@@ -223,9 +223,24 @@ status.
 Creation tools still require a real lifecycle status: `posted`, `pending`,
 `planned`, or `void`.
 
-File tools are sandboxed to the ledger directory unless `CLOVIS_ALLOWED_ROOT`
-is set. Bulk mutation tools default to dry-run and require `dry_run:false` in
-the tool arguments to apply changes:
+File tools only read or write inside configured roots. By default the only root
+is the directory that contains the ledger database. Set `CLOVIS_ALLOWED_ROOT`
+for one workspace folder, or `CLOVIS_ALLOWED_ROOTS` for multiple folders
+separated by your platform path delimiter, `:` on macOS/Linux and `;` on
+Windows.
+
+```sh
+CLOVIS_ALLOWED_ROOTS="$HOME/Desktop/CFO:$HOME/Downloads" \
+  clovis --db ~/.clovis/clovis.db tool file_access_status
+```
+
+Agents can call `file_access_status`, or inspect the `file_access` block in
+`tool_registry`, before asking for a statement path. If a path is blocked,
+Clovis reports the requested path, the allowed roots, and an example
+`CLOVIS_ALLOWED_ROOTS` value to restart with.
+
+Bulk mutation tools default to dry-run and require `dry_run:false` in the tool
+arguments to apply changes:
 
 ```sh
 clovis --db ./ledger.db tool backup_now
@@ -253,14 +268,16 @@ CLOVIS_DB=./ledger.db clovis-mcp
 ```
 
 `clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools are limited to the
-ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` to allow imports,
-exports, and backups under another local directory. MCP and CLI tools share the
-same catalog and behavior: bulk mutation tools preview by default, and callers
-must pass `dry_run:false` or an equivalent commit argument to apply changes.
+ledger directory by default. Set `CLOVIS_ALLOWED_ROOT` for one allowed folder,
+or `CLOVIS_ALLOWED_ROOTS` for multiple folders, to allow imports, exports, and
+backups under local workspace directories. MCP and CLI tools share the same
+catalog and behavior: bulk mutation tools preview by default, and callers must
+pass `dry_run:false` or an equivalent commit argument to apply changes.
 MCP tools include safety annotations such as `readOnlyHint`,
 `destructiveHint`, and `idempotentHint`. The `tool_registry` tool returns the
 full shared schema, rendered signatures, parameter aliases, status convention,
-and safety metadata through the normal MCP tool-call path.
+file-access configuration, and safety metadata through the normal MCP tool-call
+path.
 
 Example local MCP configuration:
 
@@ -271,12 +288,14 @@ Example local MCP configuration:
       "command": "clovis-mcp",
       "env": {
         "CLOVIS_DB": "/absolute/path/to/ledger.db",
-        "CLOVIS_ALLOWED_ROOT": "/absolute/path"
+        "CLOVIS_ALLOWED_ROOTS": "/absolute/finance/path:/absolute/downloads/path"
       }
     }
   }
 }
 ```
+
+On Windows, separate `CLOVIS_ALLOWED_ROOTS` entries with `;` instead of `:`.
 
 ## Package API
 

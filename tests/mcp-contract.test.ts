@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -276,6 +276,10 @@ const CASES = {
   discard_branch: { mutation: "write", setup: (ctx) => { callTool("create_branch", { name: "scenario" }, ctx.ledger); }, args: () => ({ name: "scenario" }), assert: expectObject },
   export_ledger: { mutation: "read", args: () => ({}), assert: (result) => expect(String(result.data)).toContain("accounts") },
   export_transactions: { mutation: "read", args: () => ({}), assert: (result) => expect(String(result.csv)).toContain("date,description") },
+  file_access_status: { mutation: "read", args: () => ({}), assert: (result, ctx) => {
+    expect(result.allowed_roots).toContain(realpathSync(ctx.dir));
+    expect(result.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
+  } },
   financial_overview: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   financial_picture: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   find_pending_duplicates: { mutation: "read", args: () => ({}), assert: (result) => expect(result.count).toBeGreaterThan(0) },
@@ -367,6 +371,7 @@ const CASES = {
     expect(result.count).toBe(TOOL_NAMES.length);
     expect(result.tools.find((tool: any) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
     expect(result.tools.find((tool: any) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
+    expect(result.file_access.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
   } },
   transfer: { mutation: "write", args: (ctx) => ({ from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Savings, amount: 25, date: "2026-06-16", description: "Move cash" }), assert: expectObject },
   trial_balance: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },

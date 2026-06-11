@@ -7,7 +7,7 @@ import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
 import { normalAmount } from "../core/accounting.js";
 import { openMcpLedger } from "./context.js";
 import { publicize, stringifyPublic } from "./json.js";
-import { assertToolDataSize, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
+import { assertToolDataSize, fileAccessStatus, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
 import { normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety } from "./signatures.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
@@ -28,7 +28,7 @@ export const TOOL_NAMES = [
   "copy_budgets", "count_transactions", "create_account", "create_accounts", "create_asset", "create_branch",
   "create_price", "create_scheduled_transaction", "create_transaction", "delete_account", "delete_asset", "delete_budget",
   "delete_budgets", "delete_goal", "delete_match_rule", "delete_match_rules", "delete_tag", "delete_tags",
-  "delete_transaction", "detect_recurring", "discard_batch", "discard_branch", "export_ledger", "export_transactions",
+  "delete_transaction", "detect_recurring", "discard_batch", "discard_branch", "export_ledger", "export_transactions", "file_access_status",
   "financial_overview", "financial_picture", "find_pending_duplicates", "flip_entries", "forecast", "forecast_month_end",
   "fx_transfer", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_price",
   "get_transaction", "goal_progress", "holdings", "import_file", "import_ledger", "import_transactions",
@@ -1473,6 +1473,7 @@ const handlers: Record<ToolName, Handler> = {
       status: parseTxStatusFilter(args.status)
     }
   ),
+  file_access_status: (ledger) => fileAccessStatus(ledger.path),
   export_ledger: (ledger, args) => {
     const doc = scopedExportDocument(ledger, args);
     const text = stringifyPublic(doc);
@@ -1905,9 +1906,10 @@ const handlers: Record<ToolName, Handler> = {
     if (!dryRun) for (const tag of tags) ledger.deleteAnnotation(tag.id);
     return { matched: tags.length, deleted: dryRun ? 0 : tags.length, dry_run: dryRun };
   },
-  tool_registry: () => ({
+  tool_registry: (ledger) => ({
     version: 1,
     count: TOOL_NAMES.length,
+    file_access: fileAccessStatus(ledger.path),
     status_filter: {
       accepted_values: STATUS_FILTER_VALUES,
       all: "all non-void transactions",

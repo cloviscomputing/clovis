@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -483,6 +483,15 @@ const READ_CASES: ReadCase[] = [
     oracle: (result, ctx) => expect(result.exported).toBe(sqlCount(ctx, "SELECT count(*) AS count FROM journal_lines l JOIN journals j ON j.id = l.journal_id WHERE j.status != 'void'"))
   },
   {
+    name: "file_access_status",
+    args: () => ({}),
+    oracle: (result, ctx) => {
+      expect(result.allowed_roots).toContain(realpathSync(ctx.dir));
+      expect(result.errors).toEqual([]);
+      expect(result.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
+    }
+  },
+  {
     name: "financial_overview",
     args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }),
     oracle: (result, ctx) => expect(result.monthly_activity.income).toBe(Number(incomeExpense(ctx, "active").income))
@@ -755,6 +764,7 @@ const READ_CASES: ReadCase[] = [
       expect(result.count).toBe(TOOL_NAMES.length);
       expect(result.tools.find((tool: Row) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
       expect(result.tools.find((tool: Row) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
+      expect(result.file_access.configure.env).toContain("CLOVIS_ALLOWED_ROOTS");
     },
     cli: false
   },
@@ -777,7 +787,7 @@ describe("read tool SQLite oracle audit", () => {
   it("has a raw SQLite oracle for every read-only tool", () => {
     const readNames = new Set(READ_CASES.map((row) => row.name));
     expect(readNames.size).toBe(READ_CASES.length);
-    expect(readNames.size).toBe(67);
+    expect(readNames.size).toBe(68);
     for (const name of readNames) expect(TOOL_NAMES).toContain(name);
   });
 
