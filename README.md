@@ -31,6 +31,48 @@ public surfaces are:
 The project is public and pre-1.0. The package currently defines the local
 database format while the API and schema settle during the `0.x` line.
 
+## What You Can Ask Clovis
+
+Through the CLI or MCP server, Clovis can act like a local bookkeeping copilot
+over your SQLite ledger:
+
+- answer balance, net worth, income statement, cash-flow, spending, budget, and
+  runway questions
+- inspect account registers and search transactions by date, description,
+  amount, account, category, or status
+- preview, import, and reconcile QFX, OFX, or CSV bank and card statements
+- find duplicate, pending, uncategorized, unmatched-transfer, and suspicious
+  categorization rows
+- recategorize transactions by pattern, apply match rules, and roll back import
+  or recategorization batches
+- record transactions, transfers, FX transfers, scheduled transactions,
+  investments, and journal entries
+- set budgets and goals, suggest budgets from history, and project month-end
+  cash outcomes
+- run backups, exports, period closes, integrity checks, and other ledger
+  maintenance tasks
+
+Example prompts for an MCP client:
+
+- "Give me a financial overview for June 2026 in CAD."
+- "What is my net worth in CAD?"
+- "Show my top spending categories this month."
+- "Find uncategorized pending transactions."
+- "Preview this QFX statement and show me what is new."
+- "Reconcile this card statement before committing anything."
+- "Detect recurring charges and subscriptions."
+- "Run an integrity check on the ledger."
+
+Useful orientation tools:
+
+- `tool_registry`: full tool catalog with signatures, aliases, status rules,
+  safety hints, and file-access configuration
+- `operating_manual`: workflow guidance for imports, reconciliation,
+  month-end, runway, categorization, and safety
+- `file_access_status`: allowed local folders for statement imports, exports,
+  and backups
+- `integrity_check`: structural health check for the ledger
+
 ## Status
 
 The database format is versioned. The current schema is `SCHEMA_VERSION = 2`.
