@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.7
+
+Report warning and backup listing polish release.
+
 - Scope `cash_runway` conversion warnings to affected sections/models, enrich missing conversion rows with account and asset names, and expose per-model valuation completeness.
 - Make open-ended `financial_picture.current_snapshot` omit `as_of` instead of returning `null`.
 - Make `list_backups` return backup database files only, grouping SQLite WAL/SHM sidecars under their parent backup.
