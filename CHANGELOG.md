@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.2
+
+Agent file-access configuration release.
+
+- Add `CLOVIS_ALLOWED_ROOTS` so CLI and MCP file tools can use multiple local workspace roots.
+- Add the read-only `file_access_status` tool and expose the same configuration through `tool_registry.file_access`.
+- Make blocked file-path errors show the requested path, current allowed roots, and a restart-ready `CLOVIS_ALLOWED_ROOTS` hint.
+- Document file-access configuration in the README and SQLite persistence docs.
+- Add core, MCP contract, and read-only oracle coverage for multi-root file access and the new metadata surface.
+
 ## 0.2.1
 
 CLI/MCP contract hardening release.
