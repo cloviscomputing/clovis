@@ -6,18 +6,25 @@
 [![license](https://img.shields.io/npm/l/clovis)](LICENSE)
 [![node](https://img.shields.io/node/v/clovis)](package.json)
 
-Clovis is a local-first bookkeeping toolkit for people and agents that need a
-durable SQLite ledger instead of a hosted finance app. It ships as one npm
-package with a double-entry ledger engine, a CLI, Node.js APIs, and an MCP
-server for local agent workflows.
+Clovis is a local-first bookkeeping toolkit for people, scripts, and
+MCP-compatible AI agents. It keeps financial facts in a SQLite double-entry
+ledger you control, then exposes the same bookkeeping catalog through a CLI,
+Node.js APIs, and an MCP server.
+
+The main idea is simple: let the ledger remember facts, let pending rows hold
+uncertainty, let reconciliation decide trust, and let reports explain only the
+records they actually queried.
 
 Use Clovis when you want to:
 
-- keep financial records in a local SQLite database you control
-- import CSV, QFX, or OFX bank statements for review
-- run reports and exports from a scriptable CLI
-- expose a finance-safe tool surface to local MCP clients
-- embed a versioned bookkeeping engine in another Node.js project
+- keep books in a local SQLite file instead of a hosted finance account
+- preview, check, reconcile, and deliberately commit CSV, QFX, or OFX statement
+  files
+- run bookkeeping commands locally for setup, transactions, reports, exports,
+  diagnostics, and maintenance
+- give local AI clients explicit bookkeeping tools instead of raw financial
+  file or database access
+- embed a versioned ledger engine and app dispatcher in another Node.js project
 
 Clovis is not a bank, custody system, sync service, tax product, or app UI. The
 public surfaces are:
@@ -37,8 +44,8 @@ Release notes are tracked in [CHANGELOG.md](CHANGELOG.md), indexed at
 
 ## What You Can Ask Clovis
 
-Through the CLI or MCP server, Clovis can act like a local bookkeeping copilot
-over your SQLite ledger:
+Through the CLI or MCP server, Clovis can work over your local ledger as a
+bounded bookkeeping tool surface:
 
 - answer balance, net worth, income statement, cash-flow, spending, budget, and
   conservative cash-runway questions
@@ -90,6 +97,27 @@ databases, preserve public package entrypoints, and avoid removing MCP tools.
 Minor releases may revise behavior or database shape, but the changelog should
 document the compatibility impact and upgrade path.
 
+## How Clovis Works
+
+Clovis keeps the record of truth in SQLite. Accounts, assets, journals, journal
+lines, prices, budgets, goals, match rules, scheduled transactions, statement
+plans, and metadata are ordinary local database records.
+
+The CLI, Node.js APIs, and MCP server all route through the same app catalog.
+That means a command-line workflow, an embedded Node process, and an agent using
+MCP see the same tool names, parameter rules, safety metadata, status semantics,
+and ledger behavior.
+
+Statement files are treated as source facts, not automatically trusted books.
+CSV, QFX, and OFX files can be previewed first, planned into reviewable rows,
+matched against existing ledger transactions, reconciled against expected
+balances, and committed only after the result is understood.
+
+Agents get explicit tools for reporting, search, imports, categorization,
+backups, exports, integrity checks, and maintenance. Read-only tools and
+dry-runs are available for inspection before mutation, and destructive tools are
+marked in the registry.
+
 ## Financial Records
 
 Clovis is designed for local bookkeeping records, but you should treat any
@@ -112,9 +140,9 @@ and accounts created by `init_defaults` store it in `accounts.default_asset_id`.
 Account APIs expose `default_asset_id` and `default_asset_symbol`.
 
 Transactions may omit `asset_id` only when both accounts have the same
-`default_asset`. Cross-currency movement should use `fx_transfer`. Reports that
-present converted totals require an explicit `quote_asset_id` or CLI `--quote`
-value, and report missing conversions when prices are unavailable.
+`default_asset_id`. Cross-currency movement should use `fx_transfer`. Reports
+that present converted totals require an explicit `quote_asset_id` or CLI
+`--quote` value, and report missing conversions when prices are unavailable.
 Tool inputs accept asset ids or symbols for `asset_id` and `quote_asset_id`.
 For quote-style tools, `currency`, `quote`, and `quote_id` are aliases for
 `quote_asset_id` unless the tool already defines one of those names for another
@@ -123,6 +151,8 @@ purpose.
 ## Install
 
 Clovis is distributed as the public npm package `clovis`.
+
+Clovis requires Node.js 26.3.0 or newer.
 
 ```sh
 npm install -g clovis
@@ -249,14 +279,15 @@ default; pass `include_sources:true` for audit views. `cash_projection` follows
 the same conservative default and includes an audit trail of starting cash,
 liabilities, earmarks, remaining budget, and planned income.
 
-Import a QFX, OFX, or CSV statement into an existing account. Prefer QFX or OFX
+Import a QFX, OFX, or CSV statement into an existing account. The CLI import
+command and generic import tools accept all three suffixes. Prefer QFX or OFX
 when your bank provides them because they usually include a stable institution
 transaction id such as `FITID`; Clovis preserves that id as statement metadata.
 CSV remains supported and is the right fallback for banks or exports that do
 not provide usable QFX/OFX files. If `--currency` is omitted, the import uses
-the account `default_asset`; pass `--currency` when the file needs to create or
-use a different explicit asset. CLI imports default to `pending` so rows can be
-reviewed before posting.
+the account `default_asset_id`; pass `--currency` when the file needs to create
+or use a different explicit asset. CLI imports default to `pending` so rows can
+be reviewed before posting.
 
 ```sh
 clovis --db ./ledger.db import --file ./statement.qfx \
