@@ -1647,6 +1647,14 @@ describe("app and package surface", () => {
       const discardPreview = callTool("refresh_statement", { action: "discard", plan_id: plan.plan_id }, ledger) as any;
       expect(discardPreview).toMatchObject({ dry_run: true, would_discard: true, status: "planned" });
       expect(ledger.getStatementPlan(plan.plan_id)?.status).toBe("planned");
+      const reversePreview = callTool("reverse_ledger_operation", { operation_id: plan.operation_id }, ledger) as any;
+      expect(reversePreview).toMatchObject({ dry_run: true, reversible: true });
+      expect(reversePreview.row_reversals).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: "statement_plans", action: "discard", reason: expect.stringContaining("discarded") })
+      ]));
+      callTool("reverse_ledger_operation", { operation_id: plan.operation_id, dry_run: false }, ledger);
+      expect(ledger.getStatementPlan(plan.plan_id)?.status).toBe("discarded");
+      expect((callTool("get_ledger_operation", { operation_id: plan.operation_id }, ledger) as any).status).toBe("reversed");
       expect(() => ledger.db.prepare("UPDATE statement_plan_rows SET description = 'changed' WHERE plan_id = ?").run(plan.plan_id)).toThrow(/immutable/);
       expect(() => ledger.db.prepare("DELETE FROM statement_plans WHERE id = ?").run(plan.plan_id)).toThrow(/audit records/);
     } finally {
@@ -2369,7 +2377,7 @@ describe("app and package surface", () => {
       const dining = ledger.createAccount("Dining", "expense");
       const tx = ledger.recordTransaction("2026-06-02", 2500n, checking, groceries, usd, "Market", "posted");
 
-      const preview = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining }, ledger) as any;
+      const preview = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining, dry_run: true }, ledger) as any;
       expect(preview).toMatchObject({
         dry_run: true,
         reversible: true,
@@ -2379,9 +2387,10 @@ describe("app and package surface", () => {
       expect(ledger.listTransactions({ status: null })).toHaveLength(1);
       expect(ledger.getEntries(tx.id)).toContainEqual(expect.objectContaining({ account_id: groceries, quantity: 2500n }));
 
-      const applied = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining, dry_run: false }, ledger) as any;
+      const applied = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining }, ledger) as any;
       expect(applied.operation_id).toMatch(/^op_/);
       expect(applied.correction_journal_id).toMatch(/^tx_/);
+      expect(applied.ledger_operation).toBeUndefined();
       expect(ledger.getEntries(tx.id)).toContainEqual(expect.objectContaining({ account_id: groceries, quantity: 2500n }));
       expect(ledger.getEntries(applied.correction_journal_id)).toEqual(expect.arrayContaining([
         expect.objectContaining({ account_id: groceries, quantity: -2500n }),
@@ -2408,6 +2417,31 @@ describe("app and package surface", () => {
     }
   });
 
+  it("reverses pending recategorization operations in place", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const dining = ledger.createAccount("Dining", "expense");
+      const tx = ledger.recordTransaction("2026-06-02", 2500n, checking, groceries, usd, "Pending Market", "pending");
+
+      const applied = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining }, ledger) as any;
+      expect(applied.operation_id).toMatch(/^op_/);
+      expect(applied.correction_journal_id).toBeUndefined();
+      expect(ledger.getEntries(tx.id)).toContainEqual(expect.objectContaining({ account_id: dining, quantity: 2500n }));
+
+      const preview = callTool("reverse_ledger_operation", { operation_id: applied.operation_id }, ledger) as any;
+      expect(preview).toMatchObject({ dry_run: true, reversible: true, reversal_strategy: "recategorize_in_place" });
+      const reversed = callTool("reverse_ledger_operation", { operation_id: applied.operation_id, dry_run: false }, ledger) as any;
+      expect(reversed).toMatchObject({ dry_run: false, reversal_strategy: "recategorize_in_place" });
+      expect(ledger.getEntries(tx.id)).toContainEqual(expect.objectContaining({ account_id: groceries, quantity: 2500n }));
+      expect((callTool("get_ledger_operation", { operation_id: applied.operation_id }, ledger) as any).status).toBe("reversed");
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("oversees generic mutations with preview, audit, and row-level reversal", () => {
     const ledger = tempLedger();
     try {
@@ -2419,6 +2453,7 @@ describe("app and package surface", () => {
       const created = callTool("create_account", { name: "Temporary Expense", type: "expense" }, ledger) as any;
       expect(created.mutation_id).toMatch(/^op_/);
       expect(created.operation_id).toBe(created.mutation_id);
+      expect(created.ledger_operation).toBeUndefined();
       const operation = callTool("get_ledger_operation", { operation_id: created.mutation_id }, ledger) as any;
       expect(operation).toMatchObject({ operation_type: "create_account", status: "applied" });
       expect(operation.rows).toEqual(expect.arrayContaining([expect.objectContaining({ entity_type: "accounts", action: "insert" })]));

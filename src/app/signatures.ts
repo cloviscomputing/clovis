@@ -1128,7 +1128,7 @@ export const TOOL_DEFINITIONS = {
       ["new_account_id", "string"],
       ["old_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["correction_date", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+      ["dry_run", "boolean", { optional: true, defaultValue: false }]
     ],
     returns: { type: "object" }
   },

@@ -372,16 +372,16 @@ txn.command("get").description("Show one transaction").argument("<id>").action((
 txn.command("delete").description("Void a transaction, or hard-delete with --hard").argument("<id>").option("--hard", "Physically delete instead of voiding").action((idValue, opts) => withLedger(program, (ledger) => callTool("delete_transaction", { id: idValue, hard_delete: Boolean(opts.hard) }, ledger)));
 txn.command("entries").description("List journal entries for a transaction").argument("<tx_id>").action((txId) => withLedger(program, (ledger) => callTool("list_entries", { tx_id: txId }, ledger)));
 txn.command("recategorize")
-  .description("Preview or apply a transaction recategorization")
+  .description("Recategorize a transaction")
   .argument("<tx_id>")
   .requiredOption("--from <id>", "Current account id")
   .requiredOption("--to <id>", "New account id")
-  .option("--apply", "Apply the correction and record a reversible ledger operation")
+  .option("--dry-run", "Preview the correction without applying it")
   .action((txId, opts) => withLedger(program, (ledger) => callTool("recategorize_transaction", {
     tx_id: txId,
     old_account_id: opts.from,
     new_account_id: opts.to,
-    dry_run: opts.apply !== true
+    dry_run: opts.dryRun === true
   }, ledger)));
 
 program.command("balance")

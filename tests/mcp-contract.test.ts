@@ -379,7 +379,7 @@ const CASES = {
   } },
   recategorize_by_pattern: { mutation: "dry-run", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
   recategorize_by_patterns: { mutation: "dry-run", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
-  recategorize_transaction: { mutation: "dry-run", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"] }), assert: expectObject },
+  recategorize_transaction: { mutation: "dry-run", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"], dry_run: true }), assert: expectObject },
   recognize_gain_loss: { mutation: "write", args: (ctx) => ({ date: "2026-06-14", amount: 5, investment_account_id: ctx.accounts.Brokerage, description: "Mark gain", asset_id: ctx.assets.usd }), assert: expectObject },
   reconcile_diff: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, date_from: "2026-06-01", date_to: "2026-06-30" }), assert: expectObject },
   reconcile_planned: { mutation: "dry-run", setup: ensureRealizedPlanned, args: (ctx) => ({ year: 2026, month: 6, account_id: ctx.accounts.Checking }), assert: (result) => expect(result.matched).toBeGreaterThan(0) },

@@ -623,12 +623,26 @@ function insertedSourceHasReferences(ledger: Ledger, row: Row): boolean {
   return countReferences(ledger, SOURCE_REFERENCES, row.after.id, String(row.after.book_id)) > 0;
 }
 
+function insertedStatementPlanFallback(ledger: Ledger, row: Row): Row | null {
+  if (row.entity_type !== "statement_plans" || row.action !== "insert" || !row.after) return null;
+  const planRow = currentAuditRow(ledger, row);
+  if (!planRow || planRow.status !== "planned") return null;
+  return {
+    ...row,
+    action: "discard_statement_plan",
+    before: { ...planRow, status: "discarded", discarded_at: now() },
+    after: planRow,
+    after_hash: stableHash(planRow),
+    reason: "inserted statement plan is discarded by reversal instead of deleted"
+  };
+}
+
 function skipReversal(skipped: Row[], row: Row, reason: string): void {
   skipped.push({ ...row, reason });
 }
 
 function reversalSummary(row: Row): Row {
-  return { table: row.entity_type, action: row.action, entity_id: row.entity_id, reason: row.reason };
+  return { table: row.entity_type, action: row.action === "discard_statement_plan" ? "discard" : row.action, entity_id: row.entity_id, reason: row.reason };
 }
 
 function reverseAuditRows(rows: Row[], reverseIds: string[], afterFor: (row: Row, index: number) => Row, hashFor: (row: Row, index: number, after: Row) => string = (_row, _index, after) => stableHash(after)): Row[] {
@@ -666,6 +680,13 @@ function genericReversalRows(ledger: Ledger, rows: Row[], hasAccountingDelta: bo
     if ((table === "books" && scenarioBookIdsToClose.has(String(row.entity_id))) || scenarioBookIdsToClose.has(rowBookId)) {
       skip("scenario book is closed by reversal instead of deleting cloned audit rows");
       continue;
+    }
+    if (table === "statement_plans" && row.action === "insert") {
+      const fallback = insertedStatementPlanFallback(ledger, row);
+      if (fallback) {
+        reversible.push(fallback);
+        continue;
+      }
     }
     if (STATEMENT_AUDIT_TABLES.has(table)) {
       skip("statement plans are immutable audit records");
@@ -809,11 +830,10 @@ function attachOperationResult(result: unknown, operation: Row): Row {
     return {
       ...row,
       mutation_id: row.mutation_id ?? operation.id,
-      operation_id: row.operation_id ?? operation.id,
-      ledger_operation: row.ledger_operation ?? operation
+      operation_id: row.operation_id ?? operation.id
     };
   }
-  return { result, mutation_id: operation.id, operation_id: operation.id, ledger_operation: operation };
+  return { result, mutation_id: operation.id, operation_id: operation.id };
 }
 
 function withMutationOverseer(ledger: Ledger, name: ToolName, args: Args): unknown {
@@ -960,7 +980,7 @@ function applyRecategorizeTransaction(ledger: Ledger, args: Args): Row {
       before_hash: diff.before_hash,
       after_hash: stableHash(txWithEntries(ledger, tx.id))
     }]);
-    return { ...result, operation_id: operation.id, ledger_operation: operation, dry_run: false };
+    return { ...result, operation_id: operation.id, dry_run: false };
   }
 
   const correctionLines = (preview.diff[0] as Row).after.correction_lines as Row[];
@@ -995,9 +1015,48 @@ function applyRecategorizeTransaction(ledger: Ledger, args: Args): Row {
     to_account_id: preview.after_category.account_id,
     correction_journal_id: correctionId,
     operation_id: operation.id,
-    ledger_operation: operation,
     dry_run: false
   };
+}
+
+function reverseInPlaceRecategorize(ledger: Ledger, operation: Row, rows: Row[], args: Args): Row {
+  const row = operationRowPublic(rows[0] ?? {});
+  const preview = safeJson(operation.preview_json);
+  const txId = String(preview.tx_id ?? row.entity_id ?? "");
+  const oldAccount = String(preview.before_category?.account_id ?? "");
+  const newAccount = String(preview.after_category?.account_id ?? "");
+  if (!txId || !oldAccount || !newAccount) throw new Error("Ledger operation is missing recategorization reversal metadata");
+  const current = txWithEntries(ledger, txId);
+  if (row.after_hash && stableHash(current) !== row.after_hash) throw new Error("Transaction changed after recategorization; stale reversal blocked");
+  const diff = [{ tx_id: txId, from_account_id: newAccount, to_account_id: oldAccount }];
+  if (args.dry_run !== false) return { dry_run: true, operation_id: operation.id, reverses_operation_id: operation.id, reversal_strategy: "recategorize_in_place", diff, reversible: true };
+
+  let result: Row = {};
+  let after: Row = {};
+  const reverseOperation = ledger.runInTransaction(() => {
+    result = ledger.recategorizeTransaction(txId, newAccount, oldAccount);
+    after = txWithEntries(ledger, txId);
+    const reverseOp = createOperation(ledger, {
+      tool_name: "reverse_ledger_operation",
+      operation_type: "reverse_ledger_operation",
+      reverses_operation_id: operation.id,
+      input: { ...args, dry_run: false },
+      preview: { reversal_strategy: "recategorize_in_place", rows: diff },
+      result,
+      metadata: { reversible: false }
+    }, [{
+      entity_type: "tx",
+      entity_id: txId,
+      action: "reverse",
+      before: row,
+      after: { transaction: after, result },
+      before_hash: row.after_hash,
+      after_hash: stableHash(after)
+    }]);
+    ledger.markLedgerOperationReversed(String(operation.id), String(reverseOp.id));
+    return reverseOp;
+  });
+  return { dry_run: false, operation_id: reverseOperation.id, reversed_operation_id: operation.id, reversal_strategy: "recategorize_in_place", result };
 }
 
 function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
@@ -1018,12 +1077,14 @@ function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
     const scenarioBooks = createdScenarioBooks(rows);
     const scenarioBookIds = new Set(scenarioBooks.map((row) => String(row.id)));
     const { reversible, skipped } = genericReversalRows(ledger, rows, genericDelta.length > 0, scenarioBookIds);
+    const hasWork = genericDelta.length > 0 || scenarioBooks.length > 0 || reversible.length > 0;
     if (args.dry_run !== false) {
       return {
         dry_run: true,
         operation_id: operation.id,
         reverses_operation_id: operation.id,
-        reversible: true,
+        reversible: hasWork,
+        blocked_reason: hasWork ? null : "operation has no reversible ledger changes",
         reversal_strategy: "generic_ledger_operation",
         accounting_delta: genericDelta,
         reverse_date: date,
@@ -1032,6 +1093,7 @@ function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
         skipped_rows: skipped.map(reversalSummary)
       };
     }
+    if (!hasWork) throw new Error("Ledger operation has no reversible ledger changes");
     const reverseIds: string[] = [];
     const reversedRows: Row[] = [];
     const closedScenarioBooks: Row[] = [];
@@ -1041,7 +1103,11 @@ function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
         ledger.discardScenarioBook(String(row.id ?? row.name));
         closedScenarioBooks.push({ book_id: row.id, name: row.name, action: "closed" });
       }
-      reversedRows.push(...ledger.reverseRows(reversible.map((row) => ({
+      for (const row of reversible.filter((candidate) => candidate.action === "discard_statement_plan")) {
+        ledger.discardStatementPlan(String(row.entity_id));
+        reversedRows.push({ table: "statement_plans", action: "discard", entity_id: row.entity_id });
+      }
+      reversedRows.push(...ledger.reverseRows(reversible.filter((row) => row.action !== "discard_statement_plan").map((row) => ({
         table: String(row.entity_type),
         action: String(row.action),
         before: row.before,
@@ -1078,12 +1144,12 @@ function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
       reverse_journal_ids: reverseIds,
       closed_scenario_books: closedScenarioBooks,
       reversed_rows: reversedRows,
-      skipped_rows: skipped.map(reversalSummary),
-      ledger_operation: reverseOperation
+      skipped_rows: skipped.map(reversalSummary)
     };
   }
 
   const correctionIds = rows.map((row) => row.correction_journal_id).filter(Boolean).map(String);
+  if (correctionIds.length === 0 && metadata.mode === "in_place_non_posted") return reverseInPlaceRecategorize(ledger, operation, rows, args);
   if (correctionIds.length === 0) throw new Error("Ledger operation has no correction journal to reverse");
   const reverseDate = args.date ? validateDate(String(args.date)) : null;
   const previewRows = correctionIds.map((correctionId) => {
@@ -1115,7 +1181,7 @@ function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
     for (const reverseId of reverseIds) tagTx(ledger, reverseId, "ledger_operation", String(reverseOp.id));
     return reverseOp;
   });
-  return { dry_run: false, operation_id: reverseOperation.id, reversed_operation_id: operation.id, reverse_journal_ids: reverseIds, ledger_operation: reverseOperation };
+  return { dry_run: false, operation_id: reverseOperation.id, reversed_operation_id: operation.id, reverse_journal_ids: reverseIds };
 }
 
 function budgetRows(ledger: Ledger, accountId?: string | null, year?: number | null, month?: number | null): Row[] {
@@ -2736,7 +2802,7 @@ const handlers: Record<ToolName, Handler> = {
   }),
   recategorize_transaction: (ledger, args) => {
     const preview = recategorizePreview(ledger, args);
-    return args.dry_run === false ? applyRecategorizeTransaction(ledger, args) : preview;
+    return args.dry_run === true ? preview : applyRecategorizeTransaction(ledger, args);
   },
   flip_entries: (ledger, args) => {
     if (!args.tx_ids?.length) throw new Error("tx_ids is required");
