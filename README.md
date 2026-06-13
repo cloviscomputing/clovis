@@ -6,9 +6,9 @@
 [![license](https://img.shields.io/npm/l/clovis)](LICENSE)
 [![node](https://img.shields.io/node/v/clovis)](package.json)
 
-Clovis lets AI agents read statement files, reconcile a local ledger, and
-answer money questions through MCP tools. Your bank login and raw financial
-files stay out of the chat.
+Clovis gives AI agents bookkeeping tools, not bank access. Agents can read
+statements, reconcile a local ledger, and answer finance questions through MCP
+while your data stays on your machine.
 
 Clovis is a local-first bookkeeping toolkit for people, scripts, and
 MCP-compatible AI agents. It keeps financial facts in a SQLite double-entry
