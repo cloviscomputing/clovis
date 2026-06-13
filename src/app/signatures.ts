@@ -268,6 +268,7 @@ export const TOOL_DEFINITIONS = {
       ["earmarks", "object[]", { nullable: true, optional: true, defaultValue: null }],
       ["include_pending", "boolean", { optional: true, defaultValue: false }],
       ["include_planned", "boolean", { optional: true, defaultValue: false }],
+      ["planned_match_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
       ["quote_asset_id", "string"]
     ],
     returns: { type: "object" }
@@ -569,6 +570,19 @@ export const TOOL_DEFINITIONS = {
       ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }]
+    ],
+    returns: { type: "object" }
+  },
+  "find_realized_planned": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
       ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }]
     ],
     returns: { type: "object" }
@@ -1117,6 +1131,20 @@ export const TOOL_DEFINITIONS = {
     ],
     returns: { type: "object" }
   },
+  "reconcile_planned": {
+    parameters: [
+      ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+      ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+      ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+      ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
+      ["dry_run", "boolean", { optional: true, defaultValue: true }]
+    ],
+    returns: { type: "object" }
+  },
   "reconcile_statement": {
     parameters: [
       ["account_id", "string"],
@@ -1441,7 +1469,7 @@ const READ_ONLY_TOOLS = new Set<string>([
   "account_balances", "account_register", "age_of_money", "assert_balance", "assert_balances", "audit_categorization",
   "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "cash_flow",
   "cash_projection", "cash_runway", "compare_scenarios", "count_transactions", "detect_recurring", "export_ledger",
-  "export_transactions", "file_access_status", "financial_overview", "financial_picture", "find_pending_duplicates", "forecast",
+  "export_transactions", "file_access_status", "financial_overview", "financial_picture", "find_pending_duplicates", "find_realized_planned", "forecast",
   "forecast_month_end", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_price",
   "get_transaction", "goal_progress", "holdings", "income_statement", "inspect_transaction", "integrity_check",
   "list_accounts", "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries",
@@ -1455,7 +1483,7 @@ const READ_ONLY_TOOLS = new Set<string>([
 const DESTRUCTIVE_TOOLS = new Set<string>([
   "delete_account", "delete_asset", "delete_budget", "delete_budgets", "delete_goal", "delete_match_rule",
   "delete_match_rules", "delete_tag", "delete_tags", "delete_transaction", "discard_batch", "discard_branch",
-  "merge_accounts", "migrate_asset_entries", "move_transactions", "repair_integrity", "rollback_import",
+  "merge_accounts", "migrate_asset_entries", "move_transactions", "reconcile_planned", "repair_integrity", "rollback_import",
   "rollback_recategorize", "void_by_filter"
 ]);
 

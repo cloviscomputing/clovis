@@ -281,7 +281,12 @@ Use `include_pending:true`, `include_planned:true`, or
 projection or partial-period view. `cash_runway` omits heavy source rows by
 default; pass `include_sources:true` for audit views. `cash_projection` follows
 the same conservative default and includes an audit trail of starting cash,
-liabilities, earmarks, remaining budget, and planned income.
+liabilities, earmarks, remaining budget, and planned income. Planned rows have
+a lifecycle: before relying on `include_planned:true`, inspect
+`find_realized_planned` or dry-run `reconcile_planned` for the period. Clovis
+excludes realized planned rows from planned projections and reports them as
+`realized_planned_rows`; `reconcile_planned` can void landed planned rows with
+`dry_run:false` after review.
 
 Import a QFX, OFX, or CSV statement into an existing account. The CLI import
 command and generic import tools accept all three suffixes. Prefer QFX or OFX
@@ -315,7 +320,9 @@ clovis --db ./ledger.db --format json tool refresh_statement \
 ```
 
 The first `plan` call is a non-persistent preview. Pass `dry_run:false` to
-stage an immutable plan that can be applied or discarded later.
+stage an immutable plan that can be applied or discarded later. Statement plans
+also surface `realized_planned_rows` when a planned row appears to have landed
+as a posted or pending transaction.
 
 Export filtered transaction rows:
 

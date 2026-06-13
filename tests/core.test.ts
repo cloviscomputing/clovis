@@ -1280,6 +1280,43 @@ describe("app and package surface", () => {
     }
   });
 
+  it("excludes realized planned rows from cash projections and can reconcile them", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Opening Balances", "equity");
+      const salary = ledger.createAccount("Salary", "income");
+      for (const accountId of [checking, equity, salary]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+
+      ledger.recordTransaction("2026-06-01", 100000n, equity, checking, usd, "Opening cash", "posted");
+      const landed = ledger.recordTransaction("2026-06-14", 30000n, salary, checking, usd, "June payroll", "posted");
+      const realized = ledger.recordTransaction("2026-06-15", 30000n, salary, checking, usd, "June payroll", "planned");
+      const unrealized = ledger.recordTransaction("2026-06-28", 12000n, salary, checking, usd, "Bonus payroll", "planned");
+
+      const matches = callTool("find_realized_planned", { year: 2026, month: 6, account_id: checking }, ledger) as any;
+      expect(matches.count).toBe(1);
+      expect(matches.realized_planned_rows[0]).toMatchObject({ planned_tx_id: realized.id, matched_tx_id: landed.id, amount_cents: 30000 });
+
+      const projection = callTool("cash_projection", { year: 2026, month: 6, asset_account_ids: [checking], include_planned: true, quote_asset_id: usd }, ledger) as any;
+      expect(projection.planned_cash_cents).toBe(12000);
+      expect(projection.gross_cash_cents).toBe(142000);
+      expect(projection.realized_planned_count).toBe(1);
+      expect(projection.realized_planned_rows[0].planned_tx_id).toBe(realized.id);
+
+      const dryRun = callTool("reconcile_planned", { year: 2026, month: 6, account_id: checking }, ledger) as any;
+      expect(dryRun).toMatchObject({ matched: 1, voided: 0, dry_run: true });
+      expect(ledger.getTx(realized.id)?.status).toBe("planned");
+
+      const reconciled = callTool("reconcile_planned", { year: 2026, month: 6, account_id: checking, dry_run: false }, ledger) as any;
+      expect(reconciled).toMatchObject({ matched: 1, voided: 1, dry_run: false });
+      expect(ledger.getTx(realized.id)?.status).toBe("void");
+      expect(ledger.getTx(unrealized.id)?.status).toBe("planned");
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("calculates conservative cash runway with explicit burn assumptions", () => {
     const ledger = tempLedger();
     try {
@@ -1609,6 +1646,30 @@ describe("app and package surface", () => {
       expect(ledger.getStatementPlan(plan.plan_id)?.status).toBe("planned");
       expect(() => ledger.db.prepare("UPDATE statement_plan_rows SET description = 'changed' WHERE plan_id = ?").run(plan.plan_id)).toThrow(/immutable/);
       expect(() => ledger.db.prepare("DELETE FROM statement_plans WHERE id = ?").run(plan.plan_id)).toThrow(/audit records/);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("surfaces realized planned rows during statement review", () => {
+    const ledger = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-realized-planned-statement-"));
+      dirs.push(dir);
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+      const posted = ledger.recordTransaction("2026-06-01", 2500n, equity, checking, usd, "Deposit", "posted");
+      const planned = ledger.recordTransaction("2026-06-02", 2500n, equity, checking, usd, "Deposit", "planned");
+      const statementPath = join(dir, "statement.csv");
+      writeFileSync(statementPath, "date,amount,description\n2026-06-01,25.00,Deposit\n", "utf8");
+
+      const plan = callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: checking, counterpart_account_id: equity }, ledger) as any;
+      expect(plan.actions.matched).toBe(1);
+      expect(plan.realized_planned_count).toBe(1);
+      expect(plan.realized_planned_rows[0]).toMatchObject({ planned_tx_id: planned.id, matched_tx_id: posted.id });
+      expect(plan.warnings).toContain("realized planned rows should be reconciled or voided before planned projections");
     } finally {
       ledger.close();
     }

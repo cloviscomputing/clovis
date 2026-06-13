@@ -130,6 +130,12 @@ function ensureImportBatch(ctx: TestContext): void {
   ctx.tx.imported = result.transactions[0].id;
 }
 
+function ensureRealizedPlanned(ctx: TestContext): void {
+  if (ctx.tx.realizedPlanned) return;
+  ctx.tx.realizedPosted = ctx.ledger.recordTransaction("2026-06-09", 3300n, ctx.accounts.Checking, ctx.accounts.Rent, ctx.assets.usd, "Planned Rent", "posted").id;
+  ctx.tx.realizedPlanned = ctx.ledger.recordTransaction("2026-06-10", 3300n, ctx.accounts.Checking, ctx.accounts.Rent, ctx.assets.usd, "Planned Rent", "planned").id;
+}
+
 function ensureRecatBatch(ctx: TestContext): void {
   if (ctx.batches.recat) return;
   const result = callTool("recategorize_by_pattern", {
@@ -286,6 +292,7 @@ const CASES = {
   financial_overview: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   financial_picture: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
   find_pending_duplicates: { mutation: "read", args: () => ({}), assert: (result) => expect(result.count).toBeGreaterThan(0) },
+  find_realized_planned: { mutation: "read", setup: ensureRealizedPlanned, args: (ctx) => ({ year: 2026, month: 6, account_id: ctx.accounts.Checking }), assert: (result) => expect(result.count).toBeGreaterThan(0) },
   flip_entries: { mutation: "write", args: (ctx) => ({ tx_ids: [ctx.tx.groceries] }), assert: expectObject },
   forecast: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, as_of: "2026-06-30" }), assert: expectObject },
   forecast_month_end: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectObject },
@@ -358,6 +365,7 @@ const CASES = {
   recategorize_transaction: { mutation: "write", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"] }), assert: expectObject },
   recognize_gain_loss: { mutation: "write", args: (ctx) => ({ date: "2026-06-14", amount: 5, investment_account_id: ctx.accounts.Brokerage, description: "Mark gain", asset_id: ctx.assets.usd }), assert: expectObject },
   reconcile_diff: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, date_from: "2026-06-01", date_to: "2026-06-30" }), assert: expectObject },
+  reconcile_planned: { mutation: "dry-run", setup: ensureRealizedPlanned, args: (ctx) => ({ year: 2026, month: 6, account_id: ctx.accounts.Checking }), assert: (result) => expect(result.matched).toBeGreaterThan(0) },
   reconcile_statement: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, counterpart_id: ctx.accounts["Opening Balances"], transactions: [{ date: "2026-06-01", amount_cents: 100000, description: "June Pay" }] }), assert: expectObject },
   reconcile_statement_plan: { mutation: "read", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"] }), assert: expectObject },
   reconcile_to_balance: { mutation: "dry-run", args: (ctx) => ({ account_id: ctx.accounts.Checking, target_balance: 1000, offset_account_id: ctx.accounts["Opening Balances"], date: "2026-06-30", dry_run: true }), assert: expectObject },
@@ -408,6 +416,7 @@ const APPLY_WRITE_CASES = {
   process_statement: { mutation: "write", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], expected_balance: null, commit: true }), assert: (result) => expect(result.created).toBeGreaterThan(0), expectLedgerChange: true },
   recategorize_by_pattern: { mutation: "write", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted", dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
   recategorize_by_patterns: { mutation: "write", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted", dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  reconcile_planned: { mutation: "write", setup: ensureRealizedPlanned, args: (ctx) => ({ year: 2026, month: 6, account_id: ctx.accounts.Checking, dry_run: false }), assert: (result) => expect(result.voided).toBeGreaterThan(0), expectLedgerChange: true },
   reconcile_to_balance: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Checking, target_balance: 1000, offset_account_id: ctx.accounts["Opening Balances"], date: "2026-06-30", dry_run: false }), assert: (result) => expect(result.posted).toBe(true), expectLedgerChange: true },
   record_pending_expenses: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts["Credit Card"], transactions: [{ date: "2026-06-23", amount: 18, description: "Pending expense" }], dry_run: false }), assert: (result) => expect(result.created).toBe(1), expectLedgerChange: true },
   repair_integrity: { mutation: "write", setup: (ctx) => { ctx.ledger.createAnnotation("tx", "tx_missing", "memo", "orphan"); }, args: () => ({ dry_run: false, backup: false }), assert: (result) => expect(result.repaired).toBeGreaterThan(0), expectLedgerChange: true },

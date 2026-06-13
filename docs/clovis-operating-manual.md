@@ -16,6 +16,8 @@ This guide is operational guidance, not financial, tax, or legal advice.
 - Pending is review. Posted is history. Planned is intent.
 - QFX and OFX are preferred for imports when available because stable ids make
   duplicate detection safer. CSV remains supported.
+- Before using `include_planned:true`, inspect or reconcile realized planned
+  rows so landed income or bills are not counted twice.
 - Transfers move balances. Expenses consume money. Do not mix them.
 - Read-only and dry-run tools should come before mutation.
 
@@ -40,6 +42,10 @@ default; pass `dry_run:false` to stage an immutable plan. The plan separates
 already-matched rows, pending rows to commit, true new rows, stale pending rows
 to void, and ambiguous rows that need review.
 
+Review `realized_planned_rows` in statement plans. Those are planned rows that
+appear to have landed as posted or pending transactions and should be
+reconciled before projected cash is trusted.
+
 Import direct rows as pending by default. Pending means the row is visible and
 useful, but not yet trusted as final bookkeeping.
 
@@ -59,6 +65,8 @@ Recommended tools:
 - `process_statement`
 - `import_file`
 - `find_pending_duplicates`
+- `find_realized_planned`
+- `reconcile_planned`
 - `commit_batch`
 - `discard_batch`
 - `void_by_filter`
@@ -132,6 +140,10 @@ present but already assigned.
 Check pending rows before judging the month. Pending card charges and imports
 can change the practical picture.
 
+Before `include_planned:true` projections, run `find_realized_planned` or
+`reconcile_planned` for the period. `cash_projection` excludes realized planned
+rows, but unresolved matches still deserve review.
+
 Use budgets to explain variance, not just totals. A month-end answer should say
 which categories are driving the result.
 
@@ -141,6 +153,8 @@ unhealthy, the report is not ready.
 Recommended tools:
 
 - `cash_projection`
+- `find_realized_planned`
+- `reconcile_planned`
 - `project_month_end`
 - `financial_picture`
 - `financial_overview`
@@ -181,6 +195,10 @@ audit/debug views after the compact answer is understood.
 Use `include_pending:true` or `include_planned:true` only when the answer should
 explicitly become a projection.
 
+Before `include_planned:true`, inspect realized planned rows. Use
+`reconcile_planned` dry-run first, then `dry_run:false` to void planned rows
+that have landed.
+
 Read the burn models separately: budget burn, trailing actual burn,
 fixed-obligation burn, and discretionary-adjusted burn answer different
 questions.
@@ -200,6 +218,8 @@ Recommended tools:
 
 - `cash_runway`
 - `cash_projection`
+- `find_realized_planned`
+- `reconcile_planned`
 - `budget_summary`
 - `spending_rate`
 - `spending`

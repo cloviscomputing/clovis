@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.2.8
+
+Planned transaction lifecycle release.
+
+- Add `find_realized_planned` and `reconcile_planned` so landed planned rows can be inspected and voided after review.
+- Make `cash_projection(include_planned:true)` exclude realized planned rows by default and report `realized_planned_rows` instead of double-counting landed income or bills.
+- Surface realized planned rows during statement planning/review and document the projection cleanup workflow for CLI/MCP agents.
+
 ## 0.2.7
 
 Report warning and backup listing polish release.

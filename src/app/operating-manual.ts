@@ -45,6 +45,7 @@ export const OPERATING_MANUAL_INSTRUCTIONS = [
   "Use live Clovis data as the source of truth; do not answer from old chat memory when a read-only tool can check the ledger.",
   "Prefer QFX or OFX statement files when available because stable statement ids make duplicate detection safer; CSV remains supported as a fallback.",
   "Create a statement plan before applying statement rows; inspect matches, pending-to-posted rows, stale pending rows, new rows, and ambiguous rows before committing.",
+  "Before using include_planned:true, inspect or reconcile realized planned rows so landed income or bills are not counted twice.",
   "Do not treat transfers, credit-card payments, debt movement, or balance moves as spending. Keep cash, liabilities, earmarks, income, and expenses separate.",
   "Use read-only tools and dry-run-capable tools before mutating the ledger. Destructive or bulk tools should be run with explicit intent."
 ].join("\n");
@@ -59,6 +60,7 @@ const SECTIONS = {
       "Use CSV when QFX or OFX is unavailable, incomplete, or malformed. CSV works, but the bank often leaves out stable ids, so date, amount, and description matching matters more.",
       "Preview the file before importing. The preview answers: can Clovis read the file, which columns did it understand, and what rows will it create?",
       "Use refresh_statement when you need the safest path. It previews a plan by default; pass dry_run:false to stage an immutable plan that separates already-matched rows, pending rows to commit, true new rows, stale pending rows to void, and ambiguous rows that need review.",
+      "Review realized_planned_rows in statement plans. Those are planned rows that appear to have landed as posted or pending transactions and should be reconciled before projected cash is trusted.",
       "Import direct rows as pending by default. Pending means the row is visible and useful, but not yet trusted as final bookkeeping.",
       "Before committing, reconcile against the statement and check duplicate candidates. A clean plan is boring: expected rows, expected balance, no unexplained extras.",
       "Commit only after review. If the import looks wrong, discard the batch or fix the mapping instead of posting bad rows and cleaning them up later."
@@ -71,6 +73,8 @@ const SECTIONS = {
       "process_statement",
       "import_file",
       "find_pending_duplicates",
+      "find_realized_planned",
+      "reconcile_planned",
       "commit_batch",
       "discard_batch",
       "void_by_filter"
@@ -118,11 +122,14 @@ const SECTIONS = {
       "Use liability-aware projections for credit cards and debt. Spendable cash is not the same thing as gross cash.",
       "Include earmarks and goals when explaining available money. Money can be present but already assigned.",
       "Check pending rows before judging the month. Pending card charges and imports can change the practical picture.",
+      "Before include_planned:true projections, run find_realized_planned or reconcile_planned for the period. cash_projection excludes realized planned rows, but unresolved matches still deserve review.",
       "Use budgets to explain variance, not just totals. A month-end answer should say which categories are driving the result.",
       "Run integrity checks before giving final numbers. If the ledger is structurally unhealthy, the report is not ready."
     ],
     recommended_tools: [
       "cash_projection",
+      "find_realized_planned",
+      "reconcile_planned",
       "project_month_end",
       "financial_picture",
       "financial_overview",
@@ -147,6 +154,7 @@ const SECTIONS = {
       "Runway cash reserves the remaining current-month budget by default. Use reserve_remaining_budget:false only when you intentionally want raw available cash.",
       "cash_runway omits heavy source rows by default. Use include_sources:true for audit/debug views after the compact answer is understood.",
       "Use include_pending:true or include_planned:true only when the answer should explicitly become a projection.",
+      "Before include_planned:true, inspect realized planned rows. Use reconcile_planned dry-run first, then dry_run:false to void planned rows that have landed.",
       "Read the burn models separately: budget burn, trailing actual burn, fixed-obligation burn, and discretionary-adjusted burn answer different questions.",
       "Use cash_projection when you need the audit trail behind spendable cash: starting cash, liabilities, earmarks, remaining budget, and planned income.",
       "Remove earmarked money when it is not available for general spending. A tax reserve or rent reserve is not free cash.",
@@ -156,6 +164,8 @@ const SECTIONS = {
     recommended_tools: [
       "cash_runway",
       "cash_projection",
+      "find_realized_planned",
+      "reconcile_planned",
       "budget_summary",
       "spending_rate",
       "spending",
