@@ -74,6 +74,9 @@ export function inputShapeFromDefinition(definition: ToolDefinition, name?: stri
   for (const parameter of definition.parameters) {
     shape[parameter[0]] = schemaForParameter(parameter);
   }
+  if (name && !toolAnnotations(name).readOnlyHint && !shape.dry_run) {
+    shape.dry_run = z.boolean().optional();
+  }
   if (name) {
     const parameters = new Map(definition.parameters.map((parameter) => [parameter[0], parameter]));
     for (const [alias, target] of Object.entries(parameterAliasesForTool(name))) {

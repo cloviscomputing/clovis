@@ -91,12 +91,12 @@ Useful orientation tools:
 
 ## Status
 
-The database format is versioned. The current schema is `SCHEMA_VERSION = 3`.
-Fresh databases are created directly with schema v3. Older v1/v2 ledgers are
+The database format is versioned. The current schema is `SCHEMA_VERSION = 4`.
+Fresh databases are created directly with schema v4. Older v1/v2/v3 ledgers are
 migrated on open. Ledger JSON snapshots can be exported and imported with
 `export_ledger` and `import_ledger`.
 
-Patch releases in the `0.x` line should keep reading schema v1, v2, and v3
+Patch releases in the `0.x` line should keep reading schema v1, v2, v3, and v4
 databases, preserve public package entrypoints, and avoid removing MCP tools.
 Minor releases may revise behavior or database shape, but the changelog should
 document the compatibility impact and upgrade path.
@@ -121,6 +121,13 @@ Agents get explicit tools for reporting, search, imports, categorization,
 backups, exports, integrity checks, and maintenance. Read-only tools and
 dry-runs are available for inspection before mutation, and destructive tools are
 marked in the registry.
+
+Ledger mutations pass through a mutation overseer. Mutating tools can be
+previewed with their native dry-run mode or the generic `preview_mutation`
+tool. Applied ledger changes record a `ledger_operation` with structured row
+diffs, affected reports, and accounting deltas where balances changed. Applied
+results include a `mutation_id`/`operation_id` and can be inspected with
+`get_ledger_operation` or reversed with `reverse_ledger_operation`.
 
 ## Financial Records
 
@@ -364,11 +371,13 @@ Agents can call `file_access_status`, or inspect the `file_access` block in
 filesystem boundary, run Clovis or the agent inside an OS sandbox, container, or
 dedicated user account.
 
-Bulk mutation tools default to dry-run and require `dry_run:false` in the tool
-arguments to apply changes:
+Bulk mutation tools default to dry-run where they have native review semantics,
+and all mutating tools can be previewed through the mutation overseer. Apply
+supported dry-run tools with `dry_run:false` or an equivalent commit argument:
 
 ```sh
-clovis --db ./ledger.db tool backup_now
+clovis --db ./ledger.db tool preview_mutation \
+  --json '{"tool_name":"create_account","arguments":{"name":"Parking","type":"expense"}}'
 clovis --db ./ledger.db tool void_by_filter \
   --json '{"status":"planned","date_to":"2026-05-31"}'
 clovis --db ./ledger.db tool void_by_filter \
@@ -399,7 +408,9 @@ CLOVIS_DB=./ledger.db clovis-mcp
 `clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools use ordinary filesystem
 permissions. MCP and CLI tools share the same catalog and behavior: bulk
 mutation tools preview by default, and callers must pass `dry_run:false` or an
-equivalent commit argument to apply changes.
+equivalent commit argument to apply changes. For tools without native dry-run
+output, use `preview_mutation` or pass generic `dry_run:true` through the tool
+schema to get the overseer diff.
 MCP tools include safety annotations such as `readOnlyHint`,
 `destructiveHint`, and `idempotentHint`. The `tool_registry` tool returns the
 full shared schema, rendered signatures, parameter aliases, status convention,

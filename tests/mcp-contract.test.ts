@@ -148,6 +148,17 @@ function ensureRecatBatch(ctx: TestContext): void {
   ctx.batches.recat = result.batch_id;
 }
 
+function ensureLedgerOperation(ctx: TestContext): void {
+  if (ctx.batches.ledgerOperation) return;
+  const result = callTool("recategorize_transaction", {
+    tx_id: ctx.tx.groceries,
+    old_account_id: ctx.accounts.Groceries,
+    new_account_id: ctx.accounts["Dining Out"],
+    dry_run: false
+  }, ctx.ledger) as any;
+  ctx.batches.ledgerOperation = result.operation_id;
+}
+
 function ensureCheckpoint(ctx: TestContext): void {
   if (ctx.checkpoints.closed) return;
   ctx.checkpoints.closed = String(ctx.ledger.closePeriod("Contract close", "2026-05-31").id);
@@ -301,6 +312,7 @@ const CASES = {
   get_account_by_name: { mutation: "read", args: () => ({ name: "Checking" }), assert: expectObject },
   get_asset_by_symbol: { mutation: "read", args: () => ({ symbol: "USD" }), assert: expectObject },
   get_balance: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking }), assert: expectObject },
+  get_ledger_operation: { mutation: "read", setup: ensureLedgerOperation, args: (ctx) => ({ operation_id: ctx.batches.ledgerOperation }), assert: expectObject },
   get_price: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.eur, quote_id: ctx.assets.usd, as_of: "2026-06-30" }), assert: expectObject },
   get_transaction: { mutation: "read", args: (ctx) => ({ id: ctx.tx.pay }), assert: expectObject },
   goal_progress: { mutation: "read", setup: ensureGoal, args: (ctx) => ({ account: ctx.accounts.Savings }), assert: expectObject },
@@ -330,6 +342,7 @@ const CASES = {
   list_entries_by_asset: { mutation: "read", args: (ctx) => ({ asset_id: ctx.assets.usd }), assert: expectObject },
   list_goals: { mutation: "read", setup: ensureGoal, args: () => ({}), assert: expectArray },
   list_import_batches: { mutation: "read", setup: ensureImportBatch, args: () => ({}), assert: expectArray },
+  list_ledger_operations: { mutation: "read", setup: ensureLedgerOperation, args: () => ({}), assert: expectArray },
   list_match_rules: { mutation: "read", setup: ensureRule, args: () => ({}), assert: expectArray },
   list_prices: { mutation: "read", args: () => ({}), assert: expectArray },
   list_scheduled: { mutation: "read", setup: ensureSchedule, args: () => ({}), assert: expectArray },
@@ -353,6 +366,10 @@ const CASES = {
   post_journal_entry: { mutation: "write", args: (ctx) => ({ date: "2026-06-13", description: "Manual journal", legs: [{ account_id: ctx.accounts.Checking, amount: 10 }, { account_id: ctx.accounts["Opening Balances"], amount: -10 }] }), assert: expectObject },
   preview_commit: { mutation: "read", args: () => ({ as_of: "2026-06-30" }), assert: expectObject },
   preview_import: { mutation: "read", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"] }), assert: expectObject },
+  preview_mutation: { mutation: "read", args: () => ({ tool_name: "create_account", arguments: { name: "Preview Account", type: "expense" } }), assert: (result) => {
+    expect(result.dry_run).toBe(true);
+    expect(result.diff.some((row: any) => row.entity_type === "accounts" && row.action === "insert")).toBe(true);
+  } },
   process_scheduled: { mutation: "write", setup: ensureSchedule, args: () => ({ through_date: "2026-06-30" }), assert: expectObject },
   process_statement: { mutation: "dry-run", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], expected_balance: null }), assert: expectObject },
   project_balances: { mutation: "read", setup: ensureGoal, args: (ctx) => ({ through: "2026-06-30", include_goals: true, quote_asset_id: ctx.assets.usd }), assert: expectObject },
@@ -362,7 +379,7 @@ const CASES = {
   } },
   recategorize_by_pattern: { mutation: "dry-run", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
   recategorize_by_patterns: { mutation: "dry-run", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted" }), assert: expectObject },
-  recategorize_transaction: { mutation: "write", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"] }), assert: expectObject },
+  recategorize_transaction: { mutation: "dry-run", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"] }), assert: expectObject },
   recognize_gain_loss: { mutation: "write", args: (ctx) => ({ date: "2026-06-14", amount: 5, investment_account_id: ctx.accounts.Brokerage, description: "Mark gain", asset_id: ctx.assets.usd }), assert: expectObject },
   reconcile_diff: { mutation: "read", args: (ctx) => ({ account_id: ctx.accounts.Checking, date_from: "2026-06-01", date_to: "2026-06-30" }), assert: expectObject },
   reconcile_planned: { mutation: "dry-run", setup: ensureRealizedPlanned, args: (ctx) => ({ year: 2026, month: 6, account_id: ctx.accounts.Checking }), assert: (result) => expect(result.matched).toBeGreaterThan(0) },
@@ -378,6 +395,7 @@ const CASES = {
   record_pending_expenses: { mutation: "dry-run", args: (ctx) => ({ account_id: ctx.accounts["Credit Card"], transactions: [{ date: "2026-06-23", amount: 18, description: "Pending expense" }] }), assert: expectObject },
   reopen_period: { mutation: "write", setup: ensureCheckpoint, args: (ctx) => ({ checkpoint_id: ctx.checkpoints.closed }), assert: expectObject },
   repair_integrity: { mutation: "dry-run", args: () => ({}), assert: expectObject },
+  reverse_ledger_operation: { mutation: "dry-run", setup: ensureLedgerOperation, args: (ctx) => ({ operation_id: ctx.batches.ledgerOperation }), assert: expectObject },
   rollback_import: { mutation: "write", setup: ensureImportBatch, args: (ctx) => ({ batch_id: ctx.batches.import }), assert: expectObject },
   rollback_recategorize: { mutation: "write", setup: ensureRecatBatch, args: (ctx) => ({ batch_id: ctx.batches.recat }), assert: expectObject },
   search_transactions: { mutation: "read", args: () => ({ query: "Pay", status: "posted" }), assert: expectObject },
@@ -416,16 +434,26 @@ const APPLY_WRITE_CASES = {
   process_statement: { mutation: "write", args: (ctx) => ({ file_path: ctx.files.statement, account_id: ctx.accounts.Checking, counterpart_account_id: ctx.accounts["Opening Balances"], expected_balance: null, commit: true }), assert: (result) => expect(result.created).toBeGreaterThan(0), expectLedgerChange: true },
   recategorize_by_pattern: { mutation: "write", args: (ctx) => ({ pattern: "Market", new_account_id: ctx.accounts["Dining Out"], old_account_id: ctx.accounts.Groceries, status: "posted", dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
   recategorize_by_patterns: { mutation: "write", args: (ctx) => ({ rules: [{ pattern: "Market", new_account_id: ctx.accounts["Dining Out"] }], old_account_id: ctx.accounts.Groceries, status: "posted", dry_run: false }), assert: (result) => expect(result.updated).toBeGreaterThan(0), expectLedgerChange: true },
+  recategorize_transaction: { mutation: "write", args: (ctx) => ({ tx_id: ctx.tx.groceries, old_account_id: ctx.accounts.Groceries, new_account_id: ctx.accounts["Dining Out"], dry_run: false }), assert: (result) => expect(result.operation_id).toMatch(/^op_/), expectLedgerChange: true },
   reconcile_planned: { mutation: "write", setup: ensureRealizedPlanned, args: (ctx) => ({ year: 2026, month: 6, account_id: ctx.accounts.Checking, dry_run: false }), assert: (result) => expect(result.voided).toBeGreaterThan(0), expectLedgerChange: true },
   reconcile_to_balance: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts.Checking, target_balance: 1000, offset_account_id: ctx.accounts["Opening Balances"], date: "2026-06-30", dry_run: false }), assert: (result) => expect(result.posted).toBe(true), expectLedgerChange: true },
   record_pending_expenses: { mutation: "write", args: (ctx) => ({ account_id: ctx.accounts["Credit Card"], transactions: [{ date: "2026-06-23", amount: 18, description: "Pending expense" }], dry_run: false }), assert: (result) => expect(result.created).toBe(1), expectLedgerChange: true },
   repair_integrity: { mutation: "write", setup: (ctx) => { ctx.ledger.createAnnotation("tx", "tx_missing", "memo", "orphan"); }, args: () => ({ dry_run: false, backup: false }), assert: (result) => expect(result.repaired).toBeGreaterThan(0), expectLedgerChange: true },
+  reverse_ledger_operation: { mutation: "write", setup: ensureLedgerOperation, args: (ctx) => ({ operation_id: ctx.batches.ledgerOperation, dry_run: false }), assert: (result) => expect(result.reverse_journal_ids.length).toBeGreaterThan(0), expectLedgerChange: true },
   void_by_filter: { mutation: "write", args: () => ({ status: "pending", dry_run: false }), assert: (result) => expect(result.voided).toBeGreaterThan(0), expectLedgerChange: true }
 } satisfies Partial<Record<ToolName, ContractCase>>;
 
 const WRITE_TOOL_NAMES = TOOL_NAMES.filter((name) => CASES[name].mutation !== "read");
 const DRY_RUN_TOOL_NAMES = TOOL_NAMES.filter((name) => CASES[name].mutation === "dry-run");
 const APPLY_WRITE_TOOL_NAMES = Object.keys(APPLY_WRITE_CASES) as ToolName[];
+const LEDGER_APPLY_CASES = Object.fromEntries(TOOL_NAMES.flatMap((name) => {
+  const row = APPLY_WRITE_CASES[name] ?? (CASES[name].mutation === "write" ? CASES[name] : null);
+  return row ? [[name, row]] : [];
+})) as Partial<Record<ToolName, ContractCase>>;
+const LEDGER_APPLY_TOOL_NAMES = Object.keys(LEDGER_APPLY_CASES) as ToolName[];
+const REVERSAL_PRIMITIVES = new Set<ToolName>(["reverse_ledger_operation"]);
+const NON_LEDGER_MUTATORS = new Set<ToolName>(["backup_now"]);
+const REVERSAL_RESTORES_PRIOR_INTEGRITY_ERRORS = new Set<ToolName>(["repair_integrity"]);
 
 function prepareCase(name: ToolName, row: ContractCase): { ctx: TestContext; args: Args; before: string } {
   const ctx = createContext();
@@ -441,6 +469,17 @@ function assertCaseResult(name: ToolName, row: ContractCase, ctx: TestContext, r
   if (row.mutation === "read" || row.mutation === "dry-run") expect(after, `${name} mutated the ledger`).toBe(before);
   if (row.expectLedgerChange) expect(after, `${name} did not mutate the ledger`).not.toBe(before);
   expect(ctx.ledger.integrityCheck().ok, `${name} left the ledger with integrity errors`).toBe(true);
+}
+
+function operationIds(ledger: Ledger): Set<string> {
+  return new Set(ledger.listLedgerOperations(10000).map((row) => String(row.id)));
+}
+
+function newOperationId(result: any, before: Set<string>, ctx: TestContext): string | null {
+  const direct = result && typeof result === "object" ? String(result.operation_id ?? result.mutation_id ?? "") : "";
+  if (direct) return direct;
+  const created = ctx.ledger.listLedgerOperations(10000).map((row) => String(row.id)).filter((id) => !before.has(id));
+  return created.length === 1 ? created[0] : null;
 }
 
 describe("MCP contract matrix", () => {
@@ -530,6 +569,40 @@ describe("MCP contract matrix", () => {
       const row = APPLY_WRITE_CASES[name]!;
       const { ctx, args, before } = prepareCase(name, row);
       assertCaseResult(name, row, ctx, await runner(ctx, args), before);
+    }
+  }, 120_000);
+
+  it.each(LEDGER_APPLY_TOOL_NAMES)("%s applied ledger mutation is audited and reversible", (name) => {
+    const row = LEDGER_APPLY_CASES[name]!;
+    const { ctx, args, before } = prepareCase(name, row);
+    const beforeOperations = operationIds(ctx.ledger);
+    const result = callTool(name, args, ctx.ledger);
+    expect(result, `${name} returned undefined`).not.toBeUndefined();
+    row.assert?.(result, ctx);
+    expect(ctx.ledger.integrityCheck().ok, `${name} failed integrity after apply`).toBe(true);
+
+    const afterApply = ledgerFingerprint(ctx.ledger);
+    if (afterApply === before) return;
+    if (NON_LEDGER_MUTATORS.has(name)) return;
+
+    const operationId = newOperationId(result, beforeOperations, ctx);
+    expect(operationId, `${name} mutated the ledger without returning or recording a ledger operation`).toEqual(expect.stringMatching(/^op_/));
+    const operation = callTool("get_ledger_operation", { operation_id: operationId }, ctx.ledger) as any;
+    expect(operation.status, `${name} operation was not applied`).toBe("applied");
+    expect(operation.operation_type, `${name} operation type mismatch`).toBe(name);
+    expect(operation.rows.length, `${name} operation did not record row-level diff`).toBeGreaterThan(0);
+
+    if (REVERSAL_PRIMITIVES.has(name)) return;
+    const preview = callTool("reverse_ledger_operation", { operation_id: operationId, date: "2026-12-31" }, ctx.ledger) as any;
+    expect(preview.dry_run, `${name} reversal did not preview by default`).toBe(true);
+    expect(preview.reversible, `${name} reversal preview was not marked reversible`).toBe(true);
+    const reverse = callTool("reverse_ledger_operation", { operation_id: operationId, dry_run: false, date: "2026-12-31" }, ctx.ledger) as any;
+    expect(reverse.operation_id, `${name} reversal did not create a reversal operation`).toEqual(expect.stringMatching(/^op_/));
+    const reversed = callTool("get_ledger_operation", { operation_id: operationId }, ctx.ledger) as any;
+    expect(reversed.status, `${name} original operation was not marked reversed`).toBe("reversed");
+    expect(reversed.reversed_by_operation_id, `${name} original operation lacks reversal link`).toBe(reverse.operation_id);
+    if (!REVERSAL_RESTORES_PRIOR_INTEGRITY_ERRORS.has(name)) {
+      expect(ctx.ledger.integrityCheck().ok, `${name} failed integrity after reversal`).toBe(true);
     }
   }, 120_000);
 });

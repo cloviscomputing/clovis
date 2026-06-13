@@ -1,5 +1,5 @@
 export const DEFAULT_BOOK_ID = "book_default";
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const DDL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -235,6 +235,48 @@ CREATE TABLE IF NOT EXISTS statement_plan_rows (
 );
 CREATE INDEX IF NOT EXISTS idx_statement_plan_rows_plan_action ON statement_plan_rows(plan_id, action, row_index);
 CREATE INDEX IF NOT EXISTS idx_statement_plan_rows_hash ON statement_plan_rows(book_id, row_hash);
+CREATE TABLE IF NOT EXISTS ledger_operations (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  operation_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'applied' CHECK(status IN ('applied', 'reversed')),
+  created_at TEXT NOT NULL,
+  reversed_at TEXT,
+  reversed_by_operation_id TEXT,
+  reverses_operation_id TEXT,
+  input_json TEXT NOT NULL DEFAULT '{}',
+  preview_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT NOT NULL DEFAULT '{}',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(id, book_id),
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(reversed_by_operation_id, book_id) REFERENCES ledger_operations(id, book_id),
+  FOREIGN KEY(reverses_operation_id, book_id) REFERENCES ledger_operations(id, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_operations_type_status ON ledger_operations(book_id, operation_type, status, created_at);
+CREATE TABLE IF NOT EXISTS ledger_operation_rows (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  row_index INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('insert', 'update', 'delete', 'correction', 'reverse')),
+  before_hash TEXT,
+  after_hash TEXT,
+  before_json TEXT,
+  after_json TEXT,
+  correction_journal_id TEXT,
+  reverse_journal_id TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(operation_id, row_index),
+  FOREIGN KEY(book_id) REFERENCES books(id),
+  FOREIGN KEY(operation_id, book_id) REFERENCES ledger_operations(id, book_id) ON DELETE CASCADE,
+  FOREIGN KEY(correction_journal_id, book_id) REFERENCES journals(id, book_id),
+  FOREIGN KEY(reverse_journal_id, book_id) REFERENCES journals(id, book_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_operation_rows_operation ON ledger_operation_rows(operation_id, row_index);
 CREATE TRIGGER IF NOT EXISTS trg_statement_plans_no_identity_update
 BEFORE UPDATE OF book_id, account_id, asset_id, statement_kind, file_name, file_sha256, expected_balance, planned_balance, metadata_json, created_at ON statement_plans
 BEGIN
@@ -281,6 +323,39 @@ CREATE TRIGGER IF NOT EXISTS trg_statement_plan_rows_no_delete
 BEFORE DELETE ON statement_plan_rows
 BEGIN
   SELECT RAISE(ABORT, 'statement plan rows are audit records');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ledger_operations_no_identity_update
+BEFORE UPDATE OF book_id, tool_name, operation_type, created_at, reverses_operation_id, input_json, preview_json, result_json, metadata_json ON ledger_operations
+BEGIN
+  SELECT RAISE(ABORT, 'ledger operations are audit records');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ledger_operations_status_transition
+BEFORE UPDATE OF status ON ledger_operations
+WHEN OLD.status != NEW.status
+BEGIN
+  SELECT CASE
+    WHEN OLD.status != 'applied' OR NEW.status != 'reversed'
+    THEN RAISE(ABORT, 'invalid ledger operation status transition')
+  END;
+  SELECT CASE
+    WHEN NEW.reversed_at IS NULL OR NEW.reversed_by_operation_id IS NULL
+    THEN RAISE(ABORT, 'reversed ledger operation requires reversal metadata')
+  END;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ledger_operations_no_delete
+BEFORE DELETE ON ledger_operations
+BEGIN
+  SELECT RAISE(ABORT, 'ledger operations are audit records');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ledger_operation_rows_no_update
+BEFORE UPDATE ON ledger_operation_rows
+BEGIN
+  SELECT RAISE(ABORT, 'ledger operation rows are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_ledger_operation_rows_no_delete
+BEFORE DELETE ON ledger_operation_rows
+BEGIN
+  SELECT RAISE(ABORT, 'ledger operation rows are audit records');
 END;
 CREATE TRIGGER IF NOT EXISTS trg_journals_no_finalized_insert
 BEFORE INSERT ON journals

@@ -47,7 +47,8 @@ export const OPERATING_MANUAL_INSTRUCTIONS = [
   "Create a statement plan before applying statement rows; inspect matches, pending-to-posted rows, stale pending rows, new rows, and ambiguous rows before committing.",
   "Before using include_planned:true, inspect or reconcile realized planned rows so landed income or bills are not counted twice.",
   "Do not treat transfers, credit-card payments, debt movement, or balance moves as spending. Keep cash, liabilities, earmarks, income, and expenses separate.",
-  "Use read-only tools and dry-run-capable tools before mutating the ledger. Destructive or bulk tools should be run with explicit intent."
+  "Use read-only tools and dry-run-capable tools before mutating the ledger. Destructive or bulk tools should be run with explicit intent.",
+  "Applied mutations should leave an audit event and a ledger-level reversal path."
 ].join("\n");
 
 const SECTIONS = {
@@ -218,6 +219,8 @@ const SECTIONS = {
       "Prefer read-only tools first. They are safe for discovery, diagnosis, and explanation.",
       "Read MCP annotations before routing calls. readOnlyHint, destructiveHint, and idempotentHint are machine-readable safety labels.",
       "Use dry-run-capable tools in preview mode before applying changes. The preview is the change request.",
+      "For tools without native dry-run output, use preview_mutation to run the change inside a rolled-back ledger transaction and inspect the structured diff.",
+      "Applied ledger mutations return a mutation_id or operation_id. Inspect it with get_ledger_operation or list_ledger_operations, and reverse supported operations with reverse_ledger_operation rather than editing history by hand.",
       "Back up before destructive or broad edits. Backups are cheap compared with manual reconstruction.",
       "Use file_access_status when a statement path fails. It reports the current path policy, max file size, and relevant filesystem configuration.",
       "Run doctor or integrity checks after upgrades and before important month-end work."
@@ -228,11 +231,16 @@ const SECTIONS = {
       "backup_status",
       "backup_now",
       "integrity_check",
-      "preview_commit"
+      "preview_commit",
+      "preview_mutation",
+      "list_ledger_operations",
+      "get_ledger_operation",
+      "reverse_ledger_operation"
     ],
     warnings: [
       "Destructive tools should not be called speculatively.",
       "A dry-run result is not a committed result. The caller must pass the explicit commit or dry_run:false argument to apply supported mutations.",
+      "Reversals are corrections, not deletion. Posted facts stay inspectable.",
       "Clovis can organize bookkeeping facts, but it is not a bank, tax advisor, custody system, or substitute for professional review."
     ]
   }
@@ -324,8 +332,10 @@ export function operatingManualMarkdown(topicInput?: unknown): string {
     "- Live Clovis data is the source of truth. Chat history is not.",
     "- Pending is review. Posted is history. Planned is intent.",
     "- QFX and OFX are preferred for imports when available because stable ids make duplicate detection safer. CSV remains supported.",
+    "- Before using `include_planned:true`, inspect or reconcile realized planned rows so landed income or bills are not counted twice.",
     "- Transfers move balances. Expenses consume money. Do not mix them.",
     "- Read-only and dry-run tools should come before mutation.",
+    "- Applied mutations should leave an audit event and a ledger-level reversal path.",
     "",
     ...Object.values(SECTIONS).map(renderSection)
   ].join("\n\n") + "\n";

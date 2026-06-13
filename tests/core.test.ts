@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -42,15 +42,15 @@ describe("ledger core", () => {
     expect(debitCredit(-1200n)).toEqual({ debit: 0n, credit: 1200n });
   });
 
-  it("creates schema v3 and default book", () => {
+  it("creates schema v4 and default book", () => {
     const ledger = tempLedger();
     try {
       const tables = new Set((ledger.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
-      for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences", "migration_history", "statement_plans", "statement_plan_rows"]) {
+      for (const table of ["books", "journals", "journal_lines", "annotations", "sources", "targets", "period_closes", "recurrences", "migration_history", "statement_plans", "statement_plan_rows", "ledger_operations", "ledger_operation_rows"]) {
         expect(tables.has(table)).toBe(true);
       }
       const columns = (table: string) => new Set((ledger.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name));
-      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("3");
+      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("4");
       expect(columns("journal_lines").has("quantity")).toBe(true);
       expect(columns("journal_lines").has("book_id")).toBe(true);
       expect(columns("journals").has("finalized_at")).toBe(true);
@@ -63,6 +63,8 @@ describe("ledger core", () => {
       expect(columns("recurrences").has("quantity")).toBe(true);
       expect(columns("lots").has("opened_journal_id")).toBe(true);
       expect(columns("lots").has("status")).toBe(true);
+      expect(columns("ledger_operations").has("operation_type")).toBe(true);
+      expect(columns("ledger_operation_rows").has("correction_journal_id")).toBe(true);
       expect(columns("statement_plans").has("planned_balance")).toBe(true);
       expect(columns("statement_plan_rows").has("row_hash")).toBe(true);
     } finally {
@@ -182,12 +184,13 @@ describe("ledger core", () => {
 
     const ledger = new Ledger(dbPath);
     try {
-      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("3");
+      expect((ledger.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as any).value).toBe("4");
       expect(ledger.getAccount("acct_checking")?.default_asset_id).toBe("asset_usd");
       expect((ledger.db.prepare("SELECT finalized_at FROM journals WHERE id = 'tx_legacy'").get() as any).finalized_at).toBe("2026-06-01T00:00:00Z");
       expect(ledger.listTransactions({ status: null }).map((tx) => tx.id)).toContain("tx_legacy");
       expect((ledger.db.prepare("SELECT count(*) AS c FROM migration_history WHERE version = 2").get() as any).c).toBe(1n);
       expect((ledger.db.prepare("SELECT count(*) AS c FROM migration_history WHERE version = 3").get() as any).c).toBe(1n);
+      expect((ledger.db.prepare("SELECT count(*) AS c FROM migration_history WHERE version = 4").get() as any).c).toBe(1n);
       expect(ledger.listSources("import", null)).toHaveLength(1);
       expect(ledger.listPrices()).toHaveLength(1);
       expect(ledger.listRules("match")).toHaveLength(1);
@@ -2249,9 +2252,22 @@ describe("app and package surface", () => {
   it("lists backup database files without treating SQLite sidecars as standalone backups", () => {
     const ledger = tempLedger();
     try {
+      const backupDir = join(dirname(ledger.path), "backups");
+      const dryRun = callTool("backup_now", { dry_run: true }, ledger) as any;
+      expect(dryRun).toMatchObject({ dry_run: true, would_backup: true, compact: true });
+      expect(String(dryRun.path)).toContain("backups");
+      expect(existsSync(backupDir)).toBe(false);
+      const explicitDryPath = join(dirname(ledger.path), "explicit-dry-run.db");
+      const explicitDryRun = callTool("backup_now", { output_path: explicitDryPath, dry_run: true }, ledger) as any;
+      expect(String(explicitDryRun.path)).toMatch(/explicit-dry-run\.db$/);
+      expect(existsSync(String(explicitDryRun.path))).toBe(false);
+      const preview = callTool("preview_mutation", { tool_name: "backup_now", arguments: { output_path: explicitDryPath } }, ledger) as any;
+      expect(preview.dry_run).toBe(true);
+      expect(preview.would_result.path).toBe(explicitDryRun.path);
+      expect(existsSync(String(preview.would_result.path))).toBe(false);
+
       const backup = callTool("backup_now", {}, ledger) as any;
       expect(String(backup.path)).toContain("backups");
-      const backupDir = join(dirname(ledger.path), "backups");
       const manual = join(backupDir, "manual.db");
       writeFileSync(manual, "backup");
       writeFileSync(`${manual}-wal`, "");
@@ -2339,6 +2355,219 @@ describe("app and package surface", () => {
       expect(entries).toContainEqual(expect.objectContaining({ account_id: checking, quantity: -2500n }));
       expect(entries).toContainEqual(expect.objectContaining({ account_id: groceries, quantity: 2500n }));
       expect(entries.some((entry) => entry.account_id === dining)).toBe(false);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("previews, audits, and reverses single-transaction recategorization as ledger operations", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const dining = ledger.createAccount("Dining", "expense");
+      const tx = ledger.recordTransaction("2026-06-02", 2500n, checking, groceries, usd, "Market", "posted");
+
+      const preview = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining }, ledger) as any;
+      expect(preview).toMatchObject({
+        dry_run: true,
+        reversible: true,
+        before_category: { account_id: groceries },
+        after_category: { account_id: dining }
+      });
+      expect(ledger.listTransactions({ status: null })).toHaveLength(1);
+      expect(ledger.getEntries(tx.id)).toContainEqual(expect.objectContaining({ account_id: groceries, quantity: 2500n }));
+
+      const applied = callTool("recategorize_transaction", { tx_id: tx.id, old_account_id: groceries, new_account_id: dining, dry_run: false }, ledger) as any;
+      expect(applied.operation_id).toMatch(/^op_/);
+      expect(applied.correction_journal_id).toMatch(/^tx_/);
+      expect(ledger.getEntries(tx.id)).toContainEqual(expect.objectContaining({ account_id: groceries, quantity: 2500n }));
+      expect(ledger.getEntries(applied.correction_journal_id)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ account_id: groceries, quantity: -2500n }),
+        expect.objectContaining({ account_id: dining, quantity: 2500n })
+      ]));
+
+      const operation = callTool("get_ledger_operation", { operation_id: applied.operation_id }, ledger) as any;
+      expect(operation).toMatchObject({ id: applied.operation_id, operation_type: "recategorize_transaction", status: "applied" });
+      expect(operation.rows[0]).toMatchObject({ action: "correction", correction_journal_id: applied.correction_journal_id });
+
+      const reversePreview = callTool("reverse_ledger_operation", { operation_id: applied.operation_id }, ledger) as any;
+      expect(reversePreview).toMatchObject({ dry_run: true, reversible: true, operation_id: applied.operation_id });
+      const reversed = callTool("reverse_ledger_operation", { operation_id: applied.operation_id, dry_run: false }, ledger) as any;
+      expect(reversed.operation_id).toMatch(/^op_/);
+      expect(reversed.reverse_journal_ids).toHaveLength(1);
+      expect(ledger.getEntries(reversed.reverse_journal_ids[0])).toEqual(expect.arrayContaining([
+        expect.objectContaining({ account_id: groceries, quantity: 2500n }),
+        expect.objectContaining({ account_id: dining, quantity: -2500n })
+      ]));
+      expect((callTool("get_ledger_operation", { operation_id: applied.operation_id }, ledger) as any).status).toBe("reversed");
+      expect(() => callTool("reverse_ledger_operation", { operation_id: applied.operation_id, dry_run: false }, ledger)).toThrow(/already reversed/);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("oversees generic mutations with preview, audit, and row-level reversal", () => {
+    const ledger = tempLedger();
+    try {
+      const preview = callTool("create_account", { name: "Preview Expense", type: "expense", dry_run: true }, ledger) as any;
+      expect(preview).toMatchObject({ dry_run: true, tool_name: "create_account" });
+      expect(preview.diff).toEqual(expect.arrayContaining([expect.objectContaining({ entity_type: "accounts", action: "insert" })]));
+      expect(ledger.listAccounts().some((account) => account.name === "Preview Expense")).toBe(false);
+
+      const created = callTool("create_account", { name: "Temporary Expense", type: "expense" }, ledger) as any;
+      expect(created.mutation_id).toMatch(/^op_/);
+      expect(created.operation_id).toBe(created.mutation_id);
+      const operation = callTool("get_ledger_operation", { operation_id: created.mutation_id }, ledger) as any;
+      expect(operation).toMatchObject({ operation_type: "create_account", status: "applied" });
+      expect(operation.rows).toEqual(expect.arrayContaining([expect.objectContaining({ entity_type: "accounts", action: "insert" })]));
+      expect(ledger.listAccounts().some((account) => account.name === "Temporary Expense")).toBe(true);
+
+      const reversed = callTool("reverse_ledger_operation", { operation_id: created.mutation_id, dry_run: false }, ledger) as any;
+      expect(reversed.reversed_rows).toEqual(expect.arrayContaining([expect.objectContaining({ table: "accounts", action: "insert" })]));
+      expect(ledger.listAccounts().some((account) => account.name === "Temporary Expense")).toBe(false);
+      expect((callTool("get_ledger_operation", { operation_id: created.mutation_id }, ledger) as any).status).toBe("reversed");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("deactivates referenced inserted accounts instead of deleting them during reversal", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const created = callTool("create_account", { name: "Ephemeral Category", type: "expense", default_asset_id: usd }, ledger) as any;
+      callTool("create_transaction", {
+        date: "2026-06-20",
+        amount: 12,
+        from_account_id: checking,
+        to_account_id: created.id,
+        description: "Uses later-created category",
+        status: "posted",
+        asset_id: usd
+      }, ledger);
+
+      const preview = callTool("reverse_ledger_operation", { operation_id: created.operation_id }, ledger) as any;
+      expect(preview.row_reversals).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          table: "accounts",
+          action: "update",
+          entity_id: created.id,
+          reason: expect.stringContaining("deactivates")
+        })
+      ]));
+
+      const reversed = callTool("reverse_ledger_operation", { operation_id: created.operation_id, dry_run: false }, ledger) as any;
+      expect(reversed.operation_id).toMatch(/^op_/);
+      expect(ledger.tableRows("accounts").find((row) => row.id === created.id)?.status).toBe("inactive");
+      expect(ledger.integrityCheck().ok).toBe(true);
+      expect((callTool("get_ledger_operation", { operation_id: created.operation_id }, ledger) as any).status).toBe("reversed");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("does not delete stale inserted account rows that changed after the original operation", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const created = callTool("create_account", { name: "Mutable Category", type: "expense", default_asset_id: usd }, ledger) as any;
+      callTool("update_account", { id: created.id, name: "Mutable Category Updated", code: "6400" }, ledger);
+
+      const preview = callTool("reverse_ledger_operation", { operation_id: created.operation_id }, ledger) as any;
+      expect(preview.row_reversals).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          table: "accounts",
+          action: "update",
+          entity_id: created.id,
+          reason: expect.stringContaining("changed after operation")
+        })
+      ]));
+
+      callTool("reverse_ledger_operation", { operation_id: created.operation_id, dry_run: false }, ledger);
+      const row = ledger.tableRows("accounts").find((account) => account.id === created.id);
+      expect(row).toMatchObject({ name: "Mutable Category Updated", code: "6400", status: "inactive" });
+      expect(ledger.integrityCheck().ok).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("reverses generic posted accounting mutations with correction journals", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const dining = ledger.createAccount("Dining", "expense");
+
+      const created = callTool("create_transaction", {
+        date: "2026-06-20",
+        amount: 25,
+        from_account_id: checking,
+        to_account_id: dining,
+        description: "Dinner",
+        status: "posted",
+        asset_id: usd
+      }, ledger) as any;
+      expect(created.mutation_id).toMatch(/^op_/);
+      expect(ledger.balanceTree(checking, usd, null, "posted")).toBe(-2500n);
+
+      const operation = callTool("get_ledger_operation", { operation_id: created.mutation_id }, ledger) as any;
+      expect(operation.metadata.accounting_delta).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: "posted", account_id: checking, asset_id: usd, quantity: "-2500" })
+      ]));
+
+      const reversePreview = callTool("reverse_ledger_operation", { operation_id: created.mutation_id }, ledger) as any;
+      expect(reversePreview).toMatchObject({ dry_run: true, reversal_strategy: "generic_ledger_operation" });
+      const reversed = callTool("reverse_ledger_operation", { operation_id: created.mutation_id, dry_run: false, date: "2026-06-21" }, ledger) as any;
+      expect(reversed.reverse_journal_ids).toHaveLength(1);
+      expect(ledger.getEntries(reversed.reverse_journal_ids[0])).toEqual(expect.arrayContaining([
+        expect.objectContaining({ account_id: checking, quantity: 2500n }),
+        expect.objectContaining({ account_id: dining, quantity: -2500n })
+      ]));
+      expect(ledger.balanceTree(checking, usd, null, "posted")).toBe(0n);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("blocks reversal while newer dependent ledger operations are still active", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const dining = ledger.createAccount("Dining", "expense");
+
+      const tx = callTool("create_transaction", {
+        date: "2026-06-20",
+        amount: 25,
+        from_account_id: checking,
+        to_account_id: groceries,
+        description: "Market",
+        status: "posted",
+        asset_id: usd
+      }, ledger) as any;
+      const recat = callTool("recategorize_transaction", {
+        tx_id: tx.id,
+        old_account_id: groceries,
+        new_account_id: dining,
+        dry_run: false,
+        correction_date: "2026-06-21"
+      }, ledger) as any;
+
+      expect(() => callTool("reverse_ledger_operation", { operation_id: tx.operation_id, dry_run: false, date: "2026-06-22" }, ledger))
+        .toThrow(/active dependent operations/);
+
+      callTool("reverse_ledger_operation", { operation_id: recat.operation_id, dry_run: false, date: "2026-06-22" }, ledger);
+      const reversed = callTool("reverse_ledger_operation", { operation_id: tx.operation_id, dry_run: false, date: "2026-06-23" }, ledger) as any;
+      expect(reversed.reverse_journal_ids).toHaveLength(1);
+      expect(ledger.balanceTree(checking, usd, null, "posted")).toBe(0n);
+      expect(ledger.balanceTree(groceries, usd, null, "posted")).toBe(0n);
+      expect(ledger.balanceTree(dining, usd, null, "posted")).toBe(0n);
+      expect(ledger.integrityCheck().ok).toBe(true);
     } finally {
       ledger.close();
     }

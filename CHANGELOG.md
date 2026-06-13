@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.9
+
+Operation ledger release.
+
+- Add schema v4 operation audit records with immutable `ledger_operations` and `ledger_operation_rows` tables.
+- Route mutating tools through a mutation overseer that supports preview, structured diffs, applied audit events, and ledger-level reversal paths.
+- Add `preview_mutation`, `list_ledger_operations`, `get_ledger_operation`, and `reverse_ledger_operation`, and advertise generic `dry_run` support for mutating MCP/CLI tools.
+- Make posted `recategorize_transaction` append-only by posting correction journals instead of rewriting posted history, with reversible operation records.
+- Add native `backup_now(dry_run:true)` so filesystem-side-effect previews do not write backup files.
+
 ## 0.2.8
 
 Planned transaction lifecycle release.

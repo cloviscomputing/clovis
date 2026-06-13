@@ -276,6 +276,7 @@ export class Ledger {
     try {
       if (currentVersion < 2) this.migrateToV2();
       if (currentVersion < 3) this.migrateToV3();
+      if (currentVersion < 4) this.migrateToV4();
       this.db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
       this.db.exec("COMMIT");
     } catch (error) {
@@ -308,6 +309,11 @@ export class Ledger {
   private migrateToV3(): void {
     this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
     this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (3, 'add statement import plans', ?)").run(now());
+  }
+
+  private migrateToV4(): void {
+    this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
+    this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (4, 'add ledger operation audit records', ?)").run(now());
   }
 
   createAsset(symbol: string, type: AssetType | string = "currency", scale = 2, name = ""): string {
@@ -423,15 +429,10 @@ export class Ledger {
     if (children > 0n) throw new Error("Account has child accounts");
     const entries = (this.db.prepare("SELECT count(*) AS c FROM journal_lines WHERE book_id = ? AND account_id = ?").get(this.bookId, accountId) as Row).c as bigint;
     if (entries > 0n) throw new Error("Account has entries");
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    this.transaction(() => {
       this.db.prepare("DELETE FROM accounts WHERE book_id = ? AND id = ?").run(this.bookId, accountId);
       this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND entity_type = 'account' AND entity_id = ?").run(this.bookId, accountId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   createAnnotation(entityType: string, entityId: string, key: string, value: string): string {
@@ -529,10 +530,9 @@ export class Ledger {
   }
 
   createStatementPlan(input: Row, rows: Row[]): Row {
-    const planId = String(input.id ?? id("stmtplan"));
-    const createdAt = String(input.created_at ?? now());
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
+      const planId = String(input.id ?? id("stmtplan"));
+      const createdAt = String(input.created_at ?? now());
       this.db.prepare(`
         INSERT INTO statement_plans(
           id, book_id, account_id, asset_id, source_id, status, statement_kind, file_name, file_sha256,
@@ -580,12 +580,8 @@ export class Ledger {
           JSON.stringify(row.metadata ?? row.metadata_json ?? {})
         );
       }
-      this.db.exec("COMMIT");
       return this.getStatementPlan(planId)!;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   getStatementPlan(planId: string): Row | null {
@@ -614,6 +610,87 @@ export class Ledger {
 
   setStatementPlanRowCreatedJournal(rowId: string, journalId: string): void {
     this.db.prepare("UPDATE statement_plan_rows SET created_journal_id = ? WHERE book_id = ? AND id = ?").run(journalId, this.bookId, rowId);
+  }
+
+  createLedgerOperation(input: Row, rows: Row[]): Row {
+    return this.transaction(() => {
+      const operationId = String(input.id ?? id("op"));
+      const createdAt = String(input.created_at ?? now());
+      this.db.prepare(`
+        INSERT INTO ledger_operations(
+          id, book_id, tool_name, operation_type, status, created_at, reversed_at,
+          reversed_by_operation_id, reverses_operation_id, input_json, preview_json, result_json, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        operationId,
+        this.bookId,
+        String(input.tool_name ?? ""),
+        String(input.operation_type ?? ""),
+        String(input.status ?? "applied"),
+        createdAt,
+        input.reversed_at == null ? null : String(input.reversed_at),
+        input.reversed_by_operation_id == null ? null : String(input.reversed_by_operation_id),
+        input.reverses_operation_id == null ? null : String(input.reverses_operation_id),
+        String(input.input_json ?? JSON.stringify(input.input ?? {})),
+        String(input.preview_json ?? JSON.stringify(input.preview ?? {})),
+        String(input.result_json ?? JSON.stringify(input.result ?? {})),
+        String(input.metadata_json ?? JSON.stringify(input.metadata ?? {}))
+      );
+      rows.forEach((row, index) => {
+        this.db.prepare(`
+          INSERT INTO ledger_operation_rows(
+            id, book_id, operation_id, row_index, entity_type, entity_id, action,
+            before_hash, after_hash, before_json, after_json, correction_journal_id,
+            reverse_journal_id, metadata_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          String(row.id ?? id("oprow")),
+          this.bookId,
+          operationId,
+          Number(row.row_index ?? index),
+          String(row.entity_type),
+          String(row.entity_id),
+          String(row.action),
+          row.before_hash == null ? null : String(row.before_hash),
+          row.after_hash == null ? null : String(row.after_hash),
+          row.before_json == null ? null : String(row.before_json),
+          row.after_json == null ? null : String(row.after_json),
+          row.correction_journal_id == null ? null : String(row.correction_journal_id),
+          row.reverse_journal_id == null ? null : String(row.reverse_journal_id),
+          String(row.metadata_json ?? JSON.stringify(row.metadata ?? {}))
+        );
+      });
+      return this.getLedgerOperation(operationId)!;
+    });
+  }
+
+  getLedgerOperation(operationId: string): Row | null {
+    return (this.db.prepare("SELECT rowid AS _rowid, * FROM ledger_operations WHERE book_id = ? AND id = ?").get(this.bookId, operationId) as Row | undefined) ?? null;
+  }
+
+  listLedgerOperations(limit: number | null = 50): Row[] {
+    let sql = "SELECT rowid AS _rowid, * FROM ledger_operations WHERE book_id = ? ORDER BY rowid DESC";
+    const params: SQLInputValue[] = [this.bookId];
+    if (limit != null) {
+      sql += " LIMIT ?";
+      params.push(limit);
+    }
+    return this.db.prepare(sql).all(...params) as Row[];
+  }
+
+  listLedgerOperationRows(operationId: string): Row[] {
+    return this.db.prepare("SELECT * FROM ledger_operation_rows WHERE book_id = ? AND operation_id = ? ORDER BY row_index, id").all(this.bookId, operationId) as Row[];
+  }
+
+  markLedgerOperationReversed(operationId: string, reversedByOperationId: string): Row {
+    const result = this.db.prepare("UPDATE ledger_operations SET status = 'reversed', reversed_at = ?, reversed_by_operation_id = ? WHERE book_id = ? AND id = ?").run(
+      now(),
+      reversedByOperationId,
+      this.bookId,
+      operationId
+    );
+    if (Number(result.changes) !== 1) throw new Error(`Ledger operation ${operationId} was not marked reversed`);
+    return this.getLedgerOperation(operationId)!;
   }
 
   runInTransaction<T>(fn: () => T): T {
@@ -649,6 +726,72 @@ export class Ledger {
   tableRows(table: string): Row[] {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error("Invalid table name");
     return this.db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all() as Row[];
+  }
+
+  reverseRows(rows: Array<{ table: string; action: string; before?: Row | null; after?: Row | null }>): Row[] {
+    const sqlIdentifier = (value: string): string => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("Invalid SQL identifier");
+      return value;
+    };
+    const primaryKey = (table: string): string => table === "meta" ? "key" : table === "migration_history" ? "version" : "id";
+    const sqlValue = (value: unknown): SQLInputValue => {
+      if (value === undefined) return null;
+      if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "bigint") return value;
+      if (typeof value === "boolean") return value ? 1 : 0;
+      return JSON.stringify(value);
+    };
+    const whereByPrimaryKey = (table: string, row: Row): { sql: string; params: SQLInputValue[] } => {
+      const pk = primaryKey(table);
+      if (row[pk] == null) throw new Error(`Cannot reverse ${table} row without ${pk}`);
+      const params: SQLInputValue[] = [sqlValue(row[pk])];
+      let sql = `${sqlIdentifier(pk)} = ?`;
+      if (row.book_id != null) {
+        sql += " AND book_id = ?";
+        params.push(sqlValue(row.book_id));
+      }
+      return { sql, params };
+    };
+    const runOne = (sql: string, params: SQLInputValue[], message: string): void => {
+      const result = this.db.prepare(sql).run(...params);
+      if (Number(result.changes) !== 1) throw new Error(message);
+    };
+    const insertRow = (table: string, row: Row): void => {
+      const columns = this.tableColumns(table).filter((column) => Object.prototype.hasOwnProperty.call(row, column));
+      const placeholders = columns.map(() => "?").join(", ");
+      runOne(`INSERT INTO ${sqlIdentifier(table)}(${columns.map(sqlIdentifier).join(", ")}) VALUES (${placeholders})`, columns.map((column) => sqlValue(row[column])), `Failed to restore ${table} row`);
+    };
+    const updateRow = (table: string, row: Row): void => {
+      const pk = primaryKey(table);
+      const columns = this.tableColumns(table).filter((column) => column !== pk && Object.prototype.hasOwnProperty.call(row, column));
+      const assignments = columns.map((column) => `${sqlIdentifier(column)} = ?`).join(", ");
+      const where = whereByPrimaryKey(table, row);
+      runOne(`UPDATE ${sqlIdentifier(table)} SET ${assignments} WHERE ${where.sql}`, [...columns.map((column) => sqlValue(row[column])), ...where.params], `Failed to restore ${table} row`);
+    };
+    const deleteRow = (table: string, row: Row): void => {
+      const where = whereByPrimaryKey(table, row);
+      runOne(`DELETE FROM ${sqlIdentifier(table)} WHERE ${where.sql}`, where.params, `Failed to remove inserted ${table} row`);
+    };
+
+    return this.transaction(() => {
+      const reversed: Row[] = [];
+      for (const row of rows) {
+        const table = sqlIdentifier(row.table);
+        if (row.action === "insert") {
+          if (!row.after) throw new Error(`Cannot reverse ${table} insert without after row`);
+          deleteRow(table, row.after);
+        } else if (row.action === "delete") {
+          if (!row.before) throw new Error(`Cannot reverse ${table} delete without before row`);
+          insertRow(table, row.before);
+        } else if (row.action === "update") {
+          if (!row.before) throw new Error(`Cannot reverse ${table} update without before row`);
+          updateRow(table, row.before);
+        } else {
+          throw new Error(`Unsupported row reversal action: ${row.action}`);
+        }
+        reversed.push({ table, action: row.action, entity_id: row.after?.id ?? row.before?.id ?? null });
+      }
+      return reversed;
+    });
   }
 
   countTransactions(): number {
@@ -737,8 +880,7 @@ export class Ledger {
     const normalizedPeriod = targetPeriod(period);
     const normalizedYear = yearValue(year);
     const normalizedMonth = monthValue(month);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'budget' AND account_id = ? AND asset_id = ? AND period = ? AND year IS ? AND month IS ?").run(this.bookId, accountId, assetId, normalizedPeriod, normalizedYear, normalizedMonth);
       const targetId = id("budget");
       this.db.prepare("INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, period, year, month, rollover_rule) VALUES (?, ?, 'budget', ?, ?, ?, ?, ?, ?, ?)").run(
@@ -752,12 +894,8 @@ export class Ledger {
         normalizedMonth,
         rollover ? "full" : ""
       );
-      this.db.exec("COMMIT");
       return this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND id = ?").get(this.bookId, targetId) as Row;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   deleteBudget(accountId: string, year?: number | null, month?: number | null): number {
@@ -783,8 +921,7 @@ export class Ledger {
     if (!this.getAsset(assetId)) throw new Error(`Asset ${assetId} not found`);
     const amount = positiveQuantity(quantity, "Goal target");
     const normalizedDate = targetDate == null || targetDate === "" ? null : dateOnly(targetDate);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       this.db.prepare("DELETE FROM targets WHERE book_id = ? AND type = 'goal' AND account_id = ? AND asset_id = ?").run(this.bookId, accountId, assetId);
       const targetId = id("goal");
       this.db.prepare("INSERT INTO targets(id, book_id, type, account_id, asset_id, quantity, name, target_date, priority) VALUES (?, ?, 'goal', ?, ?, ?, ?, ?, ?)").run(
@@ -797,12 +934,8 @@ export class Ledger {
         normalizedDate,
         priority
       );
-      this.db.exec("COMMIT");
       return this.db.prepare("SELECT * FROM targets WHERE book_id = ? AND id = ?").get(this.bookId, targetId) as Row;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   listGoalTargets(): Row[] {
@@ -889,8 +1022,7 @@ export class Ledger {
       return value;
     };
 
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       this.db.prepare("INSERT INTO books(id, name, type, parent_id, created_at) VALUES (?, ?, 'scenario', ?, ?)").run(scenarioId, scenarioId, this.bookId, createdAt);
 
       const accounts = this.db.prepare("SELECT * FROM accounts WHERE book_id = ? ORDER BY name, id").all(this.bookId) as Row[];
@@ -1088,12 +1220,8 @@ export class Ledger {
         );
       }
 
-      this.db.exec("COMMIT");
       return this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE id = ?").get(scenarioId) as Row;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   listScenarioBooks(): Row[] {
@@ -1299,16 +1427,11 @@ export class Ledger {
     if (!tx) throw new Error(`Transaction ${txId} not found`);
     this.assertPeriodOpen(tx.date);
     this.assertTxNotLinkedToLots(txId);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    this.transaction(() => {
       this.reopenTx(txId);
       this.db.prepare("DELETE FROM annotations WHERE book_id = ? AND entity_type = 'tx' AND entity_id = ?").run(this.bookId, txId);
       this.db.prepare("DELETE FROM journals WHERE book_id = ? AND id = ?").run(this.bookId, txId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   getTx(txId: string): Journal | null {
@@ -1365,24 +1488,18 @@ export class Ledger {
     this.assertPeriodOpen(tx.date);
     this.assertTxNotLinkedToLots(txId);
     if (!this.getAccount(newAccountId)) throw new Error(`Account ${newAccountId} not found`);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       this.reopenTx(txId);
       const result = this.db.prepare("UPDATE journal_lines SET account_id = ? WHERE book_id = ? AND journal_id = ? AND account_id = ?").run(newAccountId, this.bookId, txId, oldAccountId);
       if (Number(result.changes) === 0) throw new Error(`Account ${oldAccountId} is not on transaction ${txId}`);
       this.finalizeTx(txId);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return { tx_id: txId, from_account_id: oldAccountId, to_account_id: newAccountId };
+      return { tx_id: txId, from_account_id: oldAccountId, to_account_id: newAccountId };
+    });
   }
 
   flipEntries(txIds: string[]): string[] {
-    const flipped: string[] = [];
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
+      const flipped: string[] = [];
       for (const txId of txIds) {
         const tx = this.getTx(txId);
         if (!tx) throw new Error(`Transaction ${txId} not found`);
@@ -1394,12 +1511,8 @@ export class Ledger {
         this.finalizeTx(txId);
         flipped.push(txId);
       }
-      this.db.exec("COMMIT");
       return flipped;
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   moveEntriesBetweenAccounts(sourceAccountId: string, targetAccountId: string): number {
@@ -1414,16 +1527,11 @@ export class Ledger {
     const txIds = rows.map((row) => String(row.id));
     const placeholders = txIds.map(() => "?").join(", ");
     const count = (this.db.prepare(`SELECT count(*) AS c FROM journal_lines WHERE book_id = ? AND account_id = ? AND journal_id IN (${placeholders})`).get(this.bookId, sourceAccountId, ...txIds) as Row).c as bigint;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    this.transaction(() => {
       for (const row of rows) this.reopenTx(String(row.id));
       this.db.prepare(`UPDATE journal_lines SET account_id = ? WHERE book_id = ? AND account_id = ? AND journal_id IN (${placeholders})`).run(targetAccountId, this.bookId, sourceAccountId, ...txIds);
       for (const row of rows) this.finalizeTx(String(row.id));
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     return Number(count);
   }
 
@@ -1439,16 +1547,11 @@ export class Ledger {
     const txIds = rows.map((row) => String(row.id));
     const placeholders = txIds.map(() => "?").join(", ");
     const count = (this.db.prepare(`SELECT count(*) AS c FROM journal_lines WHERE book_id = ? AND asset_id = ? AND journal_id IN (${placeholders})`).get(this.bookId, fromAssetId, ...txIds) as Row).c as bigint;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    this.transaction(() => {
       for (const row of rows) this.reopenTx(String(row.id));
       this.db.prepare(`UPDATE journal_lines SET asset_id = ? WHERE book_id = ? AND asset_id = ? AND journal_id IN (${placeholders})`).run(toAssetId, this.bookId, fromAssetId, ...txIds);
       for (const row of rows) this.finalizeTx(String(row.id));
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     return Number(count);
   }
 
@@ -2061,8 +2164,7 @@ export class Ledger {
     if (shares <= 0n) throw new Error("Security shares must be positive");
     if (totalCost <= 0n) throw new Error("Security cost must be positive");
 
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       this.assertPeriodOpen(txDate);
       const securityId = this.createAsset(symbol, "security", 8, symbol);
       const holdingAccountId = this.getOrCreateAccount(`${symbol} Holdings`, "asset");
@@ -2087,12 +2189,8 @@ export class Ledger {
         txId,
         txDate
       );
-      this.db.exec("COMMIT");
       return this.txWithEntries(txId);
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   backupNow(outputPath?: string | null) {
@@ -2741,8 +2839,7 @@ export class Ledger {
     }
     if (dryRun) return result;
 
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       for (const asset of assets) {
         if (!preserveIds && this.getAsset(assetMap.get(asset.id)!)) {
           result.skipped += 1;
@@ -2930,12 +3027,8 @@ export class Ledger {
         );
         result.inserted.scheduled_transactions += 1;
       }
-      this.db.exec("COMMIT");
       return { ...result, imported: true };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   exportTransactionsCsv(outputPath?: string | null, options: { accountId?: string | null; dateFrom?: string | null; dateTo?: string | null; status?: TxStatus | string | null } = {}) {

@@ -31,18 +31,18 @@ export const TOOL_NAMES = [
   "delete_budgets", "delete_goal", "delete_match_rule", "delete_match_rules", "delete_tag", "delete_tags",
   "delete_transaction", "detect_recurring", "discard_batch", "discard_branch", "export_ledger", "export_transactions", "file_access_status",
   "financial_overview", "financial_picture", "find_pending_duplicates", "find_realized_planned", "flip_entries", "forecast", "forecast_month_end",
-  "fx_transfer", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_price",
+  "fx_transfer", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_ledger_operation", "get_price",
   "get_transaction", "goal_progress", "holdings", "import_file", "import_ledger", "import_transactions",
   "income_statement", "init_defaults", "inspect_transaction", "integrity_check", "invert_import", "list_accounts",
   "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries", "list_entries_by_asset",
-  "list_goals", "list_import_batches", "list_match_rules", "list_prices", "list_scheduled", "list_tags",
+  "list_goals", "list_import_batches", "list_ledger_operations", "list_match_rules", "list_prices", "list_scheduled", "list_tags",
   "list_transactions", "list_uncategorized", "list_unmatched_transfers", "match_transfer_pairs", "match_transfers",
   "merge_accounts", "merge_branch", "migrate_asset_entries", "move_transactions", "net_worth", "operating_manual", "pending_summary",
   "plan_transaction", "post_journal_entry", "preview_commit", "preview_import", "process_scheduled", "process_statement",
-  "project_balances", "project_month_end", "recategorize_by_pattern", "recategorize_by_patterns", "recategorize_transaction",
+  "preview_mutation", "project_balances", "project_month_end", "recategorize_by_pattern", "recategorize_by_patterns", "recategorize_transaction",
   "recognize_gain_loss", "reconcile_diff", "reconcile_planned", "reconcile_statement", "reconcile_statement_plan", "reconcile_to_balance", "refresh_statement",
   "record_investment", "record_opening_balance", "record_opening_balances", "record_pending_expenses", "reopen_period",
-  "repair_integrity", "rollback_import", "rollback_recategorize", "search_transactions", "set_budget", "set_budgets",
+  "repair_integrity", "reverse_ledger_operation", "rollback_import", "rollback_recategorize", "search_transactions", "set_budget", "set_budgets",
   "set_goal", "spending", "spending_rate", "suggest_budgets", "top_descriptions", "tool_registry", "transfer", "trial_balance",
   "unbudgeted_spending", "update_account", "update_asset", "void_by_filter"
 ] as const;
@@ -323,6 +323,799 @@ function iterTransactions(ledger: Ledger, args: { status?: string | null; includ
 
 function amountForAccount(ledger: Ledger, txId: string, accountId: string, assetId?: string | null): bigint {
   return ledger.getEntries(txId).filter((entry) => entry.account_id === accountId && (!assetId || entry.asset_id === assetId)).reduce((sum, entry) => sum + entry.quantity, 0n);
+}
+
+function stableJson(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (typeof input === "bigint") return input.toString();
+    if (Array.isArray(input)) return input.map(normalize);
+    if (input && typeof input === "object") {
+      return Object.fromEntries(Object.entries(input as Row).sort(([left], [right]) => left.localeCompare(right)).map(([key, val]) => [key, normalize(val)]));
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function stableHash(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+const MUTATION_AUDIT_TABLES = [
+  "books", "assets", "accounts", "sources", "journals", "journal_lines", "prices",
+  "annotations", "rules", "targets", "recurrences", "period_closes", "lots",
+  "statement_plans", "statement_plan_rows"
+] as const;
+
+const GENERIC_PREVIEW_FILE_SIDE_EFFECT_TOOLS = new Set<string>(["backup_now"]);
+const GENERIC_REVERSIBLE_TABLES = new Set<string>(MUTATION_AUDIT_TABLES);
+const GENERIC_REVERSIBLE_ACTIONS = new Set<string>(["insert", "update", "delete"]);
+const STATEMENT_AUDIT_TABLES = new Set<string>(["statement_plans", "statement_plan_rows"]);
+const ACCOUNTING_ROW_TABLES = new Set<string>(["journals", "journal_lines"]);
+
+const REVERSE_ROW_ORDER = new Map<string, number>([
+  ["annotations", 10],
+  ["statement_plan_rows", 20],
+  ["lots", 30],
+  ["journal_lines", 40],
+  ["statement_plans", 50],
+  ["journals", 60],
+  ["targets", 70],
+  ["recurrences", 70],
+  ["prices", 70],
+  ["rules", 70],
+  ["sources", 80],
+  ["accounts", 90],
+  ["assets", 100],
+  ["books", 110]
+]);
+
+type LedgerSnapshot = Record<string, Row[]>;
+
+function hasNativeDryRun(name: string): boolean {
+  return Boolean(TOOL_DEFINITIONS[name as keyof typeof TOOL_DEFINITIONS]?.parameters.some((parameter) => parameter[0] === "dry_run"));
+}
+
+function ledgerSnapshot(ledger: Ledger): LedgerSnapshot {
+  return Object.fromEntries(MUTATION_AUDIT_TABLES.map((table) => [table, ledger.tableRows(table)]));
+}
+
+function rowIdentity(table: string, row: Row): string {
+  if (row.id != null) return String(row.id);
+  if (table === "meta") return String(row.key);
+  if (table === "migration_history") return String(row.version);
+  return stableHash(row);
+}
+
+function snapshotDiff(before: LedgerSnapshot, after: LedgerSnapshot): Row[] {
+  const diff: Row[] = [];
+  for (const table of MUTATION_AUDIT_TABLES) {
+    const beforeRows = new Map((before[table] ?? []).map((row) => [rowIdentity(table, row), row]));
+    const afterRows = new Map((after[table] ?? []).map((row) => [rowIdentity(table, row), row]));
+    const ids = [...new Set([...beforeRows.keys(), ...afterRows.keys()])].sort();
+    for (const idValue of ids) {
+      const beforeRow = beforeRows.get(idValue) ?? null;
+      const afterRow = afterRows.get(idValue) ?? null;
+      const beforeHash = beforeRow == null ? null : stableHash(beforeRow);
+      const afterHash = afterRow == null ? null : stableHash(afterRow);
+      if (beforeHash === afterHash) continue;
+      diff.push({
+        entity_type: table,
+        entity_id: idValue,
+        action: beforeRow == null ? "insert" : afterRow == null ? "delete" : "update",
+        before: beforeRow,
+        after: afterRow,
+        before_hash: beforeHash,
+        after_hash: afterHash
+      });
+    }
+  }
+  return diff;
+}
+
+function accountingBalances(snapshot: LedgerSnapshot, bookId: string): Map<string, Row> {
+  const journals = new Map((snapshot.journals ?? []).map((row) => [String(row.id), row]));
+  const balances = new Map<string, Row>();
+  for (const line of snapshot.journal_lines ?? []) {
+    const journal = journals.get(String(line.journal_id));
+    if (!journal || String(journal.book_id) !== bookId || String(line.book_id) !== bookId || journal.finalized_at == null || journal.status === "void") continue;
+    const key = [journal.book_id, journal.status, line.account_id, line.asset_id].map(String).join("|");
+    const current = balances.get(key) ?? {
+      book_id: String(journal.book_id),
+      status: String(journal.status),
+      account_id: String(line.account_id),
+      asset_id: String(line.asset_id),
+      quantity: 0n
+    };
+    current.quantity = BigInt(current.quantity) + BigInt(line.quantity as string | number | bigint | boolean);
+    balances.set(key, current);
+  }
+  return balances;
+}
+
+function accountingDelta(before: LedgerSnapshot, after: LedgerSnapshot, bookId: string): Row[] {
+  const beforeBalances = accountingBalances(before, bookId);
+  const afterBalances = accountingBalances(after, bookId);
+  const keys = [...new Set([...beforeBalances.keys(), ...afterBalances.keys()])].sort();
+  return keys.flatMap((key) => {
+    const beforeRow = beforeBalances.get(key);
+    const afterRow = afterBalances.get(key);
+    const quantity = BigInt(afterRow?.quantity ?? 0n) - BigInt(beforeRow?.quantity ?? 0n);
+    if (quantity === 0n) return [];
+    const row = afterRow ?? beforeRow!;
+    return [{ status: row.status, account_id: row.account_id, asset_id: row.asset_id, quantity }];
+  });
+}
+
+function affectedReportsFromDiff(diff: Row[], delta: Row[]): Row {
+  const accounts = new Set<string>();
+  for (const row of diff) {
+    for (const source of [row.before, row.after]) {
+      if (!source) continue;
+      for (const key of ["account_id", "from_account_id", "to_account_id", "counterpart_account_id"]) {
+        if ((source as Row)[key]) accounts.add(String((source as Row)[key]));
+      }
+    }
+  }
+  for (const row of delta) accounts.add(String(row.account_id));
+  return {
+    tables: [...new Set(diff.map((row) => row.entity_type))].sort(),
+    budgets: [...accounts].sort(),
+    balances: delta.length > 0,
+    income_statement: delta.length > 0,
+    cash_projection: delta.length > 0
+  };
+}
+
+function stripOperationStorage(row: Row): Row {
+  const { _rowid, input_json, preview_json, result_json, metadata_json, ...rest } = row;
+  return rest;
+}
+
+function safeJsonValue(value: unknown): Row | null {
+  if (value == null || value === "") return null;
+  return safeJson(value);
+}
+
+function operationRowPublic(row: Row): Row {
+  const { before_json, after_json, metadata_json, ...rest } = row;
+  return {
+    ...rest,
+    before: safeJsonValue(row.before_json),
+    after: safeJsonValue(row.after_json),
+    metadata: safeJson(row.metadata_json)
+  };
+}
+
+function operationPublic(ledger: Ledger, operation: Row): Row {
+  const rows = ledger.listLedgerOperationRows(String(operation.id)).map(operationRowPublic);
+  return {
+    ...stripOperationStorage(operation),
+    input: safeJson(operation.input_json),
+    preview: safeJson(operation.preview_json),
+    result: safeJson(operation.result_json),
+    metadata: safeJson(operation.metadata_json),
+    rows
+  };
+}
+
+function jsonMentionsAnyId(value: unknown, ids: Set<string>): boolean {
+  if (value == null) return false;
+  if (typeof value === "string") return ids.has(value);
+  if (typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => jsonMentionsAnyId(item, ids));
+  return Object.values(value as Row).some((item) => jsonMentionsAnyId(item, ids));
+}
+
+function operationTouchedJournalIds(rows: Row[]): Set<string> {
+  const ids = new Set<string>();
+  for (const row of rows.map(operationRowPublic)) {
+    if (["journals", "tx"].includes(String(row.entity_type))) ids.add(String(row.entity_id));
+    if (row.correction_journal_id) ids.add(String(row.correction_journal_id));
+    if (row.reverse_journal_id) ids.add(String(row.reverse_journal_id));
+  }
+  return ids;
+}
+
+function activeDependentOperations(ledger: Ledger, operation: Row, rows: Row[]): Row[] {
+  const touched = operationTouchedJournalIds(rows);
+  if (touched.size === 0) return [];
+  const candidates = ledger.listLedgerOperations(null).filter((candidate) => (
+    String(candidate.id) !== String(operation.id)
+    && String(candidate.status) === "applied"
+    && String(candidate.operation_type) !== "reverse_ledger_operation"
+    && Number(candidate._rowid ?? 0) > Number(operation._rowid ?? 0)
+  ));
+  return candidates.filter((candidate) => ledger.listLedgerOperationRows(String(candidate.id)).some((row) => {
+    const publicRow = operationRowPublic(row);
+    return touched.has(String(publicRow.entity_id))
+      || (publicRow.correction_journal_id && touched.has(String(publicRow.correction_journal_id)))
+      || (publicRow.reverse_journal_id && touched.has(String(publicRow.reverse_journal_id)))
+      || jsonMentionsAnyId(publicRow.before, touched)
+      || jsonMentionsAnyId(publicRow.after, touched);
+  })).map((candidate) => ({
+    id: String(candidate.id),
+    operation_type: String(candidate.operation_type),
+    tool_name: String(candidate.tool_name),
+    created_at: String(candidate.created_at)
+  }));
+}
+
+function stripPreviewOnlyOperationIds(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const { operation_id, mutation_id, ledger_operation, ...rest } = value as Row;
+  return rest;
+}
+
+function sortRowsForReverse(rows: Row[]): Row[] {
+  return [...rows].sort((left, right) => {
+    const leftRank = REVERSE_ROW_ORDER.get(String(left.entity_type)) ?? 100;
+    const rightRank = REVERSE_ROW_ORDER.get(String(right.entity_type)) ?? 100;
+    if (left.action === "delete" && right.action !== "delete") return 1;
+    if (left.action !== "delete" && right.action === "delete") return -1;
+    const direction = left.action === "delete" ? -1 : 1;
+    return direction * (leftRank - rightRank);
+  });
+}
+
+function createdScenarioBooks(rows: Row[]): Row[] {
+  return rows.map(operationRowPublic).filter((row) => (
+    row.entity_type === "books"
+    && row.action === "insert"
+    && String(row.after?.type ?? "") === "scenario"
+    && row.after?.closed_at == null
+  )).map((row) => row.after as Row);
+}
+
+function countByColumn(ledger: Ledger, table: string, column: string, value: unknown, bookId?: string | null, predicate?: (row: Row) => boolean): number {
+  return ledger.tableRows(table).filter((row) => (
+    String(row[column] ?? "") === String(value ?? "")
+    && (bookId == null || String(row.book_id ?? "") === String(bookId))
+    && (!predicate || predicate(row))
+  )).length;
+}
+
+type ReferenceSpec = readonly [table: string, column: string, predicate?: (row: Row) => boolean];
+const ACCOUNT_REFERENCES: ReferenceSpec[] = [
+  ["accounts", "parent_id"], ["journal_lines", "account_id"], ["rules", "account_id"],
+  ["targets", "account_id"], ["recurrences", "from_account_id"], ["recurrences", "to_account_id"],
+  ["lots", "account_id"], ["statement_plans", "account_id"], ["annotations", "entity_id", (row) => row.entity_type === "account"]
+];
+const ASSET_REFERENCES: ReferenceSpec[] = [
+  ["accounts", "default_asset_id"], ["journal_lines", "asset_id"], ["prices", "asset_id"], ["prices", "quote_asset_id"],
+  ["targets", "asset_id"], ["recurrences", "asset_id"], ["lots", "asset_id"], ["lots", "cost_asset_id"], ["statement_plans", "asset_id"]
+];
+const SOURCE_REFERENCES: ReferenceSpec[] = [
+  ["journals", "source_id"], ["statement_plans", "source_id"], ["annotations", "value", (row) => row.key === "import_batch"]
+];
+
+function countReferences(ledger: Ledger, specs: ReferenceSpec[], value: unknown, bookId?: string | null): number {
+  return specs.reduce((sum, [table, column, predicate]) => sum + countByColumn(ledger, table, column, value, bookId, predicate), 0);
+}
+
+function currentAuditRow(ledger: Ledger, row: Row): Row | null {
+  const table = String(row.entity_type);
+  const idValue = String(row.entity_id);
+  return ledger.tableRows(table).find((candidate) => rowIdentity(table, candidate) === idValue) ?? null;
+}
+
+function insertedAccountFallback(ledger: Ledger, row: Row, reason: string, force = false): Row | null {
+  if (row.entity_type !== "accounts" || row.action !== "insert" || !row.after) return null;
+  const accountRow = currentAuditRow(ledger, row) ?? row.after as Row;
+  if (!force && countReferences(ledger, ACCOUNT_REFERENCES, accountRow.id, String(accountRow.book_id)) === 0) return null;
+  return {
+    ...row,
+    action: "update",
+    before: { ...accountRow, status: "inactive" },
+    after: accountRow,
+    after_hash: stableHash(accountRow),
+    reason
+  };
+}
+
+function insertedAssetHasReferences(ledger: Ledger, row: Row): boolean {
+  if (row.entity_type !== "assets" || row.action !== "insert" || !row.after) return false;
+  return countReferences(ledger, ASSET_REFERENCES, row.after.id) > 0;
+}
+
+function insertedSourceHasReferences(ledger: Ledger, row: Row): boolean {
+  if (row.entity_type !== "sources" || row.action !== "insert" || !row.after) return false;
+  return countReferences(ledger, SOURCE_REFERENCES, row.after.id, String(row.after.book_id)) > 0;
+}
+
+function skipReversal(skipped: Row[], row: Row, reason: string): void {
+  skipped.push({ ...row, reason });
+}
+
+function reversalSummary(row: Row): Row {
+  return { table: row.entity_type, action: row.action, entity_id: row.entity_id, reason: row.reason };
+}
+
+function reverseAuditRows(rows: Row[], reverseIds: string[], afterFor: (row: Row, index: number) => Row, hashFor: (row: Row, index: number, after: Row) => string = (_row, _index, after) => stableHash(after)): Row[] {
+  return rows.map((row, index) => {
+    const after = afterFor(row, index);
+    return {
+      entity_type: String(row.entity_type),
+      entity_id: String(row.entity_id),
+      action: "reverse",
+      before: operationRowPublic(row),
+      after,
+      before_hash: row.after_hash,
+      after_hash: hashFor(row, index, after),
+      correction_journal_id: row.correction_journal_id,
+      reverse_journal_id: reverseIds[index] ?? null
+    };
+  });
+}
+
+function genericReversalRows(ledger: Ledger, rows: Row[], hasAccountingDelta: boolean, scenarioBookIdsToClose = new Set<string>()): { reversible: Row[]; skipped: Row[] } {
+  const reversible: Row[] = [];
+  const skipped: Row[] = [];
+  const publicRows = rows.map(operationRowPublic);
+  const skippedAccountingJournalIds = new Set(publicRows
+    .filter((row) => hasAccountingDelta && row.entity_type === "journals")
+    .map((row) => String(row.entity_id)));
+  for (const row of publicRows) {
+    const table = String(row.entity_type);
+    const skip = (reason: string): void => skipReversal(skipped, row, reason);
+    if (!GENERIC_REVERSIBLE_ACTIONS.has(String(row.action)) || !GENERIC_REVERSIBLE_TABLES.has(table)) {
+      skip("no generic row reverser");
+      continue;
+    }
+    const rowBookId = String(row.after?.book_id ?? row.before?.book_id ?? "");
+    if ((table === "books" && scenarioBookIdsToClose.has(String(row.entity_id))) || scenarioBookIdsToClose.has(rowBookId)) {
+      skip("scenario book is closed by reversal instead of deleting cloned audit rows");
+      continue;
+    }
+    if (STATEMENT_AUDIT_TABLES.has(table)) {
+      skip("statement plans are immutable audit records");
+      continue;
+    }
+    const current = currentAuditRow(ledger, row);
+    if (row.action === "insert") {
+      if (!current) { skip("inserted row is already absent"); continue; }
+      if (row.after_hash && stableHash(current) !== row.after_hash) {
+        if (table === "accounts") {
+          const fallback = insertedAccountFallback(ledger, row, "inserted account changed after operation; reversal deactivates current account instead of deleting", true);
+          if (fallback) {
+            reversible.push(fallback);
+            continue;
+          }
+        }
+        skip("current row changed after operation; stale reversal skipped");
+        continue;
+      }
+    }
+    if (row.action === "update") {
+      if (!current) { skip("updated row is already absent"); continue; }
+      if (row.after_hash && stableHash(current) !== row.after_hash) {
+        skip("current row changed after operation; stale reversal skipped");
+        continue;
+      }
+    }
+    if (row.action === "delete" && current) {
+      skip("deleted row has been recreated; stale reversal skipped");
+      continue;
+    }
+    if (hasAccountingDelta && ACCOUNTING_ROW_TABLES.has(table)) {
+      skip("accounting reversal journal keeps original accounting rows referenced");
+      continue;
+    }
+    if (hasAccountingDelta && table === "sources" && row.action === "insert") {
+      skip("accounting reversal journal keeps imported source metadata referenced");
+      continue;
+    }
+    if (!hasAccountingDelta && table === "accounts" && row.action === "insert") {
+      const fallback = insertedAccountFallback(ledger, row, "inserted account is now referenced; reversal deactivates instead of deleting");
+      if (fallback) {
+        reversible.push(fallback);
+        continue;
+      }
+    }
+    if (!hasAccountingDelta && table === "assets" && insertedAssetHasReferences(ledger, row)) {
+      skip("inserted asset is now referenced and cannot be deleted generically");
+      continue;
+    }
+    if (!hasAccountingDelta && table === "sources" && insertedSourceHasReferences(ledger, row)) {
+      skip("inserted source is now referenced and cannot be deleted generically");
+      continue;
+    }
+    if (hasAccountingDelta && ["accounts", "assets"].includes(table)) {
+      skip("accounting reversal journal keeps created accounts/assets referenced");
+      continue;
+    }
+    if (
+      hasAccountingDelta
+      && table === "annotations"
+      && row.action === "delete"
+      && String(row.before?.entity_type ?? "") === "tx"
+      && skippedAccountingJournalIds.has(String(row.before?.entity_id ?? ""))
+    ) {
+      skip("annotation target transaction remains deleted after accounting correction");
+      continue;
+    }
+    reversible.push(row);
+  }
+  return { reversible: sortRowsForReverse(reversible), skipped };
+}
+
+function postAccountingDeltaReversal(ledger: Ledger, operationId: string, delta: Row[], date: string): string[] {
+  const byStatus = new Map<string, Array<[string, string, bigint]>>();
+  for (const row of delta) {
+    const quantity = -BigInt(row.quantity as string | number | bigint | boolean);
+    if (quantity === 0n) continue;
+    const status = String(row.status);
+    byStatus.set(status, [...(byStatus.get(status) ?? []), [String(row.account_id), String(row.asset_id), quantity]]);
+  }
+  const reverseIds: string[] = [];
+  for (const [status, lines] of [...byStatus.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    if (lines.length === 0) continue;
+    const reverseId = ledger.postTx(date, status, `Reverse ledger operation ${operationId}`, lines);
+    tagTx(ledger, reverseId, "ledger_operation_kind", "reverse");
+    reverseIds.push(reverseId);
+  }
+  return reverseIds;
+}
+
+function mutationPreview(ledger: Ledger, name: ToolName, args: Args): Row {
+  if (toolSafety(name).readOnlyHint) throw new Error(`Tool '${name}' is read-only`);
+  if (GENERIC_PREVIEW_FILE_SIDE_EFFECT_TOOLS.has(name)) {
+    if (!hasNativeDryRun(name)) throw new Error(`Tool '${name}' has filesystem side effects and cannot be generically previewed`);
+    const result = handlers[name](ledger, { ...args, dry_run: true });
+    return {
+      dry_run: true,
+      tool_name: name,
+      apply_args: { ...args, dry_run: false },
+      would_result: stripPreviewOnlyOperationIds(result),
+      diff: [],
+      accounting_delta: [],
+      affected_reports: { budgets: [], balance_sheet: false, income_statement: false, cash_projection: false },
+      ids_are_preview_only: false
+    };
+  }
+  const applyArgs = { ...args };
+  if (hasNativeDryRun(name)) applyArgs.dry_run = false;
+  if (name === "repair_integrity") applyArgs.backup = false;
+  const before = ledgerSnapshot(ledger);
+  let result: unknown;
+  let after: LedgerSnapshot = before;
+  const rollback = { rollback: "clovis_mutation_preview" };
+  try {
+    ledger.runInTransaction(() => {
+      result = handlers[name](ledger, applyArgs);
+      after = ledgerSnapshot(ledger);
+      throw rollback;
+    });
+  } catch (error) {
+    if (error !== rollback) throw error;
+  }
+  const diff = snapshotDiff(before, after);
+  const delta = accountingDelta(before, after, ledger.bookId);
+  return {
+    dry_run: true,
+    tool_name: name,
+    apply_args: applyArgs,
+    would_result: stripPreviewOnlyOperationIds(result),
+    diff,
+    accounting_delta: delta,
+    affected_reports: affectedReportsFromDiff(diff, delta),
+    ids_are_preview_only: true
+  };
+}
+
+function attachOperationResult(result: unknown, operation: Row): Row {
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    const row = result as Row;
+    return {
+      ...row,
+      mutation_id: row.mutation_id ?? operation.id,
+      operation_id: row.operation_id ?? operation.id,
+      ledger_operation: row.ledger_operation ?? operation
+    };
+  }
+  return { result, mutation_id: operation.id, operation_id: operation.id, ledger_operation: operation };
+}
+
+function withMutationOverseer(ledger: Ledger, name: ToolName, args: Args): unknown {
+  const safety = toolSafety(name);
+  if (safety.readOnlyHint) return handlers[name](ledger, args);
+  if (name === "backup_now") return handlers[name](ledger, args);
+  if (args.dry_run === true && !hasNativeDryRun(name)) return mutationPreview(ledger, name, args);
+
+  const external: Row = {};
+  let handlerArgs = args;
+  if (name === "repair_integrity" && args.dry_run === false && args.backup !== false) {
+    external.backup = redactToolPath(ledger.path, ledger.backupNow().path);
+    handlerArgs = { ...args, backup: false };
+  }
+
+  return ledger.runInTransaction(() => {
+    const before = ledgerSnapshot(ledger);
+    const result = handlers[name](ledger, handlerArgs);
+    const resultRow = result && typeof result === "object" && !Array.isArray(result) ? { ...(result as Row), ...external } : result;
+    const after = ledgerSnapshot(ledger);
+    const diff = snapshotDiff(before, after);
+    if (diff.length === 0 || (resultRow && typeof resultRow === "object" && !Array.isArray(resultRow) && ((resultRow as Row).operation_id || (resultRow as Row).mutation_id))) {
+      return resultRow;
+    }
+    const delta = accountingDelta(before, after, ledger.bookId);
+    const affected = affectedReportsFromDiff(diff, delta);
+    const operation = createOperation(ledger, {
+      tool_name: name,
+      operation_type: name,
+      input: handlerArgs,
+      preview: {
+        diff,
+        accounting_delta: delta,
+        affected_reports: affected
+      },
+      result: resultRow,
+      metadata: {
+        overseer: "mutation",
+        reversible: true,
+        generic_reversal: true,
+        accounting_delta: delta,
+        affected_reports: affected
+      }
+    }, diff);
+    return attachOperationResult(resultRow, operation);
+  });
+}
+
+function recategorizePreview(ledger: Ledger, args: Args): Row {
+  const tx = ledger.getTx(String(args.tx_id));
+  if (!tx) throw new Error(`Transaction '${String(args.tx_id)}' not found`);
+  if (tx.status === "void") throw new Error("Cannot recategorize a void transaction");
+  if (ledger.listLots().some((lot) => lot.opened_journal_id === tx.id || lot.closed_journal_id === tx.id)) {
+    throw new Error("Transaction has linked investment lots; use an investment reversal workflow");
+  }
+  const entries = ledger.getEntries(tx.id);
+  const oldAccount = args.old_account_id
+    ? account(ledger, args.old_account_id)
+    : entries.find((entry) => ledger.getAccount(entry.account_id)?.account_type === "expense")?.account_id
+      ?? entries.toSorted((a, b) => Number((b.quantity < 0n ? -b.quantity : b.quantity) - (a.quantity < 0n ? -a.quantity : a.quantity)))[0]?.account_id;
+  if (!oldAccount) throw new Error("Transaction has no entries");
+  const newAccount = account(ledger, args.new_account_id);
+  const changedEntries = entries.filter((entry) => entry.account_id === oldAccount);
+  if (changedEntries.length === 0) throw new Error(`Account ${oldAccount} is not on transaction ${tx.id}`);
+  const oldRow = ledger.getAccount(oldAccount);
+  const newRow = ledger.getAccount(newAccount);
+  if (!newRow) throw new Error(`Account ${newAccount} not found`);
+  const correctionDate = validateDate(String(args.correction_date ?? args.date ?? tx.date));
+  const correctionLines = changedEntries.flatMap((entry) => [
+    { account_id: oldAccount, asset_id: entry.asset_id, quantity: -entry.quantity },
+    { account_id: newAccount, asset_id: entry.asset_id, quantity: entry.quantity }
+  ]);
+  const before = txWithEntries(ledger, tx.id);
+  const after = {
+    transaction_id: tx.id,
+    original_transaction_status: tx.status,
+    correction_date: correctionDate,
+    correction_lines: correctionLines,
+    old_account_id: oldAccount,
+    old_account_name: oldRow?.name ?? "",
+    new_account_id: newAccount,
+    new_account_name: newRow.name
+  };
+  return {
+    dry_run: true,
+    tool: "recategorize_transaction",
+    reversible: true,
+    tx_id: tx.id,
+    before_category: { account_id: oldAccount, account_name: oldRow?.name ?? "" },
+    after_category: { account_id: newAccount, account_name: newRow.name },
+    diff: [{
+      entity_type: "tx",
+      entity_id: tx.id,
+      action: tx.status === "posted" ? "correction" : "update",
+      before,
+      after,
+      before_hash: stableHash(before),
+      after_hash: stableHash(after)
+    }],
+    affected_reports: {
+      budgets: [...new Set([oldAccount, newAccount])],
+      income_statement: true,
+      cash_projection: false
+    }
+  };
+}
+
+function createOperation(ledger: Ledger, input: Row, rows: Row[]): Row {
+  const operation = ledger.createLedgerOperation({
+    ...input,
+    input_json: stableJson(input.input ?? {}),
+    preview_json: stableJson(input.preview ?? {}),
+    result_json: stableJson(input.result ?? {}),
+    metadata_json: stableJson(input.metadata ?? {})
+  }, rows.map((row, index) => ({
+    ...row,
+    row_index: row.row_index ?? index,
+    before_json: row.before_json ?? (row.before == null ? null : stableJson(row.before)),
+    after_json: row.after_json ?? (row.after == null ? null : stableJson(row.after)),
+    metadata_json: row.metadata_json ?? stableJson(row.metadata ?? {})
+  })));
+  return operationPublic(ledger, operation);
+}
+
+function applyRecategorizeTransaction(ledger: Ledger, args: Args): Row {
+  const preview = recategorizePreview(ledger, args);
+  const tx = ledger.getTx(String(preview.tx_id))!;
+  if (tx.status !== "posted") {
+    const diff = preview.diff[0] as Row;
+    const result = ledger.recategorizeTransaction(tx.id, String(preview.before_category.account_id), String(preview.after_category.account_id));
+    const operation = createOperation(ledger, {
+      tool_name: "recategorize_transaction",
+      operation_type: "recategorize_transaction",
+      input: { ...args, dry_run: false },
+      preview,
+      result,
+      metadata: { reversible: true, mode: "in_place_non_posted" }
+    }, [{
+      entity_type: "tx",
+      entity_id: tx.id,
+      action: "update",
+      before: diff.before,
+      after: txWithEntries(ledger, tx.id),
+      before_hash: diff.before_hash,
+      after_hash: stableHash(txWithEntries(ledger, tx.id))
+    }]);
+    return { ...result, operation_id: operation.id, ledger_operation: operation, dry_run: false };
+  }
+
+  const correctionLines = (preview.diff[0] as Row).after.correction_lines as Row[];
+  const correctionId = ledger.postTx(String((preview.diff[0] as Row).after.correction_date), "posted", `Correction: recategorize ${tx.description}`, correctionLines.map((line) => [
+    String(line.account_id),
+    String(line.asset_id),
+    BigInt(line.quantity as string | number | bigint | boolean)
+  ]));
+  tagTx(ledger, correctionId, "ledger_operation_kind", "recategorize_transaction");
+  const correction = txWithEntries(ledger, correctionId);
+  const operation = createOperation(ledger, {
+    tool_name: "recategorize_transaction",
+    operation_type: "recategorize_transaction",
+    input: { ...args, dry_run: false },
+    preview,
+    result: { correction_journal_id: correctionId },
+    metadata: { reversible: true, mode: "append_only_correction" }
+  }, [{
+    entity_type: "tx",
+    entity_id: tx.id,
+    action: "correction",
+    before: (preview.diff[0] as Row).before,
+    after: { ...(preview.diff[0] as Row).after, correction },
+    before_hash: (preview.diff[0] as Row).before_hash,
+    after_hash: stableHash({ ...(preview.diff[0] as Row).after, correction }),
+    correction_journal_id: correctionId
+  }]);
+  tagTx(ledger, correctionId, "ledger_operation", String(operation.id));
+  return {
+    tx_id: tx.id,
+    from_account_id: preview.before_category.account_id,
+    to_account_id: preview.after_category.account_id,
+    correction_journal_id: correctionId,
+    operation_id: operation.id,
+    ledger_operation: operation,
+    dry_run: false
+  };
+}
+
+function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
+  const operation = ledger.getLedgerOperation(String(args.operation_id));
+  if (!operation) throw new Error(`Ledger operation '${String(args.operation_id)}' not found`);
+  if (String(operation.status) === "reversed") throw new Error(`Ledger operation '${String(args.operation_id)}' is already reversed`);
+  const rows = ledger.listLedgerOperationRows(String(operation.id));
+  const metadata = safeJson(operation.metadata_json);
+  const genericDelta = (metadata.accounting_delta ?? []) as Row[];
+  const dependents = activeDependentOperations(ledger, operation, rows);
+  if (dependents.length > 0) {
+    const ids = dependents.map((row) => `${row.operation_type}:${row.id}`).join(", ");
+    throw new Error(`Ledger operation has active dependent operations; reverse them first: ${ids}`);
+  }
+
+  if (String(operation.operation_type) !== "recategorize_transaction") {
+    const date = args.date ? validateDate(String(args.date)) : today();
+    const scenarioBooks = createdScenarioBooks(rows);
+    const scenarioBookIds = new Set(scenarioBooks.map((row) => String(row.id)));
+    const { reversible, skipped } = genericReversalRows(ledger, rows, genericDelta.length > 0, scenarioBookIds);
+    if (args.dry_run !== false) {
+      return {
+        dry_run: true,
+        operation_id: operation.id,
+        reverses_operation_id: operation.id,
+        reversible: true,
+        reversal_strategy: "generic_ledger_operation",
+        accounting_delta: genericDelta,
+        reverse_date: date,
+        scenario_reversals: scenarioBooks.map((row) => ({ book_id: row.id, name: row.name, action: "close" })),
+        row_reversals: reversible.map(reversalSummary),
+        skipped_rows: skipped.map(reversalSummary)
+      };
+    }
+    const reverseIds: string[] = [];
+    const reversedRows: Row[] = [];
+    const closedScenarioBooks: Row[] = [];
+    const reverseOperation = ledger.runInTransaction(() => {
+      reverseIds.push(...postAccountingDeltaReversal(ledger, String(operation.id), genericDelta, date));
+      for (const row of scenarioBooks) {
+        ledger.discardScenarioBook(String(row.id ?? row.name));
+        closedScenarioBooks.push({ book_id: row.id, name: row.name, action: "closed" });
+      }
+      reversedRows.push(...ledger.reverseRows(reversible.map((row) => ({
+        table: String(row.entity_type),
+        action: String(row.action),
+        before: row.before,
+        after: row.after
+      }))));
+      const reverseOp = createOperation(ledger, {
+        tool_name: "reverse_ledger_operation",
+        operation_type: "reverse_ledger_operation",
+        reverses_operation_id: operation.id,
+        input: { ...args, dry_run: false },
+        preview: {
+          reversal_strategy: "generic_ledger_operation",
+          accounting_delta: genericDelta,
+          scenario_reversals: scenarioBooks.map((row) => ({ book_id: row.id, name: row.name, action: "close" })),
+          row_reversals: reversible,
+          skipped_rows: skipped
+        },
+        result: { reverse_journal_ids: reverseIds, closed_scenario_books: closedScenarioBooks, reversed_rows: reversedRows, skipped_rows: skipped },
+        metadata: { reversible: false, generic_reversal: true }
+      }, reverseAuditRows(
+        rows,
+        reverseIds,
+        (row) => ({ reversed: reversible.some((candidate) => candidate.id === row.id), skipped: skipped.some((candidate) => candidate.id === row.id) }),
+        (row) => stableHash({ reverse_operation: true, operation_id: operation.id, row_id: row.id })
+      ));
+      ledger.markLedgerOperationReversed(String(operation.id), String(reverseOp.id));
+      for (const reverseId of reverseIds) tagTx(ledger, reverseId, "ledger_operation", String(reverseOp.id));
+      return reverseOp;
+    });
+    return {
+      dry_run: false,
+      operation_id: reverseOperation.id,
+      reversed_operation_id: operation.id,
+      reverse_journal_ids: reverseIds,
+      closed_scenario_books: closedScenarioBooks,
+      reversed_rows: reversedRows,
+      skipped_rows: skipped.map(reversalSummary),
+      ledger_operation: reverseOperation
+    };
+  }
+
+  const correctionIds = rows.map((row) => row.correction_journal_id).filter(Boolean).map(String);
+  if (correctionIds.length === 0) throw new Error("Ledger operation has no correction journal to reverse");
+  const reverseDate = args.date ? validateDate(String(args.date)) : null;
+  const previewRows = correctionIds.map((correctionId) => {
+    const correction = ledger.getTx(correctionId);
+    if (!correction) throw new Error(`Correction journal '${correctionId}' not found`);
+    const lines = ledger.getEntries(correctionId).map((entry) => [entry.account_id, entry.asset_id, -entry.quantity] as [string, string, bigint]);
+    return { correction_id: correctionId, reverse_date: reverseDate ?? correction.date, reverse_lines: lines };
+  });
+  if (args.dry_run !== false) {
+    return { dry_run: true, operation_id: operation.id, reverses_operation_id: operation.id, diff: previewRows, reversible: true };
+  }
+  const reverseIds: string[] = [];
+  const reverseOperation = ledger.runInTransaction(() => {
+    for (const row of previewRows) {
+      const reverseId = ledger.postTx(String(row.reverse_date), "posted", `Reverse ledger operation ${String(operation.id)}`, row.reverse_lines);
+      tagTx(ledger, reverseId, "ledger_operation_kind", "reverse");
+      reverseIds.push(reverseId);
+    }
+    const reverseOp = createOperation(ledger, {
+      tool_name: "reverse_ledger_operation",
+      operation_type: "reverse_ledger_operation",
+      reverses_operation_id: operation.id,
+      input: { ...args, dry_run: false },
+      preview: { rows: previewRows },
+      result: { reverse_journal_ids: reverseIds },
+      metadata: { reversible: false }
+    }, reverseAuditRows(rows, reverseIds, (_row, index) => ({ reverse_journal_id: reverseIds[index] ?? null })));
+    ledger.markLedgerOperationReversed(String(operation.id), String(reverseOp.id));
+    for (const reverseId of reverseIds) tagTx(ledger, reverseId, "ledger_operation", String(reverseOp.id));
+    return reverseOp;
+  });
+  return { dry_run: false, operation_id: reverseOperation.id, reversed_operation_id: operation.id, reverse_journal_ids: reverseIds, ledger_operation: reverseOperation };
 }
 
 function budgetRows(ledger: Ledger, accountId?: string | null, year?: number | null, month?: number | null): Row[] {
@@ -1890,6 +2683,12 @@ const handlers: Record<ToolName, Handler> = {
     return { transactions: rows, items: rows, total, limit: args.limit ?? 50, offset: args.offset ?? 0 };
   },
   get_transaction: (ledger, args) => txWithEntries(ledger, args.id),
+  list_ledger_operations: (ledger, args) => ledger.listLedgerOperations(args.limit ?? 50).map((row) => operationPublic(ledger, row)),
+  get_ledger_operation: (ledger, args) => {
+    const operation = ledger.getLedgerOperation(String(args.operation_id));
+    if (!operation) throw new Error(`Ledger operation '${String(args.operation_id)}' not found`);
+    return operationPublic(ledger, operation);
+  },
   delete_transaction: (ledger, args) => {
     if (args.hard_delete) ledger.deleteTx(args.id);
     else ledger.voidTx(args.id);
@@ -1936,13 +2735,8 @@ const handlers: Record<ToolName, Handler> = {
     hideZero: args.hide_zero !== false
   }),
   recategorize_transaction: (ledger, args) => {
-    const entries = ledger.getEntries(args.tx_id);
-    const oldAccount = args.old_account_id
-      ? account(ledger, args.old_account_id)
-      : entries.find((entry) => ledger.getAccount(entry.account_id)?.account_type === "expense")?.account_id
-        ?? entries.toSorted((a, b) => Number((b.quantity < 0n ? -b.quantity : b.quantity) - (a.quantity < 0n ? -a.quantity : a.quantity)))[0]?.account_id;
-    if (!oldAccount) throw new Error("Transaction has no entries");
-    return ledger.recategorizeTransaction(args.tx_id, oldAccount, account(ledger, args.new_account_id));
+    const preview = recategorizePreview(ledger, args);
+    return args.dry_run === false ? applyRecategorizeTransaction(ledger, args) : preview;
   },
   flip_entries: (ledger, args) => {
     if (!args.tx_ids?.length) throw new Error("tx_ids is required");
@@ -2515,6 +3309,13 @@ const handlers: Record<ToolName, Handler> = {
     const rows = parseStatementRows(_ledger, args.file_path, args);
     return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true };
   },
+  preview_mutation: (ledger, args) => {
+    const target = String(args.tool_name);
+    if (!TOOL_NAMES.includes(target as ToolName)) throw new Error(`Tool '${target}' is not implemented`);
+    if (target === "preview_mutation") throw new Error("preview_mutation cannot preview itself");
+    const targetArgs = normalizeToolInput(target, safeJson(args.arguments ?? {}));
+    return mutationPreview(ledger, target as ToolName, targetArgs);
+  },
   process_statement: (ledger, args) => {
     unsupportedArguments({ transfer_account_id: args.transfer_account_id });
     const plan = buildStatementPlan(ledger, { ...args, status: "posted" }, { persist: Boolean(args.commit), targetStatus: "posted" });
@@ -2567,6 +3368,7 @@ const handlers: Record<ToolName, Handler> = {
     ledger.updateSourceStatus(args.batch_id, "rolled_back");
     return { batch_id: args.batch_id, rolled_back: txIds.length, tx_ids: txIds };
   },
+  reverse_ledger_operation: (ledger, args) => reverseLedgerOperation(ledger, args),
   commit_batch: (ledger, args) => {
     const selected = selectBatchTransactions(ledger, args);
     if (!args.dry_run) {
@@ -3095,6 +3897,15 @@ const handlers: Record<ToolName, Handler> = {
 
   backup_now: (ledger, args) => {
     const target = args.output_path ? resolveToolWritePath(ledger.path, args.output_path, new Set([".db", ".sqlite", ".sqlite3"])) : null;
+    if (args.dry_run === true) {
+      const previewTarget = target ?? join(dirname(ledger.path), "backups", `${now().replaceAll(":", "-")}.db`);
+      return {
+        dry_run: true,
+        would_backup: true,
+        path: target ? previewTarget : redactToolPath(ledger.path, previewTarget),
+        compact: args.compact !== false
+      };
+    }
     const result = ledger.backupNow(target);
     return { ...result, path: target ? result.path : redactToolPath(ledger.path, result.path), compact: args.compact !== false };
   },
@@ -3213,11 +4024,11 @@ export function callTool(name: string, args: Args = {}, providedLedger?: Ledger)
   if (!TOOL_NAMES.includes(name as ToolName)) throw new Error(`Tool '${name}' is not implemented`);
   const handler = handlers[name as ToolName];
   const normalizedArgs = normalizeToolInput(name, args);
-  if (providedLedger) return publicize(handler(providedLedger, normalizedArgs));
+  if (providedLedger) return publicize(withMutationOverseer(providedLedger, name as ToolName, normalizedArgs));
   assertMcpCapability(name, normalizedArgs);
   const ledger = openMcpLedger();
   try {
-    return publicize(handler(ledger, normalizedArgs));
+    return publicize(withMutationOverseer(ledger, name as ToolName, normalizedArgs));
   } finally {
     ledger.close();
   }

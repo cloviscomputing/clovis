@@ -20,6 +20,8 @@ This guide is operational guidance, not financial, tax, or legal advice.
   rows so landed income or bills are not counted twice.
 - Transfers move balances. Expenses consume money. Do not mix them.
 - Read-only and dry-run tools should come before mutation.
+- Applied mutations should leave an audit event and a ledger-level reversal
+  path.
 
 ## Statement Import
 
@@ -294,6 +296,13 @@ and `idempotentHint` are machine-readable safety labels.
 Use dry-run-capable tools in preview mode before applying changes. The preview
 is the change request.
 
+For tools without native dry-run output, use `preview_mutation` to run the
+change inside a rolled-back ledger transaction and inspect the structured diff.
+
+Applied ledger mutations return a `mutation_id`/`operation_id`. Inspect it with
+`get_ledger_operation` or `list_ledger_operations`, and reverse supported
+operations with `reverse_ledger_operation` rather than editing history by hand.
+
 Back up before destructive or broad edits. Backups are cheap compared with
 manual reconstruction.
 
@@ -311,12 +320,17 @@ Recommended tools:
 - `backup_now`
 - `integrity_check`
 - `preview_commit`
+- `preview_mutation`
+- `list_ledger_operations`
+- `get_ledger_operation`
+- `reverse_ledger_operation`
 
 Watch outs:
 
 - Destructive tools should not be called speculatively.
 - A dry-run result is not a committed result. The caller must pass the explicit
   commit or `dry_run:false` argument to apply supported mutations.
+- Reversals are corrections, not deletion. Posted facts stay inspectable.
 - Clovis can organize bookkeeping facts, but it is not a bank, tax advisor,
   custody system, or substitute for professional review.
 
