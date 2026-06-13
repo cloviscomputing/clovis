@@ -410,6 +410,10 @@ const CASES = {
     expect(result.count).toBe(TOOL_NAMES.length);
     expect(result.tools.find((tool: any) => tool.name === "list_accounts").safety.readOnlyHint).toBe(true);
     expect(result.tools.find((tool: any) => tool.name === "delete_transaction").safety.destructiveHint).toBe(true);
+    const createAccount = result.tools.find((tool: any) => tool.name === "create_account");
+    expect(createAccount.safety.supportsDryRun).toBe(true);
+    expect(createAccount.signature).toContain("dry_run?: boolean");
+    expect(createAccount.definition.parameters.map((parameter: any) => parameter[0])).toContain("dry_run");
     expect(result.file_access.mode).toBe("unrestricted");
   } },
   transfer: { mutation: "write", args: (ctx) => ({ from_account_id: ctx.accounts.Checking, to_account_id: ctx.accounts.Savings, amount: 25, date: "2026-06-16", description: "Move cash" }), assert: expectObject },

@@ -1542,6 +1542,15 @@ export function toolSafety(name: string): ToolSafetyAnnotations & { supportsDryR
   };
 }
 
+const SYNTHETIC_DRY_RUN_PARAMETER = ["dry_run", "boolean", { optional: true, defaultValue: false }] as const satisfies ToolParameterDefinition;
+
+export function effectiveToolDefinition(name: string): ToolDefinition {
+  const definition = TOOL_DEFINITIONS[name as ToolSignatureName];
+  if (!definition) throw new Error(`Unknown tool: ${name}`);
+  if (toolAnnotations(name).readOnlyHint || definition.parameters.some((parameter) => parameter[0] === "dry_run")) return definition;
+  return { ...definition, parameters: [...definition.parameters, SYNTHETIC_DRY_RUN_PARAMETER] };
+}
+
 export function parameterAliasesForTool(name: string): Record<string, string> {
   const definition = TOOL_DEFINITIONS[name as ToolSignatureName];
   if (!definition) return {};
@@ -1594,7 +1603,7 @@ function parameterType(parameter: ToolParameterDefinition): ToolTypeDefinition {
   return { type: parameter[1], nullable: parameter[2]?.nullable };
 }
 
-function renderSignature(definition: ToolDefinition): string {
+export function renderSignature(definition: ToolDefinition): string {
   const params = definition.parameters
     .map((parameter) => `${parameter[0]}${parameter[2]?.optional ? "?" : ""}: ${typeDisplay(parameterType(parameter))}`)
     .join(", ");
@@ -1602,5 +1611,5 @@ function renderSignature(definition: ToolDefinition): string {
 }
 
 export const TOOL_SIGNATURES = Object.fromEntries(
-  Object.entries(TOOL_DEFINITIONS).map(([name, definition]) => [name, renderSignature(definition)])
+  Object.keys(TOOL_DEFINITIONS).map((name) => [name, renderSignature(effectiveToolDefinition(name))])
 ) as { [Name in ToolSignatureName]: string };

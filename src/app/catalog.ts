@@ -9,7 +9,7 @@ import { openMcpLedger } from "./context.js";
 import { publicize, stringifyPublic } from "./json.js";
 import { assertToolDataSize, fileAccessStatus, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
 import { operatingManual } from "./operating-manual.js";
-import { normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety } from "./signatures.js";
+import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety } from "./signatures.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 // Shared command catalog for CLI and MCP. This layer translates user/tool
@@ -2359,11 +2359,12 @@ function registrySafetyMatches(name: ToolName, args: Args): boolean {
 
 function registryEntry(name: ToolName, summary: boolean): Row {
   const safety = toolSafety(name);
+  const definition = effectiveToolDefinition(name);
   if (summary) {
     return {
       name,
       signature: TOOL_SIGNATURES[name],
-      parameters: TOOL_DEFINITIONS[name].parameters.map((parameter) => parameter[0]),
+      parameters: definition.parameters.map((parameter) => parameter[0]),
       aliases: parameterAliasesForTool(name),
       safety
     };
@@ -2371,7 +2372,7 @@ function registryEntry(name: ToolName, summary: boolean): Row {
   return {
     name,
     signature: TOOL_SIGNATURES[name],
-    definition: TOOL_DEFINITIONS[name],
+    definition,
     aliases: parameterAliasesForTool(name),
     safety
   };

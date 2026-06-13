@@ -554,7 +554,7 @@ describe("ledger core", () => {
 describe("app and package surface", () => {
   it("keeps every MCP tool name wired to a signature and handler", () => {
     expect(Object.keys(TOOL_SIGNATURES).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(TOOL_SIGNATURES.create_transaction).toBe("(date: string, amount: number, from_account_id: string, to_account_id: string, description: string, status?: string, asset_id?: string | null, branch?: string | null) => Record<string, unknown>");
+    expect(TOOL_SIGNATURES.create_transaction).toBe("(date: string, amount: number, from_account_id: string, to_account_id: string, description: string, status?: string, asset_id?: string | null, branch?: string | null, dry_run?: boolean) => Record<string, unknown>");
     for (const name of TOOL_NAMES) expect(toolHandlers[name]).toBeTypeOf("function");
   });
 
@@ -946,6 +946,9 @@ describe("app and package surface", () => {
       const byName = Object.fromEntries(registry.tools.map((tool: any) => [tool.name, tool]));
       expect(byName.list_accounts.safety.readOnlyHint).toBe(true);
       expect(byName.delete_transaction.safety.destructiveHint).toBe(true);
+      expect(byName.create_account.safety.supportsDryRun).toBe(true);
+      expect(byName.create_account.definition.parameters.map((parameter: any) => parameter[0])).toContain("dry_run");
+      expect(byName.create_account.signature).toContain("dry_run?: boolean");
       expect(byName.balance_sheet.aliases.currency).toBe("quote_asset_id");
       expect(byName.operating_manual.safety.readOnlyHint).toBe(true);
       expect(byName.tool_registry.safety.idempotentHint).toBe(true);
