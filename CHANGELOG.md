@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.3.3
+
+Current balance defaults release.
+
+- Make `balance_sheet` and `net_worth` default to active balances that include pending transactions, while explicit `status:"posted"` remains the posted-only path.
+- Stop the CLI `report balance-sheet` and `report net-worth` commands from forcing `include_pending:false` when the flag is omitted.
+- Surface resolved `report_status` and `include_pending` on balance-sheet and net-worth outputs so callers can see whether pending rows are included.
+
 ## 0.3.2
 
 CLI/MCP surface polish release.

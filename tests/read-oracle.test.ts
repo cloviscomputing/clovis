@@ -404,10 +404,12 @@ const READ_CASES: ReadCase[] = [
     name: "balance_sheet",
     args: (ctx) => ({ date: "2026-06-30", quote_asset_id: ctx.assets.usd }),
     oracle: (result, ctx) => {
-      const expectedAssets = rootAccounts(ctx, ["asset"]).reduce((sum, accountId) => sum + quotedBalance(ctx, accountId, ctx.assets.usd, "posted", "2026-06-30").total, 0n);
-      const expectedLiabilities = rootAccounts(ctx, ["liability"]).reduce((sum, accountId) => sum + quotedBalance(ctx, accountId, ctx.assets.usd, "posted", "2026-06-30").total, 0n);
+      const expectedAssets = rootAccounts(ctx, ["asset"]).reduce((sum, accountId) => sum + quotedBalance(ctx, accountId, ctx.assets.usd, "active", "2026-06-30").total, 0n);
+      const expectedLiabilities = rootAccounts(ctx, ["liability"]).reduce((sum, accountId) => sum + quotedBalance(ctx, accountId, ctx.assets.usd, "active", "2026-06-30").total, 0n);
       expect(result.total_assets).toBe(Number(expectedAssets));
       expect(result.total_liabilities).toBe(Number(expectedLiabilities));
+      expect(result.report_status).toBe("active");
+      expect(result.include_pending).toBe(true);
     }
   },
   {

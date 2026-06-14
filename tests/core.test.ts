@@ -949,11 +949,13 @@ describe("app and package surface", () => {
       expect((callTool("income_statement", { year: 2026, month: 6, include_pending: true, quote_asset_id: usd }, ledger) as any).income).toBe(15000);
       expect((callTool("income_statement", { year: 2026, month: 6, status: "active", quote_asset_id: usd }, ledger) as any).income).toBe(15000);
       const currentSheet = callTool("balance_sheet", { quote_asset_id: usd }, ledger) as any;
-      expect(currentSheet).toMatchObject({ total_assets: 10000, as_of: null, as_of_basis: "current_open_ended" });
+      expect(currentSheet).toMatchObject({ total_assets: 15000, report_status: "active", include_pending: true, as_of: null, as_of_basis: "current_open_ended" });
+      expect((callTool("balance_sheet", { status: "posted", quote_asset_id: usd }, ledger) as any).total_assets).toBe(10000);
       expect((callTool("balance_sheet", { include_pending: true, quote_asset_id: usd }, ledger) as any).total_assets).toBe(15000);
       expect((callTool("balance_sheet", { status: "active", quote_asset_id: usd }, ledger) as any).total_assets).toBe(15000);
       const currentNetWorth = callTool("net_worth", { quote_asset_id: usd }, ledger) as any;
-      expect(currentNetWorth).toMatchObject({ net_worth: 10000, as_of: null, as_of_basis: "current_open_ended" });
+      expect(currentNetWorth).toMatchObject({ net_worth: 15000, report_status: "active", include_pending: true, as_of: null, as_of_basis: "current_open_ended" });
+      expect((callTool("net_worth", { status: "posted", quote_asset_id: usd }, ledger) as any).net_worth).toBe(10000);
       expect((callTool("net_worth", { include_pending: true, quote_asset_id: usd }, ledger) as any).net_worth).toBe(15000);
       expect((callTool("net_worth", { status: "active", quote_asset_id: usd }, ledger) as any).net_worth).toBe(15000);
       expect((callTool("cash_flow", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any).operating_total).toBe(-10000);
@@ -3202,6 +3204,7 @@ describe("app and package surface", () => {
     expect(run("balance", checking).data.balance).toBe(288000);
     const balances = run("account", "balances", "--type", "asset").data;
     expect(balances.find((row: any) => row.account_id === checking && row.asset_symbol === "USD").current_balance_cents).toBe(288000);
+    run("txn", "add", "--date", "2026-06-04", "--amount", "50", "--desc", "Pending paycheck", "--from", accountId("Salary"), "--to", checking, "--status", "pending");
 
     const personal = run("tool", "create_account", "--json", JSON.stringify({ name: "Personal", type: "equity", default_asset_id: "USD" })).data.id;
     const business = run("tool", "create_account", "--json", JSON.stringify({ name: "Business", type: "equity", default_asset_id: "USD" })).data.id;
@@ -3212,11 +3215,12 @@ describe("app and package surface", () => {
 
     expect(fail("report", "net-worth", "--quote", "USD")).toMatchObject({ ok: false, error: expect.stringContaining("ambiguous across account groups") });
     expect(fail("account", "balances", "--type", "asset", "--rollup")).toMatchObject({ ok: false, error: expect.stringContaining("ambiguous across account groups") });
-    expect(run("report", "net-worth", "--quote", "USD", "--parent", personal, "--include-pending").data).toMatchObject({ net_worth: 288000, scope: { root_account_ids: expect.arrayContaining([checking]) } });
+    expect(run("report", "net-worth", "--quote", "USD", "--parent", personal).data).toMatchObject({ net_worth: 293000, report_status: "active", include_pending: true, scope: { root_account_ids: expect.arrayContaining([checking]) } });
+    expect(run("report", "net-worth", "--quote", "USD", "--parent", personal, "--status", "posted").data).toMatchObject({ net_worth: 288000, report_status: "posted", include_pending: false });
     expect(run("report", "balance-sheet", "--quote", "USD", "--account", businessBank, "--status", "active", "--hide-zero").data).toMatchObject({ total_assets: 50000, scope: { root_account_ids: [businessBank] } });
     const scopedRollup = run("account", "balances", "--type", "asset", "--rollup", "--parent", personal, "--native-only", "--presentation", "bank").data;
     expect(scopedRollup.map((row: any) => row.account_id)).toEqual([checking]);
-    expect(scopedRollup[0]).toMatchObject({ current_balance_cents: 288000, summable: true });
+    expect(scopedRollup[0]).toMatchObject({ current_balance_cents: 293000, summable: true });
   });
 
   it("exposes the full app catalog through the generic CLI tool path", () => {

@@ -31,8 +31,8 @@ export const reportTools = defineToolGroup([
         ["date", "string", { nullable: true, optional: true, defaultValue: null }],
         ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
         ["compact", "boolean", { optional: true, defaultValue: false }],
-        ["include_pending", "boolean", { optional: true, defaultValue: false }],
-        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["include_pending", "boolean", { optional: true, defaultValue: true }],
+        ["status", "string", { optional: true, defaultValue: "active" }],
         ["hide_zero", "boolean", { optional: true, defaultValue: false }],
         ["quote_asset_id", "string"],
         ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
@@ -50,8 +50,8 @@ export const reportTools = defineToolGroup([
       parameters: [
         ["date", "string", { nullable: true, optional: true, defaultValue: null }],
         ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
-        ["include_pending", "boolean", { optional: true, defaultValue: false }],
-        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["include_pending", "boolean", { optional: true, defaultValue: true }],
+        ["status", "string", { optional: true, defaultValue: "active" }],
         ["quote_asset_id", "string"],
         ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
         ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }]
@@ -415,7 +415,8 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
   } = ctx;
   const balanceSheetReport = (ledger: Ledger, args: Row): Row => {
     const quote = reportAsset(ledger, args.quote_asset_id);
-    const status = reportStatus(args, "posted");
+    const status = reportStatus(args, "active");
+    const includesPending = status == null || status === "active" || status === "combined" || status === "pending";
     const scope = resolveScopedAccounts(ledger, args, ["asset", "liability", "equity"]);
     if (!scope.scoped) {
       const report = ledger.balanceSheet(optionalDate(args.date), quote, status);
@@ -424,7 +425,7 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
         report.liabilities = (report.liabilities as Row[]).filter((row) => row.balance !== 0n);
         report.equity = (report.equity as Row[]).filter((row) => row.balance !== 0n);
       }
-      return report;
+      return { ...report, report_status: status, include_pending: includesPending };
     }
 
     const date = optionalDate(args.date);
@@ -482,6 +483,8 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       accounting_equation_balanced: null,
       quote_asset_id: quote,
       scale,
+      report_status: status,
+      include_pending: includesPending,
       valuation_complete: missing.length === 0,
       missing_conversions: missing
     };
@@ -527,6 +530,8 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
         net_worth_cents: net,
         quote_asset_id: sheet.quote_asset_id,
         scale: sheet.scale,
+        report_status: sheet.report_status,
+        include_pending: sheet.include_pending,
         valuation_complete: sheet.valuation_complete,
         missing_conversions: sheet.missing_conversions,
         scope: sheet.scope

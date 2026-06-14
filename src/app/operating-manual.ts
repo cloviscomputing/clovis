@@ -122,7 +122,7 @@ const SECTIONS = {
       "Separate assets from liabilities. Cash in Checking and debt on Visa are both real, but they answer different questions.",
       "Use liability-aware projections for credit cards and debt. Spendable cash is not the same thing as gross cash.",
       "Include earmarks and goals when explaining available money. Money can be present but already assigned.",
-      "Check pending rows before judging the month. Pending card charges and imports can change the practical picture.",
+      "For current personal balance-sheet and net-worth snapshots, default to active balances that include pending rows; use status:posted when the answer must be posted-only.",
       "Before include_planned:true projections, run find_realized_planned or reconcile_planned for the period. cash_projection excludes realized planned rows, but unresolved matches still deserve review.",
       "Use budgets to explain variance, not just totals. A month-end answer should say which categories are driving the result.",
       "Run integrity checks before giving final numbers. If the ledger is structurally unhealthy, the report is not ready."

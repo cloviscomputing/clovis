@@ -139,8 +139,9 @@ not the same thing as gross cash.
 Include earmarks and goals when explaining available money. Money can be
 present but already assigned.
 
-Check pending rows before judging the month. Pending card charges and imports
-can change the practical picture.
+For current personal balance-sheet and net-worth snapshots, default to active
+balances that include pending rows. Use `status:posted` when the answer must be
+posted-only.
 
 Before `include_planned:true` projections, run `find_realized_planned` or
 `reconcile_planned` for the period. `cash_projection` excludes realized planned
