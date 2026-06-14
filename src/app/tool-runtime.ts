@@ -85,13 +85,21 @@ import {
   trailingWindowEnd
 } from "./report-helpers.js";
 import {
+  compactTransactionEffects,
+  presentAccountBalance,
+  resolveScopedAccounts,
+  statementDetailMode
+} from "./read-view.js";
+import {
   applyStatementPlan,
   buildStatementPlan,
   counterpartForRow,
   importPreview,
+  parseStatementFile,
   importTransactionRows,
   parseStatementRows,
   signedStatementQuantity,
+  statementBalanceFields,
   verifyStatementPlan
 } from "./statement-helpers.js";
 import type { ToolHandler, ToolSpec } from "./tool-spec.js";
@@ -309,6 +317,7 @@ const runtimeContext = {
   budgetSummary,
   buildStatementPlan,
   cashProjectionSummary,
+  compactTransactionEffects,
   conversionSeverity,
   counterpartForRow,
   createHash,
@@ -339,10 +348,12 @@ const runtimeContext = {
   operatingManual,
   operationPublic,
   optionalDate,
+  parseStatementFile,
   parseStatementRows,
   parseTxStatus,
   parseTxStatusFilter,
   postedAtBound,
+  presentAccountBalance,
   positive,
   positiveAtomicQuantity,
   positiveMoneyAmount,
@@ -359,6 +370,7 @@ const runtimeContext = {
   registrySafetyMatches,
   reportAsset,
   reportStatus,
+  resolveScopedAccounts,
   resolveBackupWritePath,
   resolveOpenScenarioBranch,
   resolveToolWritePath,
@@ -374,9 +386,11 @@ const runtimeContext = {
   setAccountDefaultAsset,
   signedMoneyAmount,
   signedStatementQuantity,
+  statementBalanceFields,
   spendableAssetAccountDefaults,
   spendingRows,
   splitProjectionAccounts,
+  statementDetailMode,
   stringifyPublic,
   tagTx,
   today,

@@ -230,7 +230,9 @@ export const statementTools = defineToolGroup([
         ["balance_sign", "string", { nullable: true, optional: true, defaultValue: null }],
         ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
         ["min_likely_score", "number", { optional: true, defaultValue: 0.72 }],
-        ["sample_limit", "integer", { optional: true, defaultValue: 20 }]
+        ["sample_limit", "integer", { optional: true, defaultValue: 20 }],
+        ["include_details", "boolean", { optional: true, defaultValue: false }],
+        ["verbosity", "string", { nullable: true, optional: true, defaultValue: null }]
       ],
       returns: { type: "object" }
     },
@@ -266,6 +268,9 @@ export const statementTools = defineToolGroup([
         ["annotate_posted_matches", "boolean", { optional: true, defaultValue: true }],
         ["allow_review_skip", "boolean", { optional: true, defaultValue: false }],
         ["require_balance_match", "boolean", { optional: true, defaultValue: true }],
+        ["sample_limit", "integer", { optional: true, defaultValue: 20 }],
+        ["include_details", "boolean", { optional: true, defaultValue: false }],
+        ["verbosity", "string", { nullable: true, optional: true, defaultValue: null }],
         ["dry_run", "boolean", { optional: true, defaultValue: true }]
       ],
       returns: { type: "object" }
@@ -306,7 +311,9 @@ export const statementTools = defineToolGroup([
         ["status", "string", { optional: true, defaultValue: "posted" }],
         ["dry_run", "boolean", { optional: true, defaultValue: true }],
         ["batch_label", "string", { nullable: true, optional: true, defaultValue: null }],
-        ["sample_limit", "integer", { optional: true, defaultValue: 20 }]
+        ["sample_limit", "integer", { optional: true, defaultValue: 20 }],
+        ["include_details", "boolean", { optional: true, defaultValue: false }],
+        ["verbosity", "string", { nullable: true, optional: true, defaultValue: null }]
       ],
       returns: { type: "object" }
     },
@@ -393,11 +400,13 @@ export function statementHandlers(ctx: ToolRuntimeContext, handlers: ToolHandler
     importPreview,
     importTransactionRows,
     iterTransactions,
+    parseStatementFile,
     parseStatementRows,
     parseTxStatus,
     reportStatus,
     selectBatchTransactions,
     signedStatementQuantity,
+    statementBalanceFields,
     tagTx,
     txIdsForBatch,
     txPublic,
@@ -431,13 +440,16 @@ export function statementHandlers(ctx: ToolRuntimeContext, handlers: ToolHandler
     },
 
     preview_import: (_ledger, args) => {
-      const rows = parseStatementRows(_ledger, args.file_path, args);
-      return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true };
+      const statement = parseStatementFile(_ledger, args.file_path, args);
+      const rows = statement.rows;
+      const accountId = account(_ledger, args.account_id);
+      const assetId = args.asset_id ? explicitAsset(_ledger, args.asset_id) : args.currency ? asset(_ledger, null, args.currency) : accountAsset(_ledger, accountId);
+      return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true, ...statementBalanceFields(_ledger, assetId, statement) };
     },
 
     process_statement: (ledger, args) => {
       unsupportedArguments({ transfer_account_id: args.transfer_account_id });
-      const plan = buildStatementPlan(ledger, { ...args, status: "posted" }, { persist: Boolean(args.commit), targetStatus: "posted" });
+      const plan = buildStatementPlan(ledger, { ...args, status: "posted", include_details: true }, { persist: Boolean(args.commit), targetStatus: "posted" });
       const actions = plan.actions ?? {};
       const newRows = (actions.new_posted ?? 0) + (actions.new_pending ?? 0);
       const wouldApply = newRows + (actions.pending_to_commit ?? 0) + (actions.stale_pending_to_void ?? 0);

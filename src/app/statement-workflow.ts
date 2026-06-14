@@ -1,4 +1,5 @@
 import { safeJson } from "./json.js";
+import { statementDetailMode } from "./read-view.js";
 
 type Row = Record<string, any>;
 
@@ -32,10 +33,20 @@ export function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = 
   const grouped = planRowsByAction(publicRows);
   const summary = Object.fromEntries(["matched", "pending_to_commit", "new_posted", "new_pending", "stale_pending_to_void", "ambiguous", "ignored"].map((action) => [action, grouped[action]?.length ?? 0]));
   const realizedPlannedRows = (extra.realized_planned_rows as Row[] | undefined) ?? [];
+  const includeDetails = statementDetailMode(extra);
   const warnings = [
     ...(summary.ambiguous > 0 ? ["ambiguous rows require manual review"] : []),
     ...(realizedPlannedRows.length > 0 ? ["realized planned rows should be reconciled or voided before planned projections"] : [])
   ];
+  const details = includeDetails ? {
+    matched_rows: grouped.matched ?? [],
+    pending_to_commit: grouped.pending_to_commit ?? [],
+    stale_pending_to_void: grouped.stale_pending_to_void ?? [],
+    new_posted: grouped.new_posted ?? [],
+    new_pending: grouped.new_pending ?? [],
+    ambiguous: grouped.ambiguous ?? [],
+    ignored: grouped.ignored ?? []
+  } : {};
   return {
     plan_id: plan?.id ?? null,
     status: plan?.status ?? "preview",
@@ -52,17 +63,12 @@ export function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = 
     matched: summary.matched,
     unmatched: summary.new_posted + summary.new_pending + summary.pending_to_commit + summary.stale_pending_to_void + summary.ambiguous,
     reconciled: summary.new_posted + summary.new_pending + summary.pending_to_commit + summary.stale_pending_to_void + summary.ambiguous === 0,
-    matched_rows: grouped.matched ?? [],
-    pending_to_commit: grouped.pending_to_commit ?? [],
-    stale_pending_to_void: grouped.stale_pending_to_void ?? [],
-    new_posted: grouped.new_posted ?? [],
-    new_pending: grouped.new_pending ?? [],
-    ambiguous: grouped.ambiguous ?? [],
-    ignored: grouped.ignored ?? [],
+    detail_rows_included: includeDetails,
     realized_planned_rows: realizedPlannedRows,
     realized_planned_count: realizedPlannedRows.length,
     warnings,
     dry_run: extra.dry_run ?? true,
-    ...extra
+    ...extra,
+    ...details
   };
 }

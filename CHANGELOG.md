@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.0
+
+Agent read-surface release.
+
+- Add scoped `balance_sheet` and `net_worth` support for advertised `account_ids` and `entity_id` filters.
+- Add app-layer read presentation helpers for account scoping, banking-style liability signs, compact transaction effects, and statement-plan detail modes.
+- Add `account_balances` options for native/default-asset-only rows and banking presentation without changing existing defaults.
+- Add optional account-side effects to compact transaction lists so card purchases and payments can be interpreted without fetching full entries.
+- Make statement plan detail arrays opt-in with `include_details:true` or `verbosity:"audit"` while keeping summary counts and sampled rows available by default.
+- Surface QFX/OFX statement balance metadata from `LEDGERBAL` or `AVAILBAL` blocks in import previews and statement plans.
+
 ## 0.2.9
 
 Operation ledger release.

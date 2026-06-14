@@ -1,3 +1,4 @@
+import type { Ledger } from "../../core/ledger.js";
 import type { TxStatus } from "../../core/types.js";
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../tool-runtime.js";
 import { defineToolGroup } from "../tool-spec.js";
@@ -51,7 +52,9 @@ export const reportTools = defineToolGroup([
         ["branch", "string", { nullable: true, optional: true, defaultValue: null }],
         ["include_pending", "boolean", { optional: true, defaultValue: false }],
         ["status", "string", { optional: true, defaultValue: "posted" }],
-        ["quote_asset_id", "string"]
+        ["quote_asset_id", "string"],
+        ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+        ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }]
       ],
       returns: { type: "object" }
     },
@@ -388,11 +391,13 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     optionalDate,
     parseTxStatusFilter,
     positive,
+    presentAccountBalance,
     previousDate,
     quotedPlannedUnrealized,
     realizedPlannedRows,
     reportAsset,
     reportStatus,
+    resolveScopedAccounts,
     rootAccountIds,
     runwayMonths,
     scaleBigint,
@@ -408,6 +413,79 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     unsupportedArguments,
     validateDate
   } = ctx;
+  const balanceSheetReport = (ledger: Ledger, args: Row): Row => {
+    const quote = reportAsset(ledger, args.quote_asset_id);
+    const status = reportStatus(args, "posted");
+    const scope = resolveScopedAccounts(ledger, args, ["asset", "liability", "equity"]);
+    if (!scope.scoped) {
+      const report = ledger.balanceSheet(optionalDate(args.date), quote, status);
+      if (args.hide_zero) {
+        report.assets = (report.assets as Row[]).filter((row) => row.balance !== 0n);
+        report.liabilities = (report.liabilities as Row[]).filter((row) => row.balance !== 0n);
+        report.equity = (report.equity as Row[]).filter((row) => row.balance !== 0n);
+      }
+      return report;
+    }
+
+    const date = optionalDate(args.date);
+    const asOf = date ?? "9999-12-31";
+    const assetRow = ledger.getAsset(quote);
+    const scale = assetRow?.scale ?? 2;
+    const missing: Row[] = [];
+    const sections: Record<"asset" | "liability" | "equity", Row[]> = { asset: [], liability: [], equity: [] };
+    for (const accountId of scope.root_account_ids) {
+      const account = ledger.getAccount(accountId);
+      if (!account || !["asset", "liability", "equity"].includes(account.account_type)) continue;
+      const section = account.account_type as "asset" | "liability" | "equity";
+      const balance = ledger.quotedBalanceTree(accountId, quote, asOf, status);
+      missing.push(...balance.missing);
+      if (args.hide_zero && balance.total === 0n) continue;
+      const presented = presentAccountBalance(ledger, accountId, quote, balance.total, "ledger");
+      sections[section].push({
+        id: account.id,
+        name: account.name,
+        account_type: account.account_type,
+        type: account.account_type,
+        statement: account.statement,
+        quantity: balance.total,
+        scale,
+        asset_id: quote,
+        balance: balance.total,
+        balance_cents: balance.total,
+        balance_display: display(ledger, balance.total, quote),
+        ...presented,
+        children: []
+      });
+    }
+    const total = (rows: Row[]) => rows.reduce((sum, row) => sum + BigInt(row.balance), 0n);
+    const normalTotal = (rows: Row[]) => rows.reduce((sum, row) => sum + BigInt(row.normal_balance_cents), 0n);
+    const totals = { asset: total(sections.asset), liability: total(sections.liability), equity: total(sections.equity) };
+    const normalTotals = { asset: normalTotal(sections.asset), liability: normalTotal(sections.liability), equity: normalTotal(sections.equity) };
+    return {
+      as_of: asOf,
+      scope: { account_ids: [...scope.account_ids!], root_account_ids: scope.root_account_ids },
+      assets: sections.asset,
+      liabilities: sections.liability,
+      equity: sections.equity,
+      total_assets: totals.asset,
+      total_liabilities: totals.liability,
+      total_equity: totals.equity,
+      total_assets_cents: totals.asset,
+      total_liabilities_cents: totals.liability,
+      total_equity_cents: totals.equity,
+      accounting_total_assets: normalTotals.asset,
+      accounting_total_liabilities: normalTotals.liability,
+      accounting_total_equity: normalTotals.equity,
+      accounting_current_income: 0n,
+      accounting_current_expense: 0n,
+      accounting_current_earnings: 0n,
+      accounting_equation_balanced: null,
+      quote_asset_id: quote,
+      scale,
+      valuation_complete: missing.length === 0,
+      missing_conversions: missing
+    };
+  };
   return {
 
     income_statement: (ledger, args) => {
@@ -420,21 +498,29 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     },
 
     balance_sheet: (ledger, args) => {
-      unsupportedArguments({ branch: args.branch, account_ids: args.account_ids, entity_id: args.entity_id });
-      const status = reportStatus(args, "posted");
-      const report = ledger.balanceSheet(optionalDate(args.date), reportAsset(ledger, args.quote_asset_id), status);
-      if (args.hide_zero) {
-        report.assets = (report.assets as Row[]).filter((row) => row.balance !== 0n);
-        report.liabilities = (report.liabilities as Row[]).filter((row) => row.balance !== 0n);
-        report.equity = (report.equity as Row[]).filter((row) => row.balance !== 0n);
-      }
+      unsupportedArguments({ branch: args.branch });
+      const report = balanceSheetReport(ledger, args);
       return args.compact ? { total_assets: report.total_assets, total_liabilities: report.total_liabilities, total_equity: report.total_equity, total_assets_cents: report.total_assets, total_liabilities_cents: report.total_liabilities, total_equity_cents: report.total_equity } : report;
     },
 
     net_worth: (ledger, args) => {
       unsupportedArguments({ branch: args.branch });
-      const status = reportStatus(args, "posted");
-      return ledger.netWorthReport(args.date ? validateDate(String(args.date)) : "9999-12-31", reportAsset(ledger, args.quote_asset_id), status);
+      const sheet = balanceSheetReport(ledger, { ...args, hide_zero: false });
+      const net = BigInt(sheet.total_assets) + BigInt(sheet.total_liabilities);
+      return {
+        as_of: sheet.as_of,
+        total_assets: sheet.total_assets,
+        total_liabilities: sheet.total_liabilities,
+        net_worth: net,
+        total_assets_cents: sheet.total_assets,
+        total_liabilities_cents: sheet.total_liabilities,
+        net_worth_cents: net,
+        quote_asset_id: sheet.quote_asset_id,
+        scale: sheet.scale,
+        valuation_complete: sheet.valuation_complete,
+        missing_conversions: sheet.missing_conversions,
+        scope: sheet.scope
+      };
     },
 
     spending: (ledger, args) => {

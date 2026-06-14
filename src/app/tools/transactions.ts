@@ -115,6 +115,7 @@ export const transactionTools = defineToolGroup([
         ["limit", "integer", { optional: true, defaultValue: 50 }],
         ["offset", "integer", { optional: true, defaultValue: 0 }],
         ["compact", "boolean", { optional: true, defaultValue: true }],
+        ["include_account_effects", "boolean", { optional: true, defaultValue: false }],
         ["sort", "string", { optional: true, defaultValue: "date_desc" }]
       ],
       returns: { type: "object" }
@@ -139,6 +140,7 @@ export const transactionTools = defineToolGroup([
         ["posted_at_to", "string", { nullable: true, optional: true, defaultValue: null }],
         ["limit", "integer", { optional: true, defaultValue: 50 }],
         ["offset", "integer", { optional: true, defaultValue: 0 }],
+        ["include_account_effects", "boolean", { optional: true, defaultValue: false }],
         ["sort", "string", { optional: true, defaultValue: "date_desc" }]
       ],
       returns: { type: "object" }
@@ -221,7 +223,9 @@ export const transactionTools = defineToolGroup([
         ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
         ["as_of", "string", { nullable: true, optional: true, defaultValue: null }],
         ["rollup", "boolean", { optional: true, defaultValue: false }],
-        ["hide_zero", "boolean", { optional: true, defaultValue: true }]
+        ["hide_zero", "boolean", { optional: true, defaultValue: true }],
+        ["native_asset_only", "boolean", { optional: true, defaultValue: false }],
+        ["presentation", "string", { optional: true, defaultValue: "ledger" }]
       ],
       returns: { type: "object[]" }
     },
@@ -672,6 +676,7 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     amountWithinTolerance,
     applyRecategorizeTransaction,
     asset,
+    compactTransactionEffects,
     counterpartForRow,
     dateDeltaDays,
     directedTxPublic,
@@ -686,6 +691,7 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     monthBounds,
     optionalDate,
     parseTxStatusFilter,
+    presentAccountBalance,
     postedAtBound,
     positiveAtomicQuantity,
     positiveMoneyAmount,
@@ -770,7 +776,11 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
         sort: args.sort ?? "date_desc"
       };
       const total = ledger.searchTransactions({ ...options, limit: null, offset: 0 }).length;
-      const rows = ledger.searchTransactions({ ...options, limit: args.limit ?? 50, offset: args.offset ?? 0 }).map((tx) => txPublic(ledger, tx, args.compact !== false));
+      const rows = ledger.searchTransactions({ ...options, limit: args.limit ?? 50, offset: args.offset ?? 0 }).map((tx) => {
+        const row = txPublic(ledger, tx, args.compact !== false);
+        if (args.include_account_effects === true) row.account_effects = compactTransactionEffects(ledger, tx, args);
+        return row;
+      });
       return { transactions: rows, items: rows, total, limit: args.limit ?? 50, offset: args.offset ?? 0 };
     },
 
@@ -790,7 +800,11 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
         sort: args.sort ?? "date_desc"
       };
       const total = ledger.searchTransactions({ ...options, limit: null, offset: 0 }).length;
-      const rows = ledger.searchTransactions({ ...options, limit: args.limit ?? 50, offset: args.offset ?? 0 }).map((tx) => txPublic(ledger, tx, false));
+      const rows = ledger.searchTransactions({ ...options, limit: args.limit ?? 50, offset: args.offset ?? 0 }).map((tx) => {
+        const row = txPublic(ledger, tx, false);
+        if (args.include_account_effects === true) row.account_effects = compactTransactionEffects(ledger, tx, args);
+        return row;
+      });
       return { transactions: rows, items: rows, total, limit: args.limit ?? 50, offset: args.offset ?? 0 };
     },
 
@@ -844,6 +858,22 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
       asOf: args.as_of ? validateDate(args.as_of) : null,
       rollup: Boolean(args.rollup),
       hideZero: args.hide_zero !== false
+    }).filter((row) => args.native_asset_only !== true || args.asset_id || row.asset_id === row.default_asset_id).map((row) => {
+      const current = presentAccountBalance(ledger, row.account_id, row.asset_id, row.current_balance_cents, args.presentation);
+      const posted = presentAccountBalance(ledger, row.account_id, row.asset_id, row.posted_balance_cents, args.presentation);
+      const pending = presentAccountBalance(ledger, row.account_id, row.asset_id, row.pending_balance_cents, args.presentation);
+      return {
+        ...row,
+        display_sign_basis: current.display_sign_basis,
+        display_balance_cents: current.display_balance_cents,
+        display_balance: current.display_balance,
+        posted_display_balance_cents: posted.display_balance_cents,
+        posted_display_balance: posted.display_balance,
+        pending_display_balance_cents: pending.display_balance_cents,
+        pending_display_balance: pending.display_balance,
+        current_display_balance_cents: current.display_balance_cents,
+        current_display_balance: current.display_balance
+      };
     }),
 
     recategorize_transaction: (ledger, args) => {

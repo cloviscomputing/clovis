@@ -877,6 +877,20 @@ describe("app and package surface", () => {
 
       const rollupRows = callTool("account_balances", { account_type: "asset", rollup: true }, ledger) as any[];
       expect(rollupRows.find((row) => row.account_id === wallet && row.asset_symbol === "USD")).toMatchObject({ current_balance_cents: 300, rollup: true });
+
+      const noisyRows = callTool("account_balances", { account_type: "asset", hide_zero: false }, ledger) as any[];
+      expect(noisyRows.some((row) => row.account_id === accounts.Checking && row.asset_symbol === "CAD")).toBe(true);
+      const nativeRows = callTool("account_balances", { account_type: "asset", hide_zero: false, native_asset_only: true }, ledger) as any[];
+      expect(nativeRows.some((row) => row.account_id === accounts.Checking && row.asset_symbol === "CAD")).toBe(false);
+      expect(nativeRows.some((row) => row.account_id === cadCash && row.asset_symbol === "USD")).toBe(false);
+
+      callTool("create_transaction", { date: "2026-06-06", amount: 20, from_account_id: accounts["Credit Card"], to_account_id: accounts["Dining Out"], description: "Card dinner", status: "posted" }, ledger);
+      const liabilities = callTool("account_balances", { account_type: "liability", native_asset_only: true, presentation: "banking" }, ledger) as any[];
+      expect(liabilities.find((row) => row.account_id === accounts["Credit Card"])).toMatchObject({
+        current_balance_cents: -2000,
+        current_display_balance_cents: 2000,
+        display_sign_basis: "banking"
+      });
     } finally {
       ledger.close();
     }
@@ -948,6 +962,29 @@ describe("app and package surface", () => {
     }
   });
 
+  it("scopes balance sheet and net worth by account selections", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      const businessBank = callTool("create_account", { name: "Business Bank", type: "asset", default_asset_id: usd }, ledger) as any;
+      const businessEquity = callTool("create_account", { name: "Business Equity", type: "equity", default_asset_id: usd }, ledger) as any;
+      callTool("create_transaction", { date: "2026-06-01", amount: 100, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Personal pay", status: "posted" }, ledger);
+      callTool("create_transaction", { date: "2026-06-20", amount: 500, from_account_id: businessEquity.id, to_account_id: businessBank.id, description: "Business capital", status: "posted" }, ledger);
+
+      expect((callTool("balance_sheet", { quote_asset_id: usd }, ledger) as any).total_assets).toBe(60000);
+      const scopedSheet = callTool("balance_sheet", { quote_asset_id: usd, account_ids: [accounts.Checking] }, ledger) as any;
+      expect(scopedSheet.total_assets).toBe(10000);
+      expect(scopedSheet.assets.map((row: any) => row.id)).toEqual([accounts.Checking]);
+      expect(scopedSheet.scope.account_ids).toContain(accounts.Checking);
+      expect((callTool("net_worth", { quote_asset_id: usd, entity_id: accounts.Checking }, ledger) as any).net_worth).toBe(10000);
+      expect((callTool("net_worth", { quote_asset_id: usd, account_ids: [businessBank.id] }, ledger) as any).net_worth).toBe(50000);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("treats status all as visible non-void transactions across read filters", () => {
     const ledger = tempLedger();
     try {
@@ -988,6 +1025,25 @@ describe("app and package surface", () => {
       expect((callTool("spending", { year: 2026, month: 6, quote_asset_id: usd, status: null }, ledger) as any).total).toBe(1700);
       expect((callTool("budget_summary", { year: 2026, month: 6, quote_asset_id: usd, status: "all" }, ledger) as any).total_spent_cents).toBe(1700);
       expect((callTool("budget_summary", { year: 2026, month: 6, quote_asset_id: usd, status: null }, ledger) as any).total_spent_cents).toBe(1700);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("can include account-side effects on compact transaction rows", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("create_transaction", { date: "2026-06-01", amount: 12, from_account_id: accounts["Credit Card"], to_account_id: accounts.Groceries, description: "Card purchase", status: "pending" }, ledger);
+      callTool("create_transaction", { date: "2026-06-02", amount: 5, from_account_id: accounts.Checking, to_account_id: accounts["Credit Card"], description: "Card payment", status: "pending" }, ledger);
+
+      const listed = callTool("list_transactions", { status: "pending", compact: true, include_account_effects: true, sort: "date_asc" }, ledger) as any;
+      const purchaseCard = listed.transactions[0].account_effects.find((row: any) => row.account_id === accounts["Credit Card"]);
+      const paymentCard = listed.transactions[1].account_effects.find((row: any) => row.account_id === accounts["Credit Card"]);
+      expect(purchaseCard).toMatchObject({ ledger_quantity_cents: -1200, display_effect_cents: 1200, effect: "increase" });
+      expect(paymentCard).toMatchObject({ ledger_quantity_cents: 500, display_effect_cents: -500, effect: "decrease" });
+      expect(listed.transactions[0]).not.toHaveProperty("entries");
     } finally {
       ledger.close();
     }
@@ -2188,8 +2244,14 @@ describe("app and package surface", () => {
       const statementPath = join(dir, "statement.csv");
       writeFileSync(statementPath, "date,amount,description\n2026-06-01,10.00,Store\n", "utf8");
 
-      const plan = callTool("reconcile_statement_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0 }, ledger) as any;
-      expect(plan.actions.ambiguous).toBe(1);
+      const summary = callTool("reconcile_statement_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0 }, ledger) as any;
+      expect(summary.actions.ambiguous).toBe(1);
+      expect(summary.detail_rows_included).toBe(false);
+      expect(summary).not.toHaveProperty("ambiguous");
+      expect(summary.rows[0].candidates.map((candidate: any) => candidate.journal_id).sort()).toEqual([first.id, second.id].sort());
+
+      const plan = callTool("reconcile_statement_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0, include_details: true }, ledger) as any;
+      expect(plan.detail_rows_included).toBe(true);
       expect(plan.ambiguous[0].candidates.map((candidate: any) => candidate.journal_id).sort()).toEqual([first.id, second.id].sort());
       expect(plan.ambiguous[0].candidates[0]).toEqual(expect.objectContaining({ date: "2026-06-01", amount_cents: 1000, score: expect.any(Number), reasons: expect.arrayContaining(["amount", "date_tolerance"]) }));
     } finally {
@@ -2230,15 +2292,21 @@ describe("app and package surface", () => {
         "<MEMO>Morning coffee",
         "</STMTTRN>",
         "</BANKTRANLIST>",
+        "<LEDGERBAL>",
+        "<BALAMT>8.25",
+        "<DTASOF>20260602170000[-5:EST]",
+        "</LEDGERBAL>",
         "</OFX>"
       ].join("\n"), "utf8");
 
       const preview = callTool("preview_import", { file_path: statementPath, account_id: checking, counterpart_account_id: equity }, ledger) as any;
       expect(preview.total_rows).toBe(2);
+      expect(preview).toMatchObject({ statement_balance_cents: 825, statement_balance_date: "2026-06-02", balance_source: "qfx_ledger_balance" });
       expect(preview.rows[0]).toMatchObject({ date: "2026-06-01", amount: 12.5, description: "Existing QFX row", external_id: "fitid-1" });
 
       const plan = callTool("reconcile_statement_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0 }, ledger) as any;
       expect(plan).toMatchObject({ matched: 1, unmatched: 1, reconciled: false });
+      expect(plan).toMatchObject({ statement_balance_cents: 825, statement_balance_date: "2026-06-02", balance_source: "qfx_ledger_balance" });
       expect(plan.rows[1]).toMatchObject({ date: "2026-06-02", amount: -4.25, description: "Coffee" });
     } finally {
       ledger.close();

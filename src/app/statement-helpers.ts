@@ -147,12 +147,29 @@ export function parseQfx(text: string): Row[] {
   });
 }
 
-export function parseStatementFile(ledger: Ledger, filePath: string, args: Args = {}): { rows: Row[]; file_name: string; file_sha256: string } {
+export function parseQfxMetadata(text: string): Row {
+  const ledgerBalance = /<LEDGERBAL>([\s\S]*?)<\/LEDGERBAL>/i.exec(text)?.[1] ?? "";
+  const availableBalance = /<AVAILBAL>([\s\S]*?)<\/AVAILBAL>/i.exec(text)?.[1] ?? "";
+  const block = ledgerBalance || availableBalance;
+  if (!block) return {};
+  const balance = qfxTag(block, "BALAMT");
+  if (!balance) return {};
+  const amount = Number(balance);
+  if (!Number.isFinite(amount)) return {};
+  const asOf = qfxTag(block, "DTASOF");
+  return {
+    statement_balance: amount,
+    statement_balance_date: asOf ? qfxDate(asOf, -1) : null,
+    balance_source: ledgerBalance ? "qfx_ledger_balance" : availableBalance ? "qfx_available_balance" : "qfx_balance"
+  };
+}
+
+export function parseStatementFile(ledger: Ledger, filePath: string, args: Args = {}): { rows: Row[]; file_name: string; file_sha256: string; metadata?: Row } {
   const { path: file, text } = readToolTextFile(ledger.path, filePath, new Set([".csv", ".qfx", ".ofx"]));
   const extension = extname(file).toLowerCase();
   const statementType = String(args.statement_type ?? "").toLowerCase();
   if (extension === ".qfx" || extension === ".ofx" || statementType === "qfx" || statementType === "ofx") {
-    return { rows: parseQfx(text), file_name: basename(file), file_sha256: createHash("sha256").update(text).digest("hex") };
+    return { rows: parseQfx(text), file_name: basename(file), file_sha256: createHash("sha256").update(text).digest("hex"), metadata: parseQfxMetadata(text) };
   }
   const rows = parseCsv(trimCsvWrapperRows(text, Number(args.skip_rows ?? 0), Number(args.skip_footer_rows ?? 0)));
   const dateCol = args.date_col || "date";
@@ -396,6 +413,16 @@ export function expectedStatementBalance(ledger: Ledger, accountId: string, asse
   return expected;
 }
 
+export function statementBalanceFields(ledger: Ledger, assetId: string, statementFile: Row): Row {
+  const metadata = safeJson(statementFile.metadata);
+  if (metadata.statement_balance == null || !Number.isFinite(Number(metadata.statement_balance))) return {};
+  return {
+    statement_balance_cents: signedMoneyAmount(ledger, assetId, Number(metadata.statement_balance), "Statement balance"),
+    statement_balance_date: metadata.statement_balance_date ?? null,
+    balance_source: metadata.balance_source ?? "statement_balance"
+  };
+}
+
 export function buildStatementPlan(ledger: Ledger, args: Args, options: { persist?: boolean; targetStatus?: TxStatus | string; rows?: Row[]; file?: Row } = {}): Row {
   const statementFile = options.file ?? (args.file_path ? parseStatementFile(ledger, args.file_path, args) : { rows: args.transactions ?? [], file_name: "", file_sha256: "" });
   const selectedRows = selectStatementRows(options.rows ?? statementFile.rows, args);
@@ -501,9 +528,12 @@ export function buildStatementPlan(ledger: Ledger, args: Args, options: { persis
     balance_matches: balanceMatches,
     balance_sign: userFacingLiabilityBalance(args) ? "user_facing_liability" : "ledger",
     sample_limit: args.sample_limit ?? args.preview_rows ?? 20,
+    include_details: args.include_details,
+    verbosity: args.verbosity,
     dry_run: !options.persist,
     realized_planned_rows: realizedPlanned,
-    metadata
+    metadata,
+    ...statementBalanceFields(ledger, assetId, statementFile)
   });
 }
 
@@ -519,7 +549,7 @@ export function applyStatementPlan(ledger: Ledger, planId: string, args: Args = 
   const targetStatus = String(metadata.target_status ?? "posted");
   const effectiveRows = rows.filter((row) => ["pending_to_commit", "new_posted", "new_pending", "stale_pending_to_void"].includes(String(row.action)));
   if (args.dry_run !== false) {
-    return statementPlanOutput(plan, rows, { dry_run: true, would_apply: effectiveRows.length, sample_limit: args.sample_limit ?? 20 });
+    return statementPlanOutput(plan, rows, { dry_run: true, would_apply: effectiveRows.length, sample_limit: args.sample_limit ?? 20, include_details: args.include_details, verbosity: args.verbosity });
   }
   let created = 0;
   let committed = 0;
@@ -565,7 +595,7 @@ export function applyStatementPlan(ledger: Ledger, planId: string, args: Args = 
   const appliedPlan = ledger.getStatementPlan(planId)!;
   const appliedRows = ledger.listStatementPlanRows(planId);
   return {
-    ...statementPlanOutput(appliedPlan, appliedRows, { dry_run: false }),
+    ...statementPlanOutput(appliedPlan, appliedRows, { dry_run: false, sample_limit: args.sample_limit ?? 20, include_details: args.include_details, verbosity: args.verbosity }),
     batch_id: sourceId,
     created,
     committed,
