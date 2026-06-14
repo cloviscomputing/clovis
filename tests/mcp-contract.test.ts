@@ -276,7 +276,7 @@ const CASES = {
   consolidate_transfers: { mutation: "dry-run", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings }), assert: expectObject },
   copy_budgets: { mutation: "write", setup: ensureBudget, args: () => ({ from_year: 2026, from_month: 6, to_year: 2026, to_month: 7 }), assert: expectObject },
   count_transactions: { mutation: "read", args: () => ({ status: "posted" }), assert: expectObject },
-  create_account: { mutation: "write", args: () => ({ name: "Coffee", type: "expense", code: "6180" }), assert: expectObject },
+  create_account: { mutation: "write", args: () => ({ name: "Coffee", type: "expense", code: "6180", parent_id: null }), assert: expectObject },
   create_accounts: { mutation: "write", args: () => ({ accounts: [{ name: "Office", type: "expense" }] }), assert: expectObject },
   create_asset: { mutation: "write", args: () => ({ symbol: "GBP", asset_type: "currency", decimals: 2, name: "Pound" }), assert: expectObject },
   create_branch: { mutation: "write", args: () => ({ name: "scenario" }), assert: expectObject },
@@ -350,7 +350,7 @@ const CASES = {
   list_prices: { mutation: "read", args: () => ({}), assert: expectArray },
   list_scheduled: { mutation: "read", setup: ensureSchedule, args: () => ({}), assert: expectArray },
   list_tags: { mutation: "read", setup: ensureTag, args: (ctx) => ({ entity_type: "tx", entity_id: ctx.tx.pay }), assert: expectArray },
-  list_transactions: { mutation: "read", args: () => ({ status: "posted", compact: false }), assert: expectObject },
+  list_transactions: { mutation: "read", args: () => ({ status: "posted", compact: false, date_from: "2026-06-01", date_to: "2026-06-30" }), assert: expectObject },
   list_uncategorized: { mutation: "read", args: (ctx) => ({ catch_all_account_id: ctx.accounts.Uncategorized, status: "pending" }), assert: expectObject },
   list_unmatched_transfers: { mutation: "read", args: () => ({}), assert: expectArray },
   match_transfer_pairs: { mutation: "dry-run", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, date_tolerance_days: 1 }), assert: expectObject },
@@ -424,7 +424,7 @@ const CASES = {
   unbudgeted_spending: { mutation: "read", setup: ensureBudget, args: (ctx) => ({ year: 2026, month: 6, quote_asset_id: ctx.assets.usd }), assert: expectArray },
   update_account: { mutation: "write", args: (ctx) => ({ id: ctx.accounts["Delete Me"], name: "Delete Me Updated", code: "6999" }), assert: expectObject },
   update_asset: { mutation: "write", args: (ctx) => ({ asset_id: ctx.assets.unused, name: "Canadian Dollar Updated" }), assert: expectObject },
-  void_by_filter: { mutation: "dry-run", args: () => ({ status: "pending", dry_run: true }), assert: expectObject }
+  void_by_filter: { mutation: "dry-run", args: () => ({ status: "pending", dry_run: true, sample_limit: 1 }), assert: expectObject }
 } satisfies Record<ToolName, ContractCase>;
 
 const APPLY_WRITE_CASES = {

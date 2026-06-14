@@ -1010,6 +1010,8 @@ describe("app and package surface", () => {
       const listed = callTool("list_transactions", { status: "all", compact: true, limit: 100 }, ledger) as any;
       expect(listed.total).toBe(3);
       expect(listed.transactions.map((tx: any) => tx.status).sort()).toEqual(["pending", "planned", "posted"]);
+      const dated = callTool("list_transactions", { status: "all", date_from: "2026-06-02", date_to: "2026-06-02", compact: true, sort: "date_asc" }, ledger) as any;
+      expect(dated.transactions.map((tx: any) => tx.description)).toEqual(["Pending"]);
       expect(listed.transactions[0]).not.toHaveProperty("entries");
       expect(listed.transactions[0]).not.toHaveProperty("tags");
       expect(listed.transactions[0].entry_count).toBe(2);
@@ -2842,14 +2844,26 @@ describe("app and package surface", () => {
         description: "Blocked hard delete",
         status: "posted"
       }, ledger) as any;
+      const txB = callTool("create_transaction", {
+        date: "2026-06-02",
+        amount: 11,
+        from_account_id: checking,
+        to_account_id: groceries,
+        asset_id: usd,
+        description: "Blocked hard delete B",
+        status: "posted"
+      }, ledger) as any;
 
-      const dryRun = callTool("void_by_filter", { status: "posted", desc: "Blocked hard delete", hard_delete: true }, ledger) as any;
-      expect(dryRun).toMatchObject({ matched: 1, deleted: 0, dry_run: true, hard_delete_safe: false });
+      const dryRun = callTool("void_by_filter", { status: "posted", desc: "Blocked hard delete", hard_delete: true, sample_limit: 1 }, ledger) as any;
+      expect(dryRun).toMatchObject({ matched: 2, deleted: 0, dry_run: true, hard_delete_safe: false, total_tx_ids: 2, total_blockers: 2, sample_limit: 1, output_truncated: true });
+      expect(dryRun.tx_ids).toHaveLength(1);
+      expect(dryRun.blockers).toHaveLength(1);
       expect(dryRun.blockers).toEqual(expect.arrayContaining([
-        expect.objectContaining({ tx_id: tx.id, table: "ledger_operation_rows" })
+        expect.objectContaining({ table: "ledger_operation_rows" })
       ]));
       expect(() => callTool("void_by_filter", { status: "posted", desc: "Blocked hard delete", hard_delete: true, dry_run: false }, ledger)).toThrow(/Hard delete blocked/);
       expect(ledger.getTx(tx.id)?.status).toBe("posted");
+      expect(ledger.getTx(txB.id)?.status).toBe("posted");
     } finally {
       ledger.close();
     }
@@ -3246,12 +3260,15 @@ describe("app and package surface", () => {
 
     run("init", "--currency", "USD");
     expect(fail(["tool", "list_accounts", "--json", "[]"])).toMatchObject({ ok: false, error: expect.stringContaining("Tool args must be a JSON object") });
-    expect(fail(["tool", "spending", "--json", JSON.stringify({ year: 2026, month: 13, quote_asset_id: "USD" })])).toMatchObject({ ok: false, error: expect.stringContaining("Too big") });
-    expect(fail(["tool", "list_transactions", "--json", JSON.stringify({ limit: 0 })])).toMatchObject({ ok: false, error: expect.stringContaining("Too small") });
-    expect(fail(["tool", "void_by_filter", "--json", JSON.stringify({ status: "pending", dry_run: "false" })])).toMatchObject({ ok: false, error: expect.stringContaining("expected boolean") });
+    expect(fail(["tool", "spending", "--json", JSON.stringify({ year: 2026, month: 13, quote_asset_id: "USD" })])).toMatchObject({ ok: false, error: expect.stringContaining("month must be <= 12") });
+    expect(fail(["tool", "list_transactions", "--json", JSON.stringify({ limit: 0 })])).toMatchObject({ ok: false, error: expect.stringContaining("limit must be >= 1") });
+    expect(fail(["tool", "void_by_filter", "--json", JSON.stringify({ status: "pending", dry_run: "false" })])).toMatchObject({ ok: false, error: expect.stringContaining("dry_run expected boolean") });
     expect(fail(["tool", "account_balances", "--json", JSON.stringify({ as_of: "2026-99-99" })])).toMatchObject({ ok: false, error: expect.stringContaining("valid YYYY-MM-DD") });
     expect(fail(["tool", "import_ledger", "--json", JSON.stringify({ data: "x" })])).toMatchObject({ ok: false, error: expect.stringContaining("not valid JSON") });
     expect(run("tool", "backup_now").data.path).toContain("backups");
+
+    const nullableParent = run("tool", "create_account", "--json", JSON.stringify({ name: "Nullable Parent", type: "expense", parent_id: null })).data;
+    expect(nullableParent.parent_id).toBeNull();
 
     const disposable = run("tool", "create_account", "--json", JSON.stringify({ name: "Disposable", type: "expense" })).data.id;
     const deleteArgs = ["tool", "delete_account", "--json", JSON.stringify({ id: disposable })];
@@ -3463,6 +3480,15 @@ describe("app and package surface", () => {
     expect(() => listTransactions.limit.parse(-1)).toThrow();
     expect(() => listTransactions.limit.parse(1001)).toThrow();
     expect(listTransactions.limit.parse(50)).toBe(50);
+    expect(listTransactions.date_from.parse("2026-06-01")).toBe("2026-06-01");
+    expect(listTransactions.date_to.parse(null)).toBeNull();
+
+    const voidByFilter = inputShapeFromDefinition(TOOL_DEFINITIONS.void_by_filter);
+    expect(voidByFilter.sample_limit.parse(1)).toBe(1);
+    expect(voidByFilter.sample_limit.parse(null)).toBeNull();
+
+    const createAccount = inputShapeFromDefinition(TOOL_DEFINITIONS.create_account);
+    expect(createAccount.parent_id.parse(null)).toBeNull();
 
     const spending = inputShapeFromDefinition(TOOL_DEFINITIONS.spending);
     expect(() => spending.month.parse(99)).toThrow();

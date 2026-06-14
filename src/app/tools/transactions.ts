@@ -1,5 +1,5 @@
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../tool-runtime.js";
-import { assertTransactionDeletionAllowed, planTransactionDeletion } from "../transaction-deletion.js";
+import { assertTransactionDeletionAllowed, planTransactionDeletion, presentTransactionDeletionPlan } from "../transaction-deletion.js";
 import { defineToolGroup } from "../tool-spec.js";
 
 export const transactionTools = defineToolGroup([
@@ -112,6 +112,8 @@ export const transactionTools = defineToolGroup([
         ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
         ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
         ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
         ["status", "string", { nullable: true, optional: true, defaultValue: null }],
         ["limit", "integer", { optional: true, defaultValue: 50 }],
         ["offset", "integer", { optional: true, defaultValue: 0 }],
@@ -277,7 +279,8 @@ export const transactionTools = defineToolGroup([
         ["posted_at_from", "string", { nullable: true, optional: true, defaultValue: null }],
         ["posted_at_to", "string", { nullable: true, optional: true, defaultValue: null }],
         ["dry_run", "boolean", { optional: true, defaultValue: true }],
-        ["hard_delete", "boolean", { optional: true, defaultValue: false }]
+        ["hard_delete", "boolean", { optional: true, defaultValue: false }],
+        ["sample_limit", "integer", { nullable: true, optional: true, defaultValue: null }]
       ],
       returns: { type: "object" }
     },
@@ -915,10 +918,11 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
       const matches = (handlers.list_transactions(ledger, { ...args, compact: true, limit: 100000 }) as Row).transactions as Row[];
       const dryRun = args.dry_run !== false;
       const plan = planTransactionDeletion(ledger, matches.map((tx) => String(tx.id)), Boolean(args.hard_delete));
-      if (dryRun) return { ...plan, voided: 0, deleted: 0, dry_run: true };
+      const output = presentTransactionDeletionPlan(plan, args.sample_limit);
+      if (dryRun) return { ...output, voided: 0, deleted: 0, dry_run: true };
       assertTransactionDeletionAllowed(plan);
       for (const tx of matches) args.hard_delete ? ledger.deleteTx(String(tx.id)) : ledger.voidTx(String(tx.id));
-      return { ...plan, voided: args.hard_delete ? 0 : matches.length, deleted: args.hard_delete ? matches.length : 0, dry_run: false };
+      return { ...output, voided: args.hard_delete ? 0 : matches.length, deleted: args.hard_delete ? matches.length : 0, dry_run: false };
     },
 
     move_transactions: (ledger, args) => {

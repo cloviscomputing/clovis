@@ -11,8 +11,22 @@ export type TransactionDeletionPlan = {
   hard_delete_safe: boolean;
 };
 
+export type TransactionDeletionPreview = TransactionDeletionPlan & {
+  total_tx_ids: number;
+  total_blockers: number;
+  sample_limit?: number;
+  output_truncated?: boolean;
+};
+
 function countRows(ledger: Ledger, table: string, predicate: (row: Row) => boolean): number {
   return ledger.tableRows(table).filter(predicate).length;
+}
+
+function sampleLimit(value: unknown): number | null {
+  if (value == null) return null;
+  const limit = Number(value);
+  if (!Number.isFinite(limit)) return null;
+  return Math.max(0, Math.trunc(limit));
 }
 
 function hardDeleteBlockers(ledger: Ledger, tx: Journal): Row[] {
@@ -55,6 +69,24 @@ export function planTransactionDeletion(ledger: Ledger, txIds: string[], hardDel
     blockers,
     hard_delete_safe: !hardDelete || blockers.length === 0
   };
+}
+
+export function presentTransactionDeletionPlan(plan: TransactionDeletionPlan, requestedLimit?: unknown): TransactionDeletionPreview {
+  const limit = sampleLimit(requestedLimit);
+  const txIds = limit == null ? plan.tx_ids : plan.tx_ids.slice(0, limit);
+  const blockers = limit == null ? plan.blockers : plan.blockers.slice(0, limit);
+  const output: TransactionDeletionPreview = {
+    ...plan,
+    tx_ids: txIds,
+    blockers,
+    total_tx_ids: plan.tx_ids.length,
+    total_blockers: plan.blockers.length
+  };
+  if (limit != null) {
+    output.sample_limit = limit;
+    output.output_truncated = txIds.length < plan.tx_ids.length || blockers.length < plan.blockers.length;
+  }
+  return output;
 }
 
 export function assertTransactionDeletionAllowed(plan: TransactionDeletionPlan): void {

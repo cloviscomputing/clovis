@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.2
+
+CLI/MCP surface polish release.
+
+- Accept explicit `parent_id:null` for `create_account` so JSON callers can send nullable parent fields without omitting the key.
+- Add advertised `date_from` and `date_to` filters to `list_transactions` across CLI, MCP, and registry schemas.
+- Add `sample_limit` to `void_by_filter` dry-run previews so large hard-delete blocker plans can be inspected without huge payloads.
+- Format generic CLI tool validation failures as concise argument errors instead of raw Zod issue payloads.
+
 ## 0.3.1
 
 Human read-surface cleanup release.

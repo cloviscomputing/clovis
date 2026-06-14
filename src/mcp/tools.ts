@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z, type ZodTypeAny } from "zod";
+import { z, type ZodIssue, type ZodTypeAny } from "zod";
 import { callTool } from "../app/catalog.js";
 import type { JsonValue } from "../app/json.js";
 import { OPERATING_MANUAL_INSTRUCTIONS, OPERATING_MANUAL_RESOURCES, operatingManualMarkdown } from "../app/operating-manual.js";
@@ -93,10 +93,42 @@ export function inputSchemaFromDefinition(definition: ToolDefinition, name?: str
   return z.object(inputShapeFromDefinition(definition, name)).strict();
 }
 
+function issuePath(issue: ZodIssue): string {
+  return issue.path.length > 0 ? issue.path.map(String).join(".") : "arguments";
+}
+
+function formatZodIssue(issue: ZodIssue): string {
+  const raw = issue as any;
+  const path = issuePath(issue);
+  switch (issue.code) {
+    case "unrecognized_keys":
+      return `Unsupported parameter(s): ${(raw.keys ?? []).map(String).join(", ")}`;
+    case "invalid_type":
+      return `${path} expected ${raw.expected ?? "a different type"}`;
+    case "too_small":
+      return `${path} must be >= ${raw.minimum}`;
+    case "too_big":
+      return `${path} must be <= ${raw.maximum}`;
+    case "custom":
+      return issue.message;
+    default:
+      return `${path}: ${issue.message}`;
+  }
+}
+
+function formatZodError(error: z.ZodError): string {
+  return `Invalid arguments: ${error.issues.map(formatZodIssue).join("; ")}`;
+}
+
 export function parseToolInput(name: string, input: Record<string, unknown> = {}): Record<string, unknown> {
   const definition = TOOL_DEFINITIONS[name as keyof typeof TOOL_DEFINITIONS];
   if (!definition) throw new Error(`Unknown tool: ${name}`);
-  return normalizeToolInput(name, inputSchemaFromDefinition(definition, name).parse(input));
+  try {
+    return normalizeToolInput(name, inputSchemaFromDefinition(definition, name).parse(input));
+  } catch (error) {
+    if (error instanceof z.ZodError) throw new Error(formatZodError(error));
+    throw error;
+  }
 }
 
 function structuredToolContent(result: unknown): StructuredContent {

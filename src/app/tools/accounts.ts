@@ -89,7 +89,7 @@ export const accountTools = defineToolGroup([
         ["name", "string"],
         ["type", "string"],
         ["code", "string", { optional: true, defaultValue: "" }],
-        ["parent_id", "string", { optional: true, defaultValue: "" }],
+        ["parent_id", "string", { nullable: true, optional: true, defaultValue: null }],
         ["color_hex", "string", { optional: true, defaultValue: "#888888" }],
         ["default_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
       ],
