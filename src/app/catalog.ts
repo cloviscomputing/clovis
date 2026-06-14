@@ -21,6 +21,14 @@ import {
 import { operatingManual } from "./operating-manual.js";
 import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety, type ToolSignatureName } from "./signatures.js";
 import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap, type ToolHandler, type ToolMutation, type ToolRuntimeSafety, type ToolWorkflow } from "./tool-spec.js";
+import {
+  isBulkCategorizationCandidate,
+  isImportDedupeCandidate,
+  isProjectionPlannedTx,
+  isRealizedPlannedLandedTx,
+  isStatementMatchCandidate,
+  txMatchesStatusFilter
+} from "./transaction-lifecycle.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 // Shared command catalog for CLI and MCP. This layer translates user/tool
@@ -284,14 +292,6 @@ function directedTxPublic(ledger: Ledger, tx: Journal, fromAccountId: string, to
   };
 }
 
-function statuses(status?: unknown, includePending = false): Set<string> | null {
-  const normalized = parseTxStatusFilter(status, includePending ? "active" : null);
-  if (normalized == null) return null;
-  if (normalized === "active") return new Set(["posted", "pending"]);
-  if (normalized === "combined") return new Set(["posted", "pending", "planned"]);
-  return new Set([normalized]);
-}
-
 function reportStatus(args: Args, fallback: TxStatus | "active" | "combined" | null): TxStatus | "active" | "combined" | null {
   if (args.status !== undefined && args.status !== "") return parseTxStatusFilter(args.status, fallback);
   if (args.include_pending === true) return "active";
@@ -300,10 +300,9 @@ function reportStatus(args: Args, fallback: TxStatus | "active" | "combined" | n
 }
 
 function iterTransactions(ledger: Ledger, args: { status?: string | null; includePending?: boolean; date_from?: string | null; date_to?: string | null } = {}): Journal[] {
-  const allowed = statuses(args.status, args.includePending);
+  const status = parseTxStatusFilter(args.status, args.includePending ? "active" : null);
   const rows = ledger.listTransactions({ status: null, dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to), sort: "date_asc" });
-  if (!allowed) return rows.filter((tx) => tx.status !== "void");
-  return rows.filter((tx) => allowed.has(tx.status));
+  return rows.filter((tx) => txMatchesStatusFilter(tx, status));
 }
 
 function amountForAccount(ledger: Ledger, txId: string, accountId: string, assetId?: string | null): bigint {
@@ -1499,7 +1498,7 @@ function importFingerprint(row: Row, signed: bigint): string {
 }
 
 function existingImportFingerprints(ledger: Ledger, accountId: string, assetId: string): Set<string> {
-  return new Set(ledger.listTransactions({ status: "active" }).map((tx) => {
+  return new Set(ledger.listTransactions({ status: null }).filter(isImportDedupeCandidate).map((tx) => {
     const amount = amountForAccount(ledger, tx.id, accountId, assetId);
     return importFingerprint(tx, amount);
   }));
@@ -1607,7 +1606,7 @@ function importPreview(ledger: Ledger, accountId: string, counterpartId: string 
 
 function statementCandidates(ledger: Ledger, accountId: string, assetId: string, row: Row, quantity: bigint, tolerance: number): Journal[] {
   const rows = ledger.listTransactions({ status: null })
-    .filter((tx) => tx.status !== "void" && ["posted", "pending"].includes(tx.status))
+    .filter(isStatementMatchCandidate)
     .filter((tx) => amountForAccount(ledger, tx.id, accountId, assetId) === quantity);
   if (row.external_id) {
     const external = rows.filter((tx) => tx.external_id === String(row.external_id));
@@ -1676,10 +1675,11 @@ function realizedPlannedRows(ledger: Ledger, args: Args = {}): Row[] {
       ? ledger.descendants(account(ledger, args.account_id))
       : null;
   const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : null;
-  const planned = ledger.listTransactions({ status: "planned", dateFrom, dateTo, sort: "date_asc" })
+  const planned = ledger.listTransactions({ status: null, dateFrom, dateTo, sort: "date_asc" })
+    .filter(isProjectionPlannedTx)
     .filter((tx) => !explicitAccountIds || txTouchesAccountTree(ledger, tx.id, explicitAccountIds));
-  const landed = ledger.listTransactions({ status: "active", sort: "date_asc" })
-    .filter((tx) => tx.status === "posted" || tx.status === "pending")
+  const landed = ledger.listTransactions({ status: null, sort: "date_asc" })
+    .filter(isRealizedPlannedLandedTx)
     .filter((tx) => !explicitAccountIds || txTouchesAccountTree(ledger, tx.id, explicitAccountIds));
   const rows: Row[] = [];
   for (const plannedTx of planned) {
@@ -1735,7 +1735,7 @@ function quotedPlannedUnrealized(ledger: Ledger, accountId: string, quote: strin
   const rootType = ledger.getAccount(accountId)?.account_type;
   const accountIds = new Set([...ledger.descendants(accountId)].filter((id) => ledger.getAccount(id)?.account_type === rootType));
   let total = 0n;
-  for (const tx of ledger.listTransactions({ status: "planned", dateFrom, dateTo: asOf, sort: "date_asc" })) {
+  for (const tx of ledger.listTransactions({ status: null, dateFrom, dateTo: asOf, sort: "date_asc" }).filter(isProjectionPlannedTx)) {
     if (realizedIds.has(tx.id)) continue;
     for (const entry of ledger.getEntries(tx.id).filter((line) => accountIds.has(line.account_id))) {
       const [converted, error] = ledger.tryConvertQuantity(entry.quantity, entry.asset_id, quote, tx.date);
@@ -3226,7 +3226,7 @@ const handlers: Record<ToolName, Handler> = {
     const catchAll = account(ledger, args.catch_all_account_id);
     const changed: Row[] = [];
     const dryRun = args.dry_run !== false;
-    for (const tx of ledger.listTransactions({ status: "active", dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) })) {
+    for (const tx of ledger.listTransactions({ status: null, dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) }).filter(isBulkCategorizationCandidate)) {
       const match = ledger.autoCategorize(tx.description);
       if (!match) continue;
       if (ledger.getEntries(tx.id).some((entry) => entry.account_id === catchAll)) {
@@ -3621,7 +3621,10 @@ const handlers: Record<ToolName, Handler> = {
   reconcile_diff: (ledger, args) => {
     unsupportedArguments({ branch: args.branch });
     const accountId = account(ledger, args.account_id);
-    const txs = ledger.listTransactions({ status: null, dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) }).filter((tx) => amountForAccount(ledger, tx.id, accountId) !== 0n).map((tx) => txPublic(ledger, tx));
+    const txs = ledger.listTransactions({ status: null, dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) })
+      .filter((tx) => txMatchesStatusFilter(tx, "all"))
+      .filter((tx) => amountForAccount(ledger, tx.id, accountId) !== 0n)
+      .map((tx) => txPublic(ledger, tx));
     return { account_id: accountId, missing: [], extra: [], transactions: txs };
   },
   match_transfers: (ledger, args) => {

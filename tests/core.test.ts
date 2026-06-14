@@ -10,6 +10,14 @@ import { callTool, TOOL_NAMES, toolSafety } from "../src/app/index.js";
 import { TOOL_SPECS, TOOL_SPEC_BY_NAME, toolHandlers } from "../src/app/catalog.js";
 import { defaultDbPath, mcpDbPathFromEnv } from "../src/app/context.js";
 import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/app/signatures.js";
+import {
+  isBulkCategorizationCandidate,
+  isImportDedupeCandidate,
+  isProjectionPlannedTx,
+  isRealizedPlannedLandedTx,
+  isStatementMatchCandidate,
+  txMatchesStatusFilter
+} from "../src/app/transaction-lifecycle.js";
 import { inputShapeFromDefinition, inputSchemaFromDefinition } from "../src/mcp/tools.js";
 
 // Core tests are invariant-oriented: schema shape, balancing, currency scale,
@@ -554,6 +562,22 @@ describe("ledger core", () => {
 });
 
 describe("app and package surface", () => {
+  it("defines transaction lifecycle policy in one place", () => {
+    const rows = ["posted", "pending", "planned", "void"].map((status) => ({ status })) as any[];
+    const statusesFor = (predicate: (row: any) => boolean) => rows.filter(predicate).map((row) => row.status);
+
+    expect(statusesFor(isImportDedupeCandidate)).toEqual(["posted", "pending"]);
+    expect(statusesFor(isStatementMatchCandidate)).toEqual(["posted", "pending"]);
+    expect(statusesFor(isRealizedPlannedLandedTx)).toEqual(["posted", "pending"]);
+    expect(statusesFor(isProjectionPlannedTx)).toEqual(["planned"]);
+    expect(statusesFor(isBulkCategorizationCandidate)).toEqual(["posted", "pending"]);
+    expect(statusesFor((row) => txMatchesStatusFilter(row, "all"))).toEqual(["posted", "pending", "planned"]);
+    expect(statusesFor((row) => txMatchesStatusFilter(row, "active"))).toEqual(["posted", "pending"]);
+    expect(statusesFor((row) => txMatchesStatusFilter(row, "combined"))).toEqual(["posted", "pending", "planned"]);
+    expect(statusesFor((row) => txMatchesStatusFilter(row, "posted"))).toEqual(["posted"]);
+    expect(statusesFor((row) => txMatchesStatusFilter(row, null))).toEqual(["posted", "pending", "planned"]);
+  });
+
   it("derives every public tool surface from the tool specs", () => {
     const specNames = TOOL_SPECS.map((spec) => spec.name);
     const sortedNames = [...TOOL_NAMES].sort();
