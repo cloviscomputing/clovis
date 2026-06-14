@@ -806,19 +806,19 @@ export class Ledger {
 
   countEntriesByAsset(assetId: string): number {
     return Number((this.db.prepare(
-      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.asset_id = ?"
+      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND t.status != 'void' AND l.asset_id = ?"
     ).get(this.bookId, assetId) as Row).c);
   }
 
   countEntriesByAccount(accountId: string): number {
     return Number((this.db.prepare(
-      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ?"
+      "SELECT count(*) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND t.status != 'void' AND l.account_id = ?"
     ).get(this.bookId, accountId) as Row).c);
   }
 
   countTransactionsByAccount(accountId: string): number {
     return Number((this.db.prepare(
-      "SELECT count(DISTINCT l.journal_id) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ?"
+      "SELECT count(DISTINCT l.journal_id) AS c FROM journal_lines l JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id WHERE l.book_id = ? AND t.finalized_at IS NOT NULL AND t.status != 'void' AND l.account_id = ?"
     ).get(this.bookId, accountId) as Row).c);
   }
 
@@ -1496,6 +1496,7 @@ export class Ledger {
     if (!tx) throw new Error(`Transaction ${txId} not found`);
     this.assertPeriodOpen(tx.date);
     this.assertTxNotLinkedToLots(txId);
+    if (tx.status === "void") throw new Error("Cannot recategorize a void transaction");
     if (!this.getAccount(newAccountId)) throw new Error(`Account ${newAccountId} not found`);
     return this.transaction(() => {
       this.reopenTx(txId);
@@ -1529,7 +1530,7 @@ export class Ledger {
     this.assertAccountNotLinkedToLots(sourceAccountId);
     this.assertAccountNotLinkedToLots(targetAccountId);
     const rows = this.db.prepare(
-      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id WHERE t.book_id = ? AND t.finalized_at IS NOT NULL AND l.account_id = ?"
+      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id WHERE t.book_id = ? AND t.finalized_at IS NOT NULL AND t.status != 'void' AND l.account_id = ?"
     ).all(this.bookId, sourceAccountId) as Row[];
     rows.forEach((row) => this.assertPeriodOpen(String(row.date)));
     if (rows.length === 0) return 0;
@@ -1549,7 +1550,7 @@ export class Ledger {
     this.assertAssetNotLinkedToLots(fromAssetId);
     this.assertAssetNotLinkedToLots(toAssetId);
     const rows = this.db.prepare(
-      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id WHERE t.book_id = ? AND t.finalized_at IS NOT NULL AND l.asset_id = ?"
+      "SELECT DISTINCT t.id, t.date FROM journals t JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id WHERE t.book_id = ? AND t.finalized_at IS NOT NULL AND t.status != 'void' AND l.asset_id = ?"
     ).all(this.bookId, fromAssetId) as Row[];
     rows.forEach((row) => this.assertPeriodOpen(String(row.date)));
     if (rows.length === 0) return 0;

@@ -3474,7 +3474,7 @@ const handlers: Record<ToolName, Handler> = {
     const catchAll = account(ledger, args.catch_all_account_id);
     const changed: Row[] = [];
     const dryRun = args.dry_run !== false;
-    for (const tx of ledger.listTransactions({ status: null, dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) })) {
+    for (const tx of ledger.listTransactions({ status: "active", dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) })) {
       const match = ledger.autoCategorize(tx.description);
       if (!match) continue;
       if (ledger.getEntries(tx.id).some((entry) => entry.account_id === catchAll)) {

@@ -1910,6 +1910,56 @@ describe("app and package surface", () => {
     }
   });
 
+  it("keeps void and planned rows out of bulk match-rule application", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("add_match_rule", { account_id: accounts.Groceries, pattern: "Lifecycle Merchant" }, ledger);
+      const active = callTool("create_transaction", { date: "2026-06-01", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Uncategorized, description: "Lifecycle Merchant", status: "pending" }, ledger) as any;
+      const voided = callTool("create_transaction", { date: "2026-06-02", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Uncategorized, description: "Lifecycle Merchant", status: "posted" }, ledger) as any;
+      callTool("delete_transaction", { id: voided.id }, ledger);
+      const planned = callTool("plan_transaction", { date: "2026-06-03", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Uncategorized, description: "Lifecycle Merchant" }, ledger) as any;
+
+      const preview = callTool("apply_match_rules", { catch_all_account_id: accounts.Uncategorized }, ledger) as any;
+      expect(preview).toMatchObject({ matched: 1, updated: 0, dry_run: true });
+      expect(preview.transactions.map((row: any) => row.tx_id)).toEqual([active.id]);
+
+      const applied = callTool("apply_match_rules", { catch_all_account_id: accounts.Uncategorized, dry_run: false }, ledger) as any;
+      expect(applied).toMatchObject({ matched: 1, updated: 1, dry_run: false });
+      expect(ledger.getEntries(active.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Groceries }));
+      expect(ledger.getEntries(voided.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Uncategorized }));
+      expect(ledger.getEntries(planned.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Uncategorized }));
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("does not move or migrate voided journal lines", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      const cad = (callTool("create_asset", { symbol: "CAD", asset_type: "currency", decimals: 2 }, ledger) as any).id;
+      const posted = ledger.recordTransaction("2026-06-01", 1000n, accounts.Checking, accounts.Uncategorized, cad, "Moveable CAD", "posted");
+      const voided = ledger.recordTransaction("2026-06-02", 2000n, accounts.Checking, accounts.Uncategorized, cad, "Voided CAD", "posted");
+      ledger.voidTx(voided.id);
+
+      expect(callTool("move_transactions", { from_account: accounts.Uncategorized, to_account: accounts.Groceries }, ledger)).toMatchObject({ matched: 1, moved: 0, dry_run: true });
+      expect(callTool("move_transactions", { from_account: accounts.Uncategorized, to_account: accounts.Groceries, dry_run: false }, ledger)).toMatchObject({ matched: 1, moved: 1, dry_run: false });
+      expect(ledger.getEntries(posted.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Groceries }));
+      expect(ledger.getEntries(voided.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Uncategorized }));
+
+      expect(callTool("migrate_asset_entries", { from_asset_id: cad, to_asset_id: usd }, ledger)).toMatchObject({ matched: 2, updated: 0, dry_run: true });
+      expect(callTool("migrate_asset_entries", { from_asset_id: cad, to_asset_id: usd, dry_run: false }, ledger)).toMatchObject({ matched: 2, updated: 2, dry_run: false });
+      expect(ledger.getEntries(posted.id).every((entry) => entry.asset_id === usd)).toBe(true);
+      expect(ledger.getEntries(voided.id).every((entry) => entry.asset_id === cad)).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("honors reconciliation plan row controls before writing", () => {
     const ledger = tempLedger();
     try {
