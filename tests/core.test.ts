@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -629,6 +629,23 @@ describe("app and package surface", () => {
     } finally {
       ledger.close();
     }
+  });
+
+  it("keeps app policy owners out of the catalog dispatcher", () => {
+    const catalog = readFileSync(join(process.cwd(), "src/app/catalog.ts"), "utf8");
+    const filesystem = readFileSync(join(process.cwd(), "src/app/filesystem.ts"), "utf8");
+
+    expect(catalog).not.toMatch(/\b(readFileSync|writeFileSync)\b/);
+    expect(catalog).not.toContain("function reverseLedgerOperation");
+    expect(catalog).not.toContain("function genericReversalRows");
+    expect(catalog).not.toContain("function statementPlanOutput");
+    expect(catalog).not.toContain("function publicPlanRows");
+    expect(catalog).not.toContain("function toolWorkflow");
+    expect(catalog).not.toContain("function toolMutation");
+    expect(catalog).not.toContain("amountToQuantity");
+    expect(catalog).not.toContain("toAtomicUnits");
+    expect(filesystem).toContain('type FilePolicyMode = "unrestricted" | "ledger-dir" | "roots"');
+    expect(filesystem).toContain('process.env.CLOVIS_FILE_POLICY ?? "unrestricted"');
   });
 
   it("round-trips ledger export/import through public JSON", () => {
@@ -2425,6 +2442,64 @@ describe("app and package surface", () => {
       expect(preview.total_rows).toBe(1);
       expect(preview.rows[0].description).toBe("Allowed");
     } finally {
+      ledger.close();
+    }
+  });
+
+  it("can restrict file tools to the ledger directory", () => {
+    const ledger = tempLedger();
+    const previousPolicy = process.env.CLOVIS_FILE_POLICY;
+    const previousRoots = process.env.CLOVIS_FILE_ROOTS;
+    try {
+      process.env.CLOVIS_FILE_POLICY = "ledger-dir";
+      delete process.env.CLOVIS_FILE_ROOTS;
+      const ledgerRoot = dirname(ledger.path);
+      const outside = mkdtempSync(join(tmpdir(), "clovis-outside-"));
+      dirs.push(outside);
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      writeFileSync(join(outside, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Denied\n", "utf8");
+
+      const status = callTool("file_access_status", {}, ledger) as any;
+      expect(status.mode).toBe("ledger-dir");
+      expect(status.roots).toEqual([realpathSync(ledgerRoot)]);
+
+      expect(() => callTool("preview_import", { file_path: join(outside, "statement.csv"), account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger)).toThrow(/CLOVIS_FILE_POLICY=ledger-dir/);
+      const exported = callTool("export_ledger", { output_path: "inside-policy.json" }, ledger) as any;
+      expect(existsSync(join(ledgerRoot, "inside-policy.json"))).toBe(true);
+      expect(exported.file).toBe("./inside-policy.json");
+    } finally {
+      if (previousPolicy == null) delete process.env.CLOVIS_FILE_POLICY; else process.env.CLOVIS_FILE_POLICY = previousPolicy;
+      if (previousRoots == null) delete process.env.CLOVIS_FILE_ROOTS; else process.env.CLOVIS_FILE_ROOTS = previousRoots;
+      ledger.close();
+    }
+  });
+
+  it("can restrict file tools to configured roots", () => {
+    const ledger = tempLedger();
+    const previousPolicy = process.env.CLOVIS_FILE_POLICY;
+    const previousRoots = process.env.CLOVIS_FILE_ROOTS;
+    try {
+      const allowed = mkdtempSync(join(tmpdir(), "clovis-allowed-root-"));
+      const denied = mkdtempSync(join(tmpdir(), "clovis-denied-root-"));
+      dirs.push(allowed, denied);
+      process.env.CLOVIS_FILE_POLICY = "roots";
+      process.env.CLOVIS_FILE_ROOTS = allowed;
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      writeFileSync(join(allowed, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Allowed\n", "utf8");
+      writeFileSync(join(denied, "statement.csv"), "date,amount,description\n2026-06-01,1.00,Denied\n", "utf8");
+
+      const status = callTool("file_access_status", {}, ledger) as any;
+      expect(status.mode).toBe("roots");
+      expect(status.roots).toEqual([realpathSync(allowed)]);
+
+      const preview = callTool("preview_import", { file_path: join(allowed, "statement.csv"), account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger) as any;
+      expect(preview.rows[0].description).toBe("Allowed");
+      expect(() => callTool("preview_import", { file_path: join(denied, "statement.csv"), account_id: "Checking", counterpart_account_id: "Opening Balances" }, ledger)).toThrow(/CLOVIS_FILE_POLICY=roots/);
+      const exported = callTool("export_ledger", { output_path: join(allowed, "snapshot.json") }, ledger) as any;
+      expect(exported.file).toBe(realpathSync(join(allowed, "snapshot.json")));
+    } finally {
+      if (previousPolicy == null) delete process.env.CLOVIS_FILE_POLICY; else process.env.CLOVIS_FILE_POLICY = previousPolicy;
+      if (previousRoots == null) delete process.env.CLOVIS_FILE_ROOTS; else process.env.CLOVIS_FILE_ROOTS = previousRoots;
       ledger.close();
     }
   });

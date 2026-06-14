@@ -82,7 +82,7 @@ const SECTIONS = {
     ],
     warnings: [
       "Do not commit a fresh import just because parsing succeeded. Parsing only proves the file was readable.",
-      "File tools use ordinary filesystem permissions. If a path fails, check the actual file path, suffix, file size, and operating-system permissions.",
+      "File tools default to CLOVIS_FILE_POLICY=unrestricted, so ordinary filesystem permissions decide what can be read or written. Use CLOVIS_FILE_POLICY=ledger-dir or CLOVIS_FILE_POLICY=roots with CLOVIS_FILE_ROOTS for an explicit path boundary.",
       "If CSV descriptions change between exports, duplicate detection is weaker than QFX/OFX stable-id matching."
     ]
   },
@@ -222,7 +222,7 @@ const SECTIONS = {
       "For tools without native dry-run output, use preview_mutation to run the change inside a rolled-back ledger transaction and inspect the structured diff.",
       "Applied ledger mutations return a mutation_id or operation_id. Inspect it with get_ledger_operation or list_ledger_operations, and reverse supported operations with reverse_ledger_operation rather than editing history by hand.",
       "Back up before destructive or broad edits. Backups are cheap compared with manual reconstruction.",
-      "Use file_access_status when a statement path fails. It reports the current path policy, max file size, and relevant filesystem configuration.",
+      "Use file_access_status when a statement path fails. It reports the current path policy, allowed roots, max file size, and relevant filesystem configuration.",
       "Run doctor or integrity checks after upgrades and before important month-end work."
     ],
     recommended_tools: [

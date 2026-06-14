@@ -11,6 +11,8 @@ Operation ledger release.
 - Add `preview_mutation`, `list_ledger_operations`, `get_ledger_operation`, and `reverse_ledger_operation`, and advertise generic `dry_run` support for mutating MCP/CLI tools.
 - Make posted `recategorize_transaction` append-only by posting correction journals instead of rewriting posted history, with reversible operation records.
 - Add native `backup_now(dry_run:true)` so filesystem-side-effect previews do not write backup files.
+- Add explicit `CLOVIS_FILE_POLICY=unrestricted | ledger-dir | roots` handling while keeping `unrestricted` as the default local-agent mode.
+- Split amount validation, file policy, operation reversal, scenario branch policy, statement-plan output, and tool classification out of the catalog dispatcher.
 
 ## 0.2.8
 

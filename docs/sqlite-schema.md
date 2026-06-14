@@ -1179,18 +1179,22 @@ File tools still enforce practical format constraints:
 - `CLOVIS_MAX_FILE_BYTES` limits input size
 - relative paths are resolved beside the ledger first, then from the current
   working directory for reads
+- `CLOVIS_FILE_POLICY=unrestricted` is the default
+- `CLOVIS_FILE_POLICY=ledger-dir` restricts file tools to the ledger directory
+- `CLOVIS_FILE_POLICY=roots` with `CLOVIS_FILE_ROOTS=/path/a:/path/b` restricts
+  file tools to configured roots
 
 The important idea:
 
 ```text
 The database stores finance facts.
-The process sandbox controls filesystem boundaries.
+The process policy or sandbox controls filesystem boundaries.
 ```
 
 Agents can call `file_access_status` or read `tool_registry.file_access` to see
-the active policy and max file size. If you need a real filesystem boundary,
-use operating-system permissions, a container, a separate user account, or the
-agent runtime's sandbox.
+the active policy, allowed roots, and max file size. For a hard boundary, use
+Clovis file policy, operating-system permissions, a container, a separate user
+account, or the agent runtime's sandbox.
 
 ## What SQLite Enforces Vs What The Engine Enforces
 

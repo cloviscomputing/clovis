@@ -517,7 +517,8 @@ const READ_CASES: ReadCase[] = [
       expect(result.path_policy).toContain("operating system permits");
       expect(result.ledger_dir).toBe(realpathSync(ctx.dir));
       expect(result.errors).toEqual([]);
-      expect(result.configure.env).toContain("No Clovis path configuration");
+      expect(result.configure.env).toContain("CLOVIS_FILE_POLICY=ledger-dir");
+      expect(result.configure.note).toContain("default is CLOVIS_FILE_POLICY=unrestricted");
     }
   },
   {

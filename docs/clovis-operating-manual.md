@@ -297,6 +297,10 @@ clients or enforce per-tool capability grants inside the server; use OS
 sandboxing, containers, dedicated user accounts, and filesystem permissions for
 hard boundaries.
 
+File tools default to `CLOVIS_FILE_POLICY=unrestricted`. Use
+`CLOVIS_FILE_POLICY=ledger-dir` or `CLOVIS_FILE_POLICY=roots` with
+`CLOVIS_FILE_ROOTS` when Clovis itself should enforce path boundaries.
+
 Use dry-run-capable tools in preview mode before applying changes. The preview
 is the change request.
 
@@ -311,7 +315,8 @@ Back up before destructive or broad edits. Backups are cheap compared with
 manual reconstruction.
 
 Use `file_access_status` when a statement path fails. It reports the current
-path policy, max file size, and relevant filesystem configuration.
+path policy, allowed roots, max file size, and relevant filesystem
+configuration.
 
 Run doctor or integrity checks after upgrades and before important month-end
 work.

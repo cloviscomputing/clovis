@@ -1,26 +1,36 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { Ledger } from "../core/ledger.js";
 import type { Account, AccountType, Asset, Journal, JournalLine, TxStatus } from "../core/types.js";
-import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
+import { fromAtomicUnits } from "../core/money.js";
 import { normalAmount } from "../core/accounting.js";
+import {
+  journalLegQuantity,
+  nonNegativeMoneyAmount,
+  positiveAtomicQuantity,
+  positiveMoneyAmount,
+  positiveShareQuantity,
+  signedMoneyAmount,
+  statementQuantity
+} from "./amount-policy.js";
 import { openMcpLedger } from "./context.js";
 import { publicize, safeJson, stringifyPublic } from "./json.js";
-import { assertToolDataSize, fileAccessStatus, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
+import { assertToolDataSize, fileAccessStatus, readToolTextFile, redactToolPath, resolveToolWritePath, writeToolTextFile } from "./filesystem.js";
 import {
   createOperation,
-  MUTATION_AUDIT_TABLES,
   mutationPreview,
   operationPublic,
-  operationRowPublic,
-  rowIdentity,
   stableHash,
   withMutationOverseer
 } from "./mutation-overseer.js";
+import { reverseLedgerOperation as reverseLedgerOperationWithDeps } from "./operation-reversal.js";
 import { operatingManual } from "./operating-manual.js";
+import { createScenarioBranch, discardScenarioBranch, listScenarioBranches, resolveOpenScenarioBranch } from "./scenario-policy.js";
 import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety, type ToolSignatureName } from "./signatures.js";
-import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap, type ToolHandler, type ToolMutation, type ToolRuntimeSafety, type ToolWorkflow } from "./tool-spec.js";
+import { publicPlanRows, statementPlanOutput } from "./statement-workflow.js";
+import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap, type ToolHandler } from "./tool-spec.js";
+import { buildToolSpecs } from "./tools/index.js";
 import {
   isBulkCategorizationCandidate,
   isImportDedupeCandidate,
@@ -29,7 +39,7 @@ import {
   isStatementMatchCandidate,
   txMatchesStatusFilter
 } from "./transaction-lifecycle.js";
-import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
+import { parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 // Shared command catalog for CLI and MCP. This layer translates user/tool
 // arguments into Ledger calls and public JSON shapes; core owns durable state.
@@ -309,353 +319,6 @@ function amountForAccount(ledger: Ledger, txId: string, accountId: string, asset
   return ledger.getEntries(txId).filter((entry) => entry.account_id === accountId && (!assetId || entry.asset_id === assetId)).reduce((sum, entry) => sum + entry.quantity, 0n);
 }
 
-const GENERIC_REVERSIBLE_TABLES = new Set<string>(MUTATION_AUDIT_TABLES);
-const GENERIC_REVERSIBLE_ACTIONS = new Set<string>(["insert", "update", "delete"]);
-const STATEMENT_AUDIT_TABLES = new Set<string>(["statement_plans", "statement_plan_rows"]);
-const ACCOUNTING_ROW_TABLES = new Set<string>(["journals", "journal_lines"]);
-
-const REVERSE_ROW_ORDER = new Map<string, number>([
-  ["annotations", 10],
-  ["statement_plan_rows", 20],
-  ["lots", 30],
-  ["journal_lines", 40],
-  ["statement_plans", 50],
-  ["journals", 60],
-  ["targets", 70],
-  ["recurrences", 70],
-  ["prices", 70],
-  ["rules", 70],
-  ["sources", 80],
-  ["accounts", 90],
-  ["assets", 100],
-  ["books", 110]
-]);
-
-const FILESYSTEM_TOOLS = new Set<string>([
-  "apply_reconciliation_plan", "backup_now", "export_transactions", "import_file",
-  "preview_import", "process_statement", "refresh_statement"
-]);
-
-function toolWorkflow(name: string): ToolWorkflow {
-  if (name.includes("budget") || name.includes("goal") || ["spending", "spending_rate", "suggest_budgets", "unbudgeted_spending"].includes(name)) return "budgets";
-  if (
-    name.includes("statement") ||
-    name.includes("import") ||
-    name.includes("pending") ||
-    name.includes("planned") ||
-    ["commit_batch", "discard_batch", "invert_import", "preview_import", "record_pending_expenses", "refresh_statement"].includes(name)
-  ) return "statements";
-  if (
-    name.includes("projection") ||
-    name.includes("runway") ||
-    name.includes("forecast") ||
-    ["age_of_money", "balance_sheet", "cash_flow", "compare_scenarios", "financial_overview", "financial_picture", "income_statement", "net_worth", "project_balances", "project_month_end", "trial_balance"].includes(name)
-  ) return "reports";
-  if (
-    name.includes("transaction") ||
-    name.includes("transfer") ||
-    name.includes("categor") ||
-    name.includes("match") ||
-    ["apply_pattern", "flip_entries", "holdings", "list_entries", "list_entries_by_asset", "post_journal_entry", "record_investment", "search_transactions", "top_descriptions"].includes(name)
-  ) return "transactions";
-  if (
-    name.includes("account") ||
-    name.includes("asset") ||
-    name.includes("price") ||
-    name.includes("tag") ||
-    name.includes("rule") ||
-    ["create_branch", "discard_branch", "list_branches", "merge_branch", "init_defaults"].includes(name)
-  ) return "setup";
-  if (
-    name.includes("backup") ||
-    name.includes("integrity") ||
-    name.includes("ledger_operation") ||
-    ["file_access_status", "operating_manual", "preview_mutation", "repair_integrity", "reverse_ledger_operation", "tool_registry"].includes(name)
-  ) return "maintenance";
-  if (name.includes("checkpoint") || name.includes("period") || name.includes("scenario")) return "advanced";
-  return "read";
-}
-
-function toolMutation(name: string, safety: ToolRuntimeSafety): ToolMutation {
-  if (safety.readOnlyHint) return "read";
-  if (FILESYSTEM_TOOLS.has(name)) return "filesystem";
-  if (safety.defaultDryRun) return "dry-run";
-  return "write";
-}
-
-function jsonMentionsAnyId(value: unknown, ids: Set<string>): boolean {
-  if (value == null) return false;
-  if (typeof value === "string") return ids.has(value);
-  if (typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some((item) => jsonMentionsAnyId(item, ids));
-  return Object.values(value as Row).some((item) => jsonMentionsAnyId(item, ids));
-}
-
-function operationTouchedJournalIds(rows: Row[]): Set<string> {
-  const ids = new Set<string>();
-  for (const row of rows.map(operationRowPublic)) {
-    if (["journals", "tx"].includes(String(row.entity_type))) ids.add(String(row.entity_id));
-    if (row.correction_journal_id) ids.add(String(row.correction_journal_id));
-    if (row.reverse_journal_id) ids.add(String(row.reverse_journal_id));
-  }
-  return ids;
-}
-
-function activeDependentOperations(ledger: Ledger, operation: Row, rows: Row[]): Row[] {
-  const touched = operationTouchedJournalIds(rows);
-  if (touched.size === 0) return [];
-  const candidates = ledger.listLedgerOperations(null).filter((candidate) => (
-    String(candidate.id) !== String(operation.id)
-    && String(candidate.status) === "applied"
-    && String(candidate.operation_type) !== "reverse_ledger_operation"
-    && Number(candidate._rowid ?? 0) > Number(operation._rowid ?? 0)
-  ));
-  return candidates.filter((candidate) => ledger.listLedgerOperationRows(String(candidate.id)).some((row) => {
-    const publicRow = operationRowPublic(row);
-    return touched.has(String(publicRow.entity_id))
-      || (publicRow.correction_journal_id && touched.has(String(publicRow.correction_journal_id)))
-      || (publicRow.reverse_journal_id && touched.has(String(publicRow.reverse_journal_id)))
-      || jsonMentionsAnyId(publicRow.before, touched)
-      || jsonMentionsAnyId(publicRow.after, touched);
-  })).map((candidate) => ({
-    id: String(candidate.id),
-    operation_type: String(candidate.operation_type),
-    tool_name: String(candidate.tool_name),
-    created_at: String(candidate.created_at)
-  }));
-}
-
-function sortRowsForReverse(rows: Row[]): Row[] {
-  return [...rows].sort((left, right) => {
-    const leftRank = REVERSE_ROW_ORDER.get(String(left.entity_type)) ?? 100;
-    const rightRank = REVERSE_ROW_ORDER.get(String(right.entity_type)) ?? 100;
-    if (left.action === "delete" && right.action !== "delete") return 1;
-    if (left.action !== "delete" && right.action === "delete") return -1;
-    const direction = left.action === "delete" ? -1 : 1;
-    return direction * (leftRank - rightRank);
-  });
-}
-
-function createdScenarioBooks(rows: Row[]): Row[] {
-  return rows.map(operationRowPublic).filter((row) => (
-    row.entity_type === "books"
-    && row.action === "insert"
-    && String(row.after?.type ?? "") === "scenario"
-    && row.after?.closed_at == null
-  )).map((row) => row.after as Row);
-}
-
-function countByColumn(ledger: Ledger, table: string, column: string, value: unknown, bookId?: string | null, predicate?: (row: Row) => boolean): number {
-  return ledger.tableRows(table).filter((row) => (
-    String(row[column] ?? "") === String(value ?? "")
-    && (bookId == null || String(row.book_id ?? "") === String(bookId))
-    && (!predicate || predicate(row))
-  )).length;
-}
-
-type ReferenceSpec = readonly [table: string, column: string, predicate?: (row: Row) => boolean];
-const ACCOUNT_REFERENCES: ReferenceSpec[] = [
-  ["accounts", "parent_id"], ["journal_lines", "account_id"], ["rules", "account_id"],
-  ["targets", "account_id"], ["recurrences", "from_account_id"], ["recurrences", "to_account_id"],
-  ["lots", "account_id"], ["statement_plans", "account_id"], ["annotations", "entity_id", (row) => row.entity_type === "account"]
-];
-const ASSET_REFERENCES: ReferenceSpec[] = [
-  ["accounts", "default_asset_id"], ["journal_lines", "asset_id"], ["prices", "asset_id"], ["prices", "quote_asset_id"],
-  ["targets", "asset_id"], ["recurrences", "asset_id"], ["lots", "asset_id"], ["lots", "cost_asset_id"], ["statement_plans", "asset_id"]
-];
-const SOURCE_REFERENCES: ReferenceSpec[] = [
-  ["journals", "source_id"], ["statement_plans", "source_id"], ["annotations", "value", (row) => row.key === "import_batch"]
-];
-
-function countReferences(ledger: Ledger, specs: ReferenceSpec[], value: unknown, bookId?: string | null): number {
-  return specs.reduce((sum, [table, column, predicate]) => sum + countByColumn(ledger, table, column, value, bookId, predicate), 0);
-}
-
-function currentAuditRow(ledger: Ledger, row: Row): Row | null {
-  const table = String(row.entity_type);
-  const idValue = String(row.entity_id);
-  return ledger.tableRows(table).find((candidate) => rowIdentity(table, candidate) === idValue) ?? null;
-}
-
-function insertedAccountFallback(ledger: Ledger, row: Row, reason: string, force = false): Row | null {
-  if (row.entity_type !== "accounts" || row.action !== "insert" || !row.after) return null;
-  const accountRow = currentAuditRow(ledger, row) ?? row.after as Row;
-  if (!force && countReferences(ledger, ACCOUNT_REFERENCES, accountRow.id, String(accountRow.book_id)) === 0) return null;
-  return {
-    ...row,
-    action: "update",
-    before: { ...accountRow, status: "inactive" },
-    after: accountRow,
-    after_hash: stableHash(accountRow),
-    reason
-  };
-}
-
-function insertedAssetHasReferences(ledger: Ledger, row: Row): boolean {
-  if (row.entity_type !== "assets" || row.action !== "insert" || !row.after) return false;
-  return countReferences(ledger, ASSET_REFERENCES, row.after.id) > 0;
-}
-
-function insertedSourceHasReferences(ledger: Ledger, row: Row): boolean {
-  if (row.entity_type !== "sources" || row.action !== "insert" || !row.after) return false;
-  return countReferences(ledger, SOURCE_REFERENCES, row.after.id, String(row.after.book_id)) > 0;
-}
-
-function insertedStatementPlanFallback(ledger: Ledger, row: Row): Row | null {
-  if (row.entity_type !== "statement_plans" || row.action !== "insert" || !row.after) return null;
-  const planRow = currentAuditRow(ledger, row);
-  if (!planRow || planRow.status !== "planned") return null;
-  return {
-    ...row,
-    action: "discard_statement_plan",
-    before: { ...planRow, status: "discarded", discarded_at: now() },
-    after: planRow,
-    after_hash: stableHash(planRow),
-    reason: "inserted statement plan is discarded by reversal instead of deleted"
-  };
-}
-
-function skipReversal(skipped: Row[], row: Row, reason: string): void {
-  skipped.push({ ...row, reason });
-}
-
-function reversalSummary(row: Row): Row {
-  return { table: row.entity_type, action: row.action === "discard_statement_plan" ? "discard" : row.action, entity_id: row.entity_id, reason: row.reason };
-}
-
-function reverseAuditRows(rows: Row[], reverseIds: string[], afterFor: (row: Row, index: number) => Row, hashFor: (row: Row, index: number, after: Row) => string = (_row, _index, after) => stableHash(after)): Row[] {
-  return rows.map((row, index) => {
-    const after = afterFor(row, index);
-    return {
-      entity_type: String(row.entity_type),
-      entity_id: String(row.entity_id),
-      action: "reverse",
-      before: operationRowPublic(row),
-      after,
-      before_hash: row.after_hash,
-      after_hash: hashFor(row, index, after),
-      correction_journal_id: row.correction_journal_id,
-      reverse_journal_id: reverseIds[index] ?? null
-    };
-  });
-}
-
-function genericReversalRows(ledger: Ledger, rows: Row[], hasAccountingDelta: boolean, scenarioBookIdsToClose = new Set<string>()): { reversible: Row[]; skipped: Row[] } {
-  const reversible: Row[] = [];
-  const skipped: Row[] = [];
-  const publicRows = rows.map(operationRowPublic);
-  const skippedAccountingJournalIds = new Set(publicRows
-    .filter((row) => hasAccountingDelta && row.entity_type === "journals")
-    .map((row) => String(row.entity_id)));
-  for (const row of publicRows) {
-    const table = String(row.entity_type);
-    const skip = (reason: string): void => skipReversal(skipped, row, reason);
-    if (!GENERIC_REVERSIBLE_ACTIONS.has(String(row.action)) || !GENERIC_REVERSIBLE_TABLES.has(table)) {
-      skip("no generic row reverser");
-      continue;
-    }
-    const rowBookId = String(row.after?.book_id ?? row.before?.book_id ?? "");
-    if ((table === "books" && scenarioBookIdsToClose.has(String(row.entity_id))) || scenarioBookIdsToClose.has(rowBookId)) {
-      skip("scenario book is closed by reversal instead of deleting cloned audit rows");
-      continue;
-    }
-    if (table === "statement_plans" && row.action === "insert") {
-      const fallback = insertedStatementPlanFallback(ledger, row);
-      if (fallback) {
-        reversible.push(fallback);
-        continue;
-      }
-    }
-    if (STATEMENT_AUDIT_TABLES.has(table)) {
-      skip("statement plans are immutable audit records");
-      continue;
-    }
-    const current = currentAuditRow(ledger, row);
-    if (row.action === "insert") {
-      if (!current) { skip("inserted row is already absent"); continue; }
-      if (row.after_hash && stableHash(current) !== row.after_hash) {
-        if (table === "accounts") {
-          const fallback = insertedAccountFallback(ledger, row, "inserted account changed after operation; reversal deactivates current account instead of deleting", true);
-          if (fallback) {
-            reversible.push(fallback);
-            continue;
-          }
-        }
-        skip("current row changed after operation; stale reversal skipped");
-        continue;
-      }
-    }
-    if (row.action === "update") {
-      if (!current) { skip("updated row is already absent"); continue; }
-      if (row.after_hash && stableHash(current) !== row.after_hash) {
-        skip("current row changed after operation; stale reversal skipped");
-        continue;
-      }
-    }
-    if (row.action === "delete" && current) {
-      skip("deleted row has been recreated; stale reversal skipped");
-      continue;
-    }
-    if (hasAccountingDelta && ACCOUNTING_ROW_TABLES.has(table)) {
-      skip("accounting reversal journal keeps original accounting rows referenced");
-      continue;
-    }
-    if (hasAccountingDelta && table === "sources" && row.action === "insert") {
-      skip("accounting reversal journal keeps imported source metadata referenced");
-      continue;
-    }
-    if (!hasAccountingDelta && table === "accounts" && row.action === "insert") {
-      const fallback = insertedAccountFallback(ledger, row, "inserted account is now referenced; reversal deactivates instead of deleting");
-      if (fallback) {
-        reversible.push(fallback);
-        continue;
-      }
-    }
-    if (!hasAccountingDelta && table === "assets" && insertedAssetHasReferences(ledger, row)) {
-      skip("inserted asset is now referenced and cannot be deleted generically");
-      continue;
-    }
-    if (!hasAccountingDelta && table === "sources" && insertedSourceHasReferences(ledger, row)) {
-      skip("inserted source is now referenced and cannot be deleted generically");
-      continue;
-    }
-    if (hasAccountingDelta && ["accounts", "assets"].includes(table)) {
-      skip("accounting reversal journal keeps created accounts/assets referenced");
-      continue;
-    }
-    if (
-      hasAccountingDelta
-      && table === "annotations"
-      && row.action === "delete"
-      && String(row.before?.entity_type ?? "") === "tx"
-      && skippedAccountingJournalIds.has(String(row.before?.entity_id ?? ""))
-    ) {
-      skip("annotation target transaction remains deleted after accounting correction");
-      continue;
-    }
-    reversible.push(row);
-  }
-  return { reversible: sortRowsForReverse(reversible), skipped };
-}
-
-function postAccountingDeltaReversal(ledger: Ledger, operationId: string, delta: Row[], date: string): string[] {
-  const byStatus = new Map<string, Array<[string, string, bigint]>>();
-  for (const row of delta) {
-    const quantity = -BigInt(row.quantity as string | number | bigint | boolean);
-    if (quantity === 0n) continue;
-    const status = String(row.status);
-    byStatus.set(status, [...(byStatus.get(status) ?? []), [String(row.account_id), String(row.asset_id), quantity]]);
-  }
-  const reverseIds: string[] = [];
-  for (const [status, lines] of [...byStatus.entries()].sort(([left], [right]) => left.localeCompare(right))) {
-    if (lines.length === 0) continue;
-    const reverseId = ledger.postTx(date, status, `Reverse ledger operation ${operationId}`, lines);
-    tagTx(ledger, reverseId, "ledger_operation_kind", "reverse");
-    reverseIds.push(reverseId);
-  }
-  return reverseIds;
-}
-
 function recategorizePreview(ledger: Ledger, args: Args): Row {
   const tx = ledger.getTx(String(args.tx_id));
   if (!tx) throw new Error(`Transaction '${String(args.tx_id)}' not found`);
@@ -774,171 +437,6 @@ function applyRecategorizeTransaction(ledger: Ledger, args: Args): Row {
     operation_id: operation.id,
     dry_run: false
   };
-}
-
-function reverseInPlaceRecategorize(ledger: Ledger, operation: Row, rows: Row[], args: Args): Row {
-  const row = operationRowPublic(rows[0] ?? {});
-  const preview = safeJson(operation.preview_json);
-  const txId = String(preview.tx_id ?? row.entity_id ?? "");
-  const oldAccount = String(preview.before_category?.account_id ?? "");
-  const newAccount = String(preview.after_category?.account_id ?? "");
-  if (!txId || !oldAccount || !newAccount) throw new Error("Ledger operation is missing recategorization reversal metadata");
-  const current = txWithEntries(ledger, txId);
-  if (row.after_hash && stableHash(current) !== row.after_hash) throw new Error("Transaction changed after recategorization; stale reversal blocked");
-  const diff = [{ tx_id: txId, from_account_id: newAccount, to_account_id: oldAccount }];
-  if (args.dry_run !== false) return { dry_run: true, operation_id: operation.id, reverses_operation_id: operation.id, reversal_strategy: "recategorize_in_place", diff, reversible: true };
-
-  let result: Row = {};
-  let after: Row = {};
-  const reverseOperation = ledger.runInTransaction(() => {
-    result = ledger.recategorizeTransaction(txId, newAccount, oldAccount);
-    after = txWithEntries(ledger, txId);
-    const reverseOp = createOperation(ledger, {
-      tool_name: "reverse_ledger_operation",
-      operation_type: "reverse_ledger_operation",
-      reverses_operation_id: operation.id,
-      input: { ...args, dry_run: false },
-      preview: { reversal_strategy: "recategorize_in_place", rows: diff },
-      result,
-      metadata: { reversible: false }
-    }, [{
-      entity_type: "tx",
-      entity_id: txId,
-      action: "reverse",
-      before: row,
-      after: { transaction: after, result },
-      before_hash: row.after_hash,
-      after_hash: stableHash(after)
-    }]);
-    ledger.markLedgerOperationReversed(String(operation.id), String(reverseOp.id));
-    return reverseOp;
-  });
-  return { dry_run: false, operation_id: reverseOperation.id, reversed_operation_id: operation.id, reversal_strategy: "recategorize_in_place", result };
-}
-
-function reverseLedgerOperation(ledger: Ledger, args: Args): Row {
-  const operation = ledger.getLedgerOperation(String(args.operation_id));
-  if (!operation) throw new Error(`Ledger operation '${String(args.operation_id)}' not found`);
-  if (String(operation.status) === "reversed") throw new Error(`Ledger operation '${String(args.operation_id)}' is already reversed`);
-  const rows = ledger.listLedgerOperationRows(String(operation.id));
-  const metadata = safeJson(operation.metadata_json);
-  const genericDelta = (metadata.accounting_delta ?? []) as Row[];
-  const dependents = activeDependentOperations(ledger, operation, rows);
-  if (dependents.length > 0) {
-    const ids = dependents.map((row) => `${row.operation_type}:${row.id}`).join(", ");
-    throw new Error(`Ledger operation has active dependent operations; reverse them first: ${ids}`);
-  }
-
-  if (String(operation.operation_type) !== "recategorize_transaction") {
-    const date = args.date ? validateDate(String(args.date)) : today();
-    const scenarioBooks = createdScenarioBooks(rows);
-    const scenarioBookIds = new Set(scenarioBooks.map((row) => String(row.id)));
-    const { reversible, skipped } = genericReversalRows(ledger, rows, genericDelta.length > 0, scenarioBookIds);
-    const hasWork = genericDelta.length > 0 || scenarioBooks.length > 0 || reversible.length > 0;
-    if (args.dry_run !== false) {
-      return {
-        dry_run: true,
-        operation_id: operation.id,
-        reverses_operation_id: operation.id,
-        reversible: hasWork,
-        blocked_reason: hasWork ? null : "operation has no reversible ledger changes",
-        reversal_strategy: "generic_ledger_operation",
-        accounting_delta: genericDelta,
-        reverse_date: date,
-        scenario_reversals: scenarioBooks.map((row) => ({ book_id: row.id, name: row.name, action: "close" })),
-        row_reversals: reversible.map(reversalSummary),
-        skipped_rows: skipped.map(reversalSummary)
-      };
-    }
-    if (!hasWork) throw new Error("Ledger operation has no reversible ledger changes");
-    const reverseIds: string[] = [];
-    const reversedRows: Row[] = [];
-    const closedScenarioBooks: Row[] = [];
-    const reverseOperation = ledger.runInTransaction(() => {
-      reverseIds.push(...postAccountingDeltaReversal(ledger, String(operation.id), genericDelta, date));
-      for (const row of scenarioBooks) {
-        ledger.discardScenarioBook(String(row.id ?? row.name));
-        closedScenarioBooks.push({ book_id: row.id, name: row.name, action: "closed" });
-      }
-      for (const row of reversible.filter((candidate) => candidate.action === "discard_statement_plan")) {
-        ledger.discardStatementPlan(String(row.entity_id));
-        reversedRows.push({ table: "statement_plans", action: "discard", entity_id: row.entity_id });
-      }
-      reversedRows.push(...ledger.reverseRows(reversible.filter((row) => row.action !== "discard_statement_plan").map((row) => ({
-        table: String(row.entity_type),
-        action: String(row.action),
-        before: row.before,
-        after: row.after
-      }))));
-      const reverseOp = createOperation(ledger, {
-        tool_name: "reverse_ledger_operation",
-        operation_type: "reverse_ledger_operation",
-        reverses_operation_id: operation.id,
-        input: { ...args, dry_run: false },
-        preview: {
-          reversal_strategy: "generic_ledger_operation",
-          accounting_delta: genericDelta,
-          scenario_reversals: scenarioBooks.map((row) => ({ book_id: row.id, name: row.name, action: "close" })),
-          row_reversals: reversible,
-          skipped_rows: skipped
-        },
-        result: { reverse_journal_ids: reverseIds, closed_scenario_books: closedScenarioBooks, reversed_rows: reversedRows, skipped_rows: skipped },
-        metadata: { reversible: false, generic_reversal: true }
-      }, reverseAuditRows(
-        rows,
-        reverseIds,
-        (row) => ({ reversed: reversible.some((candidate) => candidate.id === row.id), skipped: skipped.some((candidate) => candidate.id === row.id) }),
-        (row) => stableHash({ reverse_operation: true, operation_id: operation.id, row_id: row.id })
-      ));
-      ledger.markLedgerOperationReversed(String(operation.id), String(reverseOp.id));
-      for (const reverseId of reverseIds) tagTx(ledger, reverseId, "ledger_operation", String(reverseOp.id));
-      return reverseOp;
-    });
-    return {
-      dry_run: false,
-      operation_id: reverseOperation.id,
-      reversed_operation_id: operation.id,
-      reverse_journal_ids: reverseIds,
-      closed_scenario_books: closedScenarioBooks,
-      reversed_rows: reversedRows,
-      skipped_rows: skipped.map(reversalSummary)
-    };
-  }
-
-  const correctionIds = rows.map((row) => row.correction_journal_id).filter(Boolean).map(String);
-  if (correctionIds.length === 0 && metadata.mode === "in_place_non_posted") return reverseInPlaceRecategorize(ledger, operation, rows, args);
-  if (correctionIds.length === 0) throw new Error("Ledger operation has no correction journal to reverse");
-  const reverseDate = args.date ? validateDate(String(args.date)) : null;
-  const previewRows = correctionIds.map((correctionId) => {
-    const correction = ledger.getTx(correctionId);
-    if (!correction) throw new Error(`Correction journal '${correctionId}' not found`);
-    const lines = ledger.getEntries(correctionId).map((entry) => [entry.account_id, entry.asset_id, -entry.quantity] as [string, string, bigint]);
-    return { correction_id: correctionId, reverse_date: reverseDate ?? correction.date, reverse_lines: lines };
-  });
-  if (args.dry_run !== false) {
-    return { dry_run: true, operation_id: operation.id, reverses_operation_id: operation.id, diff: previewRows, reversible: true };
-  }
-  const reverseIds: string[] = [];
-  const reverseOperation = ledger.runInTransaction(() => {
-    for (const row of previewRows) {
-      const reverseId = ledger.postTx(String(row.reverse_date), "posted", `Reverse ledger operation ${String(operation.id)}`, row.reverse_lines);
-      tagTx(ledger, reverseId, "ledger_operation_kind", "reverse");
-      reverseIds.push(reverseId);
-    }
-    const reverseOp = createOperation(ledger, {
-      tool_name: "reverse_ledger_operation",
-      operation_type: "reverse_ledger_operation",
-      reverses_operation_id: operation.id,
-      input: { ...args, dry_run: false },
-      preview: { rows: previewRows },
-      result: { reverse_journal_ids: reverseIds },
-      metadata: { reversible: false }
-    }, reverseAuditRows(rows, reverseIds, (_row, index) => ({ reverse_journal_id: reverseIds[index] ?? null })));
-    ledger.markLedgerOperationReversed(String(operation.id), String(reverseOp.id));
-    for (const reverseId of reverseIds) tagTx(ledger, reverseId, "ledger_operation", String(reverseOp.id));
-    return reverseOp;
-  });
-  return { dry_run: false, operation_id: reverseOperation.id, reversed_operation_id: operation.id, reverse_journal_ids: reverseIds };
 }
 
 function budgetRows(ledger: Ledger, accountId?: string | null, year?: number | null, month?: number | null): Row[] {
@@ -1403,8 +901,7 @@ function parseQfx(text: string): Row[] {
 }
 
 function parseStatementFile(ledger: Ledger, filePath: string, args: Args = {}): { rows: Row[]; file_name: string; file_sha256: string } {
-  const file = resolveToolReadPath(ledger.path, filePath, new Set([".csv", ".qfx", ".ofx"]));
-  const text = readFileSync(file, "utf8");
+  const { path: file, text } = readToolTextFile(ledger.path, filePath, new Set([".csv", ".qfx", ".ofx"]));
   const extension = extname(file).toLowerCase();
   const statementType = String(args.statement_type ?? "").toLowerCase();
   if (extension === ".qfx" || extension === ".ofx" || statementType === "qfx" || statementType === "ofx") {
@@ -1478,19 +975,7 @@ function importTransactionRows(ledger: Ledger, accountId: string, counterpartId:
 }
 
 function signedStatementQuantity(ledger: Ledger, assetId: string, row: Row, amountConvention?: unknown): bigint {
-  const quantity = row.amount_cents != null || row.quantity != null
-    ? BigInt(row.amount_cents ?? row.quantity)
-    : amountToQuantity(ledger, assetId, row.amount ?? 0);
-  return amountConvention === "unsigned_charges" ? -((quantity < 0n) ? -quantity : quantity) : quantity;
-}
-
-function journalLegQuantity(ledger: Ledger, assetId: string, leg: Row): bigint {
-  if (leg.amount != null) return amountToQuantity(ledger, assetId, leg.amount);
-  if (leg.amount_cents != null) return BigInt(leg.amount_cents as string | number | bigint | boolean);
-  if (leg.quantity != null) return BigInt(leg.quantity as string | number | bigint | boolean);
-  if (leg.qty_cents != null) return BigInt(leg.qty_cents as string | number | bigint | boolean);
-  if (leg.qty != null) return BigInt(leg.qty as string | number | bigint | boolean);
-  return 0n;
+  return statementQuantity(ledger, assetId, row, amountConvention);
 }
 
 function importFingerprint(row: Row, signed: bigint): string {
@@ -1767,31 +1252,6 @@ function planRow(row: Row, action: string, quantity: bigint, counterpartId: stri
   };
 }
 
-function planRowsByAction(rows: Row[]): Record<string, Row[]> {
-  const grouped: Record<string, Row[]> = {};
-  for (const row of rows) {
-    const action = String(row.action);
-    grouped[action] = [...(grouped[action] ?? []), row];
-  }
-  return grouped;
-}
-
-function publicPlanRows(rows: Row[]): Row[] {
-  return rows.map((row) => {
-    const metadata = safeJson(row.metadata_json ?? row.metadata);
-    const sourceRow = safeJson(metadata.source_row);
-    const quantity = BigInt(row.quantity as string | number | bigint | boolean);
-    return {
-      ...row,
-      metadata,
-      quantity,
-      amount_cents: quantity,
-      amount: sourceRow.amount ?? metadata.amount ?? null,
-      candidates: metadata.candidates ?? []
-    };
-  });
-}
-
 function userFacingLiabilityBalance(args: Args): boolean {
   const statementType = String(args.statement_type ?? "").toLowerCase().replace(/[\s_-]+/g, "");
   const balanceSign = String(args.balance_sign ?? args.balance_basis ?? "").toLowerCase().replace(/[\s_-]+/g, "");
@@ -1800,50 +1260,10 @@ function userFacingLiabilityBalance(args: Args): boolean {
 
 function expectedStatementBalance(ledger: Ledger, accountId: string, assetId: string, args: Args): bigint | null {
   if (args.expected_balance == null) return null;
-  let expected = amountToQuantity(ledger, assetId, args.expected_balance);
+  let expected = signedMoneyAmount(ledger, assetId, args.expected_balance, "Expected balance");
   const accountRow = ledger.getAccount(accountId);
   if (accountRow?.account_type === "liability" && expected > 0n && userFacingLiabilityBalance(args)) expected = -expected;
   return expected;
-}
-
-function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = {}): Row {
-  const publicRows = publicPlanRows(rows);
-  const grouped = planRowsByAction(publicRows);
-  const summary = Object.fromEntries(["matched", "pending_to_commit", "new_posted", "new_pending", "stale_pending_to_void", "ambiguous", "ignored"].map((action) => [action, grouped[action]?.length ?? 0]));
-  const realizedPlannedRows = (extra.realized_planned_rows as Row[] | undefined) ?? [];
-  const warnings = [
-    ...(summary.ambiguous > 0 ? ["ambiguous rows require manual review"] : []),
-    ...(realizedPlannedRows.length > 0 ? ["realized planned rows should be reconciled or voided before planned projections"] : [])
-  ];
-  return {
-    plan_id: plan?.id ?? null,
-    status: plan?.status ?? "preview",
-    account_id: plan?.account_id ?? extra.account_id,
-    asset_id: plan?.asset_id ?? extra.asset_id,
-    expected_balance_cents: plan?.expected_balance ?? extra.expected_balance_cents ?? null,
-    planned_balance_cents: plan?.planned_balance ?? extra.planned_balance_cents ?? null,
-    applied_balance_cents: plan?.applied_balance ?? null,
-    balance_matches: extra.balance_matches ?? null,
-    balance_sign: extra.balance_sign ?? null,
-    rows: publicRows.slice(0, extra.sample_limit ?? 20),
-    total_rows: publicRows.length,
-    actions: summary,
-    matched: summary.matched,
-    unmatched: summary.new_posted + summary.new_pending + summary.pending_to_commit + summary.stale_pending_to_void + summary.ambiguous,
-    reconciled: summary.new_posted + summary.new_pending + summary.pending_to_commit + summary.stale_pending_to_void + summary.ambiguous === 0,
-    matched_rows: grouped.matched ?? [],
-    pending_to_commit: grouped.pending_to_commit ?? [],
-    stale_pending_to_void: grouped.stale_pending_to_void ?? [],
-    new_posted: grouped.new_posted ?? [],
-    new_pending: grouped.new_pending ?? [],
-    ambiguous: grouped.ambiguous ?? [],
-    ignored: grouped.ignored ?? [],
-    realized_planned_rows: realizedPlannedRows,
-    realized_planned_count: realizedPlannedRows.length,
-    warnings,
-    dry_run: extra.dry_run ?? true,
-    ...extra
-  };
 }
 
 function buildStatementPlan(ledger: Ledger, args: Args, options: { persist?: boolean; targetStatus?: TxStatus | string; rows?: Row[]; file?: Row } = {}): Row {
@@ -2426,7 +1846,7 @@ const handlers: Record<ToolName, Handler> = {
     const fromAccountId = account(ledger, args.from_account_id);
     const toAccountId = account(ledger, args.to_account_id);
     const assetId = transactionAsset(ledger, fromAccountId, toAccountId, args.asset_id);
-    const quantity = amountToQuantity(ledger, assetId, args.amount);
+    const quantity = positiveMoneyAmount(ledger, assetId, args.amount, "Transaction amount");
     const tx = ledger.recordTransaction(validateDate(args.date), quantity, fromAccountId, toAccountId, assetId, args.description ?? "", args.status ?? "pending");
     if (args.branch) {
       handlers.create_branch(ledger, { name: args.branch });
@@ -2459,7 +1879,7 @@ const handlers: Record<ToolName, Handler> = {
   record_opening_balance: (ledger, args) => {
     const accountId = account(ledger, args.account_id);
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : accountAsset(ledger, accountId);
-    return txPublic(ledger, ledger.recordOpeningBalance(accountId, amountToQuantity(ledger, assetId, args.amount), assetId, validateDate(args.date), args.status ?? "pending", args.counterpart_account_id ? account(ledger, args.counterpart_account_id) : null));
+    return txPublic(ledger, ledger.recordOpeningBalance(accountId, signedMoneyAmount(ledger, assetId, args.amount, "Opening balance"), assetId, validateDate(args.date), args.status ?? "pending", args.counterpart_account_id ? account(ledger, args.counterpart_account_id) : null));
   },
   record_opening_balances: (ledger, args) => {
     const rows = (args.balances ?? []).map((row: Row) => handlers.record_opening_balance(ledger, { ...row, date: args.date, status: args.status ?? "pending" }));
@@ -2732,7 +2152,7 @@ const handlers: Record<ToolName, Handler> = {
     const pendingLiabilities = liabilityBreakdown.reduce((sum: bigint, row: Row) => sum + BigInt(row.pending_liability_effect_cents), 0n);
     const plannedLiabilities = liabilityBreakdown.reduce((sum: bigint, row: Row) => sum + BigInt(row.planned_liability_effect_cents), 0n);
     const liabilityEffect = postedLiabilities + pendingLiabilities + plannedLiabilities;
-    const earmarkItems = (args.earmarks ?? []).map((row: Row, index: number) => ({ name: row.name ?? row.label ?? `Earmark ${index + 1}`, amount_cents: amountToQuantity(ledger, quote, row.amount ?? 0) }));
+    const earmarkItems = (args.earmarks ?? []).map((row: Row, index: number) => ({ name: row.name ?? row.label ?? `Earmark ${index + 1}`, amount_cents: nonNegativeMoneyAmount(ledger, quote, row.amount ?? 0, "Earmark amount") }));
     const earmarks = earmarkItems.reduce((sum: bigint, row: Row) => sum + BigInt(row.amount_cents), 0n);
     const budget = args.year == null || args.month == null ? null : handlers.budget_summary(ledger, { year: args.year, month: args.month, quote_asset_id: quote, include_pending: args.include_pending === true }) as Row;
     const plannedIncome = args.include_planned === true ? positive(plannedCash) : 0n;
@@ -2942,8 +2362,7 @@ const handlers: Record<ToolName, Handler> = {
     const acct = ledger.getAccount(account(ledger, args.account))!;
     if (acct.account_type !== "expense") throw new Error("Budgets can only be set on expense accounts");
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : accountAsset(ledger, acct.id);
-    const quantity = amountToQuantity(ledger, assetId, args.amount);
-    if (quantity < 0n) throw new Error("Budget amount cannot be negative");
+    const quantity = nonNegativeMoneyAmount(ledger, assetId, args.amount, "Budget amount");
     ledger.setBudget(acct.id, assetId, quantity, args.period ?? "monthly", args.year ?? null, args.month ?? null, Boolean(args.rollover));
     return { account_id: acct.id, asset_id: assetId, quantity, amount_cents: quantity, period: args.period ?? "monthly", year: args.year ?? null, month: args.month ?? null, rollover: Boolean(args.rollover) };
   },
@@ -3059,8 +2478,7 @@ const handlers: Record<ToolName, Handler> = {
     const acct = ledger.getAccount(account(ledger, args.account))!;
     if (acct.account_type !== "asset") throw new Error("Goals can only be set on asset accounts");
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : accountAsset(ledger, acct.id);
-    const quantity = amountToQuantity(ledger, assetId, args.target);
-    if (quantity <= 0n) throw new Error("Goal target must be positive");
+    const quantity = positiveMoneyAmount(ledger, assetId, args.target, "Goal target");
     ledger.setGoal(acct.id, assetId, quantity, args.name, args.target_date ?? null, args.priority ?? 1);
     return { account_id: acct.id, asset_id: assetId, name: args.name, target_quantity: quantity, target_cents: quantity, target_date: args.target_date ?? null, priority: args.priority ?? 1 };
   },
@@ -3187,7 +2605,10 @@ const handlers: Record<ToolName, Handler> = {
     ledger.updateSourceStatus(args.batch_id, "rolled_back");
     return { batch_id: args.batch_id, rolled_back: txIds.length, tx_ids: txIds };
   },
-  reverse_ledger_operation: (ledger, args) => reverseLedgerOperation(ledger, args),
+  reverse_ledger_operation: (ledger, args) => reverseLedgerOperationWithDeps(ledger, args, {
+    txWithEntries: (txId) => txWithEntries(ledger, txId),
+    tagTx: (txId, key, value) => tagTx(ledger, txId, key, value)
+  }),
   commit_batch: (ledger, args) => {
     const selected = selectBatchTransactions(ledger, args);
     if (!args.dry_run) {
@@ -3299,15 +2720,14 @@ const handlers: Record<ToolName, Handler> = {
     const text = stringifyPublic(doc);
     const content_hash = createHash("sha256").update(text).digest("hex");
     if (args.output_path) {
-      const output = resolveToolWritePath(ledger.path, args.output_path, new Set([".json"]));
-      writeFileSync(output, text, "utf8");
+      const output = writeToolTextFile(ledger.path, args.output_path, text, new Set([".json"]));
       return { file: redactToolPath(ledger.path, output), content_hash };
     }
     return { data: text, content_hash };
   },
   import_ledger: (ledger, args) => {
     if (Boolean(args.file_path) === Boolean(args.data)) throw new Error("Exactly one of file_path or data is required");
-    const text = args.file_path ? readFileSync(resolveToolReadPath(ledger.path, args.file_path, new Set([".json"])), "utf8") : String(args.data);
+    const text = args.file_path ? readToolTextFile(ledger.path, args.file_path, new Set([".json"])).text : String(args.data);
     assertToolDataSize(text);
     return ledger.importDocument(JSON.parse(text), args.preserve_ids !== false, Boolean(args.dry_run));
   },
@@ -3318,9 +2738,8 @@ const handlers: Record<ToolName, Handler> = {
   fx_transfer: (ledger, args) => {
     const fromAsset = asset(ledger, args.from_asset_id);
     const toAsset = asset(ledger, args.to_asset_id);
-    const fromQty = amountToQuantity(ledger, fromAsset, args.from_amount);
-    const toQty = amountToQuantity(ledger, toAsset, args.to_amount);
-    if (fromQty <= 0n || toQty <= 0n) throw new Error("FX transfer amounts must be positive");
+    const fromQty = positiveMoneyAmount(ledger, fromAsset, args.from_amount, "FX source amount");
+    const toQty = positiveMoneyAmount(ledger, toAsset, args.to_amount, "FX target amount");
     const txDate = validateDate(args.date);
     const txId = ledger.postTx(txDate, args.status ?? "posted", args.description, [
       [account(ledger, args.from_account_id), fromAsset, -fromQty],
@@ -3336,7 +2755,7 @@ const handlers: Record<ToolName, Handler> = {
     const fromAccountId = account(ledger, args.from_account_id);
     const toAccountId = account(ledger, args.to_account_id);
     const assetId = transactionAsset(ledger, fromAccountId, toAccountId, args.asset_id);
-    const row = ledger.createRecurrence(validateDate(args.date), amountToQuantity(ledger, assetId, args.amount), fromAccountId, toAccountId, args.description ?? "", args.frequency ?? "monthly", args.end_date ? validateDate(String(args.end_date)) : null, assetId);
+    const row = ledger.createRecurrence(validateDate(args.date), positiveMoneyAmount(ledger, assetId, args.amount, "Scheduled transaction amount"), fromAccountId, toAccountId, args.description ?? "", args.frequency ?? "monthly", args.end_date ? validateDate(String(args.end_date)) : null, assetId);
     return { id: row.id, next_date: args.date, frequency: args.frequency ?? "monthly" };
   },
   list_scheduled: (ledger) => ledger.listRecurrences(),
@@ -3504,8 +2923,8 @@ const handlers: Record<ToolName, Handler> = {
       ...projectionAccounts
     }) as Row;
     const quote = reportAsset(ledger, args.quote_asset_id);
-    const inflows = [...(args.expected_inflows ?? []), ...(args.expected_paychecks ?? [])].reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
-    const outflows = (args.expected_outflows ?? []).reduce((sum: bigint, row: Row) => sum + amountToQuantity(ledger, quote, row.amount ?? 0), 0n);
+    const inflows = [...(args.expected_inflows ?? []), ...(args.expected_paychecks ?? [])].reduce((sum: bigint, row: Row) => sum + nonNegativeMoneyAmount(ledger, quote, row.amount ?? 0, "Expected inflow amount"), 0n);
+    const outflows = (args.expected_outflows ?? []).reduce((sum: bigint, row: Row) => sum + nonNegativeMoneyAmount(ledger, quote, row.amount ?? 0, "Expected outflow amount"), 0n);
     return { ...projection, projected_month_end_cents: BigInt(projection.available_cash_cents) + inflows - outflows };
   },
   project_balances: (ledger, args) => {
@@ -3530,22 +2949,17 @@ const handlers: Record<ToolName, Handler> = {
   },
 
   create_branch: (ledger, args) => {
-    const branch = ledger.createScenarioBook(args.name);
-    return { id: branch.id, name: branch.name, discarded_at: branch.closed_at ?? null };
+    return createScenarioBranch(ledger, args.name);
   },
-  list_branches: (ledger) => ledger.listScenarioBooks().map((row) => ({ ...row, merged_at: null, discarded_at: row.closed_at })),
+  list_branches: (ledger) => listScenarioBranches(ledger),
   merge_branch: (ledger, args) => {
-    const branch = ledger.getScenarioBook(String(args.source));
-    if (!branch) throw new Error(`Scenario '${String(args.source)}' not found`);
-    if (branch.closed_at != null) throw new Error(`Scenario '${String(args.source)}' is discarded`);
+    const branch = resolveOpenScenarioBranch(ledger, String(args.source));
     ledger.createAnnotation("book", String(branch.id), "merged_at", now());
     return { merged: branch.id, name: branch.name };
   },
   discard_branch: (ledger, args) => {
-    const branch = ledger.getScenarioBook(String(args.name));
-    if (!branch) throw new Error(`Scenario '${String(args.name)}' not found`);
-    const discarded = ledger.discardScenarioBook(String(args.name));
-    return { discarded: branch.id, name: branch.name, updated: discarded };
+    const { branch, updated } = discardScenarioBranch(ledger, String(args.name));
+    return { discarded: branch.id, name: branch.name, updated };
   },
   compare_scenarios: (ledger, args) => {
     const assetId = asset(ledger, args.asset_id);
@@ -3564,7 +2978,7 @@ const handlers: Record<ToolName, Handler> = {
     const accountId = account(ledger, args.account_id);
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : accountAsset(ledger, accountId);
     const actual = ledger.balanceTree(accountId, assetId, optionalDate(args.date), parseTxStatusFilter(args.status));
-    const expected = amountToQuantity(ledger, assetId, args.expected);
+    const expected = signedMoneyAmount(ledger, assetId, args.expected, "Expected balance");
     return { account_id: accountId, expected_cents: expected, actual_cents: actual, matches: actual === expected, difference_cents: actual - expected, date: args.date ?? null };
   },
   assert_balances: (ledger, args) => {
@@ -3576,7 +2990,7 @@ const handlers: Record<ToolName, Handler> = {
     const offset = account(ledger, args.offset_account_id);
     const assetId = args.asset_id ? explicitAsset(ledger, args.asset_id) : accountAsset(ledger, accountId);
     const current = ledger.balanceTree(accountId, assetId);
-    const target = amountToQuantity(ledger, assetId, args.target_balance);
+    const target = signedMoneyAmount(ledger, assetId, args.target_balance, "Target balance");
     const diff = target - current;
     if (args.dry_run || diff === 0n) return { current_cents: current, target_cents: target, difference_cents: diff, dry_run: Boolean(args.dry_run), posted: false };
     const date = validateDate(args.date);
@@ -3702,8 +3116,8 @@ const handlers: Record<ToolName, Handler> = {
   buy_security: (ledger, args) => {
     const investmentAccount = account(ledger, args.account_id);
     const cashAsset = args.asset_id ? explicitAsset(ledger, args.asset_id) : accountAsset(ledger, investmentAccount);
-    const shares = toAtomicUnits(args.shares, 8);
-    const totalCost = BigInt(args.total_cost_cents) + BigInt(args.commission_cents ?? 0);
+    const shares = positiveShareQuantity(args.shares);
+    const totalCost = positiveAtomicQuantity(BigInt(args.total_cost_cents) + BigInt(args.commission_cents ?? 0), "Security cost");
     const tx = ledger.recordSecurityPurchase({ symbol: args.symbol, shares, totalCost, cashAssetId: cashAsset, investmentAccountId: investmentAccount, date: validateDate(args.date), status: args.status ?? "posted" });
     return txWithEntries(ledger, tx.id);
   },
@@ -3722,7 +3136,7 @@ const handlers: Record<ToolName, Handler> = {
   recognize_gain_loss: (ledger, args) => {
     const gainLoss = args.gain_loss_account_id ? account(ledger, args.gain_loss_account_id) : ledger.getOrCreateAccount("Investment Gain/Loss", "income");
     const assetId = asset(ledger, args.asset_id);
-    const amount = amountToQuantity(ledger, assetId, args.amount);
+    const amount = signedMoneyAmount(ledger, assetId, args.amount, "Gain/loss amount");
     return amount >= 0n
       ? handlers.create_transaction(ledger, { date: args.date, amount: args.amount, from_account_id: gainLoss, to_account_id: args.investment_account_id, description: args.description, status: args.status ?? "posted", asset_id: assetId })
       : handlers.create_transaction(ledger, { date: args.date, amount: display(ledger, -amount, assetId), from_account_id: args.investment_account_id, to_account_id: gainLoss, description: args.description, status: args.status ?? "posted", asset_id: assetId });
@@ -3849,18 +3263,7 @@ const handlers: Record<ToolName, Handler> = {
   }
 };
 
-export const TOOL_SPECS = defineTools(Object.entries(TOOL_DEFINITIONS).map(([name, definition]) => {
-  const toolName = name as ToolName;
-  const safety = toolSafety(toolName);
-  return {
-    name: toolName,
-    definition,
-    safety,
-    workflow: toolWorkflow(toolName),
-    mutation: toolMutation(toolName, safety),
-    handler: handlers[toolName]
-  };
-}));
+export const TOOL_SPECS = defineTools(buildToolSpecs(TOOL_DEFINITIONS, handlers, toolSafety));
 
 export const TOOL_SPEC_BY_NAME = toolSpecMap(TOOL_SPECS);
 export const TOOL_NAMES = deriveToolNames(TOOL_SPECS);

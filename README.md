@@ -363,8 +363,12 @@ status.
 Creation tools still require a real lifecycle status: `posted`, `pending`,
 `planned`, or `void`.
 
-File tools use ordinary filesystem permissions. Suffix checks, overwrite
-protection, and `CLOVIS_MAX_FILE_BYTES` still apply.
+File tools default to `CLOVIS_FILE_POLICY=unrestricted`, which means ordinary
+filesystem permissions decide what can be read or written. Suffix checks,
+overwrite protection, and `CLOVIS_MAX_FILE_BYTES` still apply. Set
+`CLOVIS_FILE_POLICY=ledger-dir` to keep file tools inside the ledger directory,
+or `CLOVIS_FILE_POLICY=roots` with `CLOVIS_FILE_ROOTS=/path/a:/path/b` to allow
+only specific roots.
 
 Agents can call `file_access_status`, or inspect the `file_access` block in
 `tool_registry`, to see the active file policy and max file size. For a hard
@@ -405,12 +409,13 @@ Start the MCP server against a specific local ledger database:
 CLOVIS_DB=./ledger.db clovis-mcp
 ```
 
-`clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools use ordinary filesystem
-permissions. MCP and CLI tools share the same catalog and behavior: bulk
-mutation tools preview by default, and callers must pass `dry_run:false` or an
-equivalent commit argument to apply changes. For tools without native dry-run
-output, use `preview_mutation` or pass generic `dry_run:true` through the tool
-schema to get the overseer diff.
+`clovis-mcp` requires `CLOVIS_DB`. File-based MCP tools default to
+`CLOVIS_FILE_POLICY=unrestricted`; use `ledger-dir` or `roots` when the process
+itself should enforce path boundaries. MCP and CLI tools share the same catalog
+and behavior: bulk mutation tools preview by default, and callers must pass
+`dry_run:false` or an equivalent commit argument to apply changes. For tools
+without native dry-run output, use `preview_mutation` or pass generic
+`dry_run:true` through the tool schema to get the overseer diff.
 
 Treat the MCP server as a trusted local control plane. Clovis does not
 authenticate MCP clients or enforce per-tool capability grants inside the server;
