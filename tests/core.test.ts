@@ -633,8 +633,13 @@ describe("app and package surface", () => {
 
   it("keeps app policy owners out of the catalog dispatcher", () => {
     const catalog = readFileSync(join(process.cwd(), "src/app/catalog.ts"), "utf8");
+    const signatures = readFileSync(join(process.cwd(), "src/app/signatures.ts"), "utf8");
+    const definitions = readFileSync(join(process.cwd(), "src/app/tools/definitions.ts"), "utf8");
+    const runtime = readFileSync(join(process.cwd(), "src/app/tool-runtime.ts"), "utf8");
     const filesystem = readFileSync(join(process.cwd(), "src/app/filesystem.ts"), "utf8");
+    const ledger = readFileSync(join(process.cwd(), "src/core/ledger.ts"), "utf8");
 
+    expect(catalog.split(/\r?\n/).length).toBeLessThan(80);
     expect(catalog).not.toMatch(/\b(readFileSync|writeFileSync)\b/);
     expect(catalog).not.toContain("function reverseLedgerOperation");
     expect(catalog).not.toContain("function genericReversalRows");
@@ -644,8 +649,14 @@ describe("app and package surface", () => {
     expect(catalog).not.toContain("function toolMutation");
     expect(catalog).not.toContain("amountToQuantity");
     expect(catalog).not.toContain("toAtomicUnits");
+    expect(signatures).not.toContain("export const TOOL_DEFINITIONS =");
+    expect(definitions).toContain("export const TOOL_DEFINITIONS =");
+    expect(runtime).not.toMatch(/\b(existsSync|readdirSync|statSync|writeFileSync)\b/);
     expect(filesystem).toContain('type FilePolicyMode = "unrestricted" | "ledger-dir" | "roots"');
     expect(filesystem).toContain('process.env.CLOVIS_FILE_POLICY ?? "unrestricted"');
+    expect(ledger).not.toContain("migrateToV2");
+    expect(ledger).not.toContain("INSERT INTO ledger_operations");
+    expect(ledger).not.toContain("writeFileSync");
   });
 
   it("round-trips ledger export/import through public JSON", () => {

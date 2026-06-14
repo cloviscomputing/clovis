@@ -12,7 +12,8 @@ Operation ledger release.
 - Make posted `recategorize_transaction` append-only by posting correction journals instead of rewriting posted history, with reversible operation records.
 - Add native `backup_now(dry_run:true)` so filesystem-side-effect previews do not write backup files.
 - Add explicit `CLOVIS_FILE_POLICY=unrestricted | ledger-dir | roots` handling while keeping `unrestricted` as the default local-agent mode.
-- Split amount validation, file policy, operation reversal, scenario branch policy, statement-plan output, and tool classification out of the catalog dispatcher.
+- Split amount validation, file policy, backup file handling, operation reversal, scenario branch policy, statement-plan output, tool definitions/spec construction, and tool classification out of the catalog dispatcher.
+- Extract low-risk core migration, ledger-operation audit, and CSV export helpers while keeping the public `Ledger` API intact.
 
 ## 0.2.8
 

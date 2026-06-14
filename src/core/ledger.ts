@@ -1,8 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { annotateAccount, annotateAmounts, debitCredit, normalAmount, normalSide } from "./accounting.js";
+import { exportTransactionsCsv as exportTransactionsCsvDocument } from "./ledger-export.js";
+import { migrateSchema } from "./migrations.js";
+import {
+  getLedgerOperationRow,
+  insertLedgerOperation,
+  listLedgerOperationRows as auditOperationRows,
+  listLedgerOperationRowsByBook,
+  markLedgerOperationReversedRow,
+  reverseAuditRows
+} from "./operation-audit.js";
 import { DEFAULT_BOOK_ID, DDL, SCHEMA_VERSION } from "./schema.js";
 import type { Account, AccountBalance, AccountType, Asset, AssetType, Journal, JournalLine, Price, TxStatus } from "./types.js";
 import { InvariantError } from "./types.js";
@@ -247,7 +257,7 @@ export class Ledger {
       this.db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
       this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (?, ?, ?)").run(SCHEMA_VERSION, "initial schema", now());
     } else if (currentVersion < SCHEMA_VERSION) {
-      this.migrate(currentVersion);
+      migrateSchema(this.db, currentVersion);
       this.db.exec(DDL);
     } else {
       this.db.exec(DDL);
@@ -265,55 +275,6 @@ export class Ledger {
     if (!meta) return 0;
     const row = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as Row | undefined;
     return Number(row?.value ?? 1);
-  }
-
-  private hasColumn(table: string, column: string): boolean {
-    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).some((row) => String(row.name) === column);
-  }
-
-  private migrate(currentVersion: number): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (currentVersion < 2) this.migrateToV2();
-      if (currentVersion < 3) this.migrateToV3();
-      if (currentVersion < 4) this.migrateToV4();
-      this.db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  private migrateToV2(): void {
-    this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
-    if (!this.hasColumn("accounts", "default_asset_id")) this.db.exec("ALTER TABLE accounts ADD COLUMN default_asset_id TEXT REFERENCES assets(id)");
-    if (!this.hasColumn("journals", "finalized_at")) this.db.exec("ALTER TABLE journals ADD COLUMN finalized_at TEXT");
-    this.db.exec(`
-      UPDATE accounts
-      SET default_asset_id = (
-        SELECT value FROM annotations
-        WHERE annotations.book_id = accounts.book_id
-          AND annotations.entity_type = 'account'
-          AND annotations.entity_id = accounts.id
-          AND annotations.key = 'default_asset'
-        ORDER BY annotations.rowid DESC
-        LIMIT 1
-      )
-      WHERE default_asset_id IS NULL
-    `);
-    this.db.exec("UPDATE journals SET finalized_at = posted_at WHERE finalized_at IS NULL");
-    this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (2, 'add finalized journals and account default assets', ?)").run(now());
-  }
-
-  private migrateToV3(): void {
-    this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
-    this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (3, 'add statement import plans', ?)").run(now());
-  }
-
-  private migrateToV4(): void {
-    this.db.exec("CREATE TABLE IF NOT EXISTS migration_history(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
-    this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (4, 'add ledger operation audit records', ?)").run(now());
   }
 
   createAsset(symbol: string, type: AssetType | string = "currency", scale = 2, name = ""): string {
@@ -614,83 +575,25 @@ export class Ledger {
 
   createLedgerOperation(input: Row, rows: Row[]): Row {
     return this.transaction(() => {
-      const operationId = String(input.id ?? id("op"));
-      const createdAt = String(input.created_at ?? now());
-      this.db.prepare(`
-        INSERT INTO ledger_operations(
-          id, book_id, tool_name, operation_type, status, created_at, reversed_at,
-          reversed_by_operation_id, reverses_operation_id, input_json, preview_json, result_json, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        operationId,
-        this.bookId,
-        String(input.tool_name ?? ""),
-        String(input.operation_type ?? ""),
-        String(input.status ?? "applied"),
-        createdAt,
-        input.reversed_at == null ? null : String(input.reversed_at),
-        input.reversed_by_operation_id == null ? null : String(input.reversed_by_operation_id),
-        input.reverses_operation_id == null ? null : String(input.reverses_operation_id),
-        String(input.input_json ?? JSON.stringify(input.input ?? {})),
-        String(input.preview_json ?? JSON.stringify(input.preview ?? {})),
-        String(input.result_json ?? JSON.stringify(input.result ?? {})),
-        String(input.metadata_json ?? JSON.stringify(input.metadata ?? {}))
-      );
-      rows.forEach((row, index) => {
-        this.db.prepare(`
-          INSERT INTO ledger_operation_rows(
-            id, book_id, operation_id, row_index, entity_type, entity_id, action,
-            before_hash, after_hash, before_json, after_json, correction_journal_id,
-            reverse_journal_id, metadata_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          String(row.id ?? id("oprow")),
-          this.bookId,
-          operationId,
-          Number(row.row_index ?? index),
-          String(row.entity_type),
-          String(row.entity_id),
-          String(row.action),
-          row.before_hash == null ? null : String(row.before_hash),
-          row.after_hash == null ? null : String(row.after_hash),
-          row.before_json == null ? null : String(row.before_json),
-          row.after_json == null ? null : String(row.after_json),
-          row.correction_journal_id == null ? null : String(row.correction_journal_id),
-          row.reverse_journal_id == null ? null : String(row.reverse_journal_id),
-          String(row.metadata_json ?? JSON.stringify(row.metadata ?? {}))
-        );
-      });
+      const operationId = insertLedgerOperation(this.db, this.bookId, input, rows);
       return this.getLedgerOperation(operationId)!;
     });
   }
 
   getLedgerOperation(operationId: string): Row | null {
-    return (this.db.prepare("SELECT rowid AS _rowid, * FROM ledger_operations WHERE book_id = ? AND id = ?").get(this.bookId, operationId) as Row | undefined) ?? null;
+    return getLedgerOperationRow(this.db, this.bookId, operationId);
   }
 
   listLedgerOperations(limit: number | null = 50): Row[] {
-    let sql = "SELECT rowid AS _rowid, * FROM ledger_operations WHERE book_id = ? ORDER BY rowid DESC";
-    const params: SQLInputValue[] = [this.bookId];
-    if (limit != null) {
-      sql += " LIMIT ?";
-      params.push(limit);
-    }
-    return this.db.prepare(sql).all(...params) as Row[];
+    return listLedgerOperationRowsByBook(this.db, this.bookId, limit);
   }
 
   listLedgerOperationRows(operationId: string): Row[] {
-    return this.db.prepare("SELECT * FROM ledger_operation_rows WHERE book_id = ? AND operation_id = ? ORDER BY row_index, id").all(this.bookId, operationId) as Row[];
+    return auditOperationRows(this.db, this.bookId, operationId);
   }
 
   markLedgerOperationReversed(operationId: string, reversedByOperationId: string): Row {
-    const result = this.db.prepare("UPDATE ledger_operations SET status = 'reversed', reversed_at = ?, reversed_by_operation_id = ? WHERE book_id = ? AND id = ?").run(
-      now(),
-      reversedByOperationId,
-      this.bookId,
-      operationId
-    );
-    if (Number(result.changes) !== 1) throw new Error(`Ledger operation ${operationId} was not marked reversed`);
-    return this.getLedgerOperation(operationId)!;
+    return markLedgerOperationReversedRow(this.db, this.bookId, operationId, reversedByOperationId);
   }
 
   runInTransaction<T>(fn: () => T): T {
@@ -729,69 +632,7 @@ export class Ledger {
   }
 
   reverseRows(rows: Array<{ table: string; action: string; before?: Row | null; after?: Row | null }>): Row[] {
-    const sqlIdentifier = (value: string): string => {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("Invalid SQL identifier");
-      return value;
-    };
-    const primaryKey = (table: string): string => table === "meta" ? "key" : table === "migration_history" ? "version" : "id";
-    const sqlValue = (value: unknown): SQLInputValue => {
-      if (value === undefined) return null;
-      if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "bigint") return value;
-      if (typeof value === "boolean") return value ? 1 : 0;
-      return JSON.stringify(value);
-    };
-    const whereByPrimaryKey = (table: string, row: Row): { sql: string; params: SQLInputValue[] } => {
-      const pk = primaryKey(table);
-      if (row[pk] == null) throw new Error(`Cannot reverse ${table} row without ${pk}`);
-      const params: SQLInputValue[] = [sqlValue(row[pk])];
-      let sql = `${sqlIdentifier(pk)} = ?`;
-      if (row.book_id != null) {
-        sql += " AND book_id = ?";
-        params.push(sqlValue(row.book_id));
-      }
-      return { sql, params };
-    };
-    const runOne = (sql: string, params: SQLInputValue[], message: string): void => {
-      const result = this.db.prepare(sql).run(...params);
-      if (Number(result.changes) !== 1) throw new Error(message);
-    };
-    const insertRow = (table: string, row: Row): void => {
-      const columns = this.tableColumns(table).filter((column) => Object.prototype.hasOwnProperty.call(row, column));
-      const placeholders = columns.map(() => "?").join(", ");
-      runOne(`INSERT INTO ${sqlIdentifier(table)}(${columns.map(sqlIdentifier).join(", ")}) VALUES (${placeholders})`, columns.map((column) => sqlValue(row[column])), `Failed to restore ${table} row`);
-    };
-    const updateRow = (table: string, row: Row): void => {
-      const pk = primaryKey(table);
-      const columns = this.tableColumns(table).filter((column) => column !== pk && Object.prototype.hasOwnProperty.call(row, column));
-      const assignments = columns.map((column) => `${sqlIdentifier(column)} = ?`).join(", ");
-      const where = whereByPrimaryKey(table, row);
-      runOne(`UPDATE ${sqlIdentifier(table)} SET ${assignments} WHERE ${where.sql}`, [...columns.map((column) => sqlValue(row[column])), ...where.params], `Failed to restore ${table} row`);
-    };
-    const deleteRow = (table: string, row: Row): void => {
-      const where = whereByPrimaryKey(table, row);
-      runOne(`DELETE FROM ${sqlIdentifier(table)} WHERE ${where.sql}`, where.params, `Failed to remove inserted ${table} row`);
-    };
-
-    return this.transaction(() => {
-      const reversed: Row[] = [];
-      for (const row of rows) {
-        const table = sqlIdentifier(row.table);
-        if (row.action === "insert") {
-          if (!row.after) throw new Error(`Cannot reverse ${table} insert without after row`);
-          deleteRow(table, row.after);
-        } else if (row.action === "delete") {
-          if (!row.before) throw new Error(`Cannot reverse ${table} delete without before row`);
-          insertRow(table, row.before);
-        } else if (row.action === "update") {
-          if (!row.before) throw new Error(`Cannot reverse ${table} update without before row`);
-          updateRow(table, row.before);
-        } else {
-          throw new Error(`Unsupported row reversal action: ${row.action}`);
-        }
-        reversed.push({ table, action: row.action, entity_id: row.after?.id ?? row.before?.id ?? null });
-      }
-      return reversed;
-    });
+    return this.transaction(() => reverseAuditRows(this.db, rows));
   }
 
   countTransactions(): number {
@@ -3042,20 +2883,6 @@ export class Ledger {
   }
 
   exportTransactionsCsv(outputPath?: string | null, options: { accountId?: string | null; dateFrom?: string | null; dateTo?: string | null; status?: TxStatus | string | null } = {}) {
-    const rows = ["date,description,amount,account_id,tx_id"];
-    const status = options.status == null ? "all" : options.status;
-    for (const tx of this.listTransactions({ status, dateFrom: options.dateFrom, dateTo: options.dateTo })) {
-      for (const entry of this.getEntries(tx.id).filter((line) => !options.accountId || line.account_id === options.accountId)) {
-        const desc = `"${tx.description.replaceAll('"', '""')}"`;
-        rows.push(`${tx.date},${desc},${entry.quantity.toString()},${entry.account_id},${tx.id}`);
-      }
-    }
-    const csv = `${rows.join("\n")}\n`;
-    if (outputPath) {
-      mkdirSync(dirname(outputPath), { recursive: true });
-      writeFileSync(outputPath, csv, "utf8");
-      return { exported: rows.length - 1, csv: null, file: outputPath };
-    }
-    return { exported: rows.length - 1, csv, file: null };
+    return exportTransactionsCsvDocument(this, outputPath, options);
   }
 }
