@@ -659,6 +659,32 @@ describe("app and package surface", () => {
     expect(ledger).not.toContain("writeFileSync");
   });
 
+  it("keeps tool handler implementations split by workflow", () => {
+    const runtime = readFileSync(join(process.cwd(), "src/app/tool-runtime.ts"), "utf8");
+    const workflowFiles = [
+      ["accounts", "src/app/tools/accounts.ts", "accountHandlers", "create_account"],
+      ["transactions", "src/app/tools/transactions.ts", "transactionHandlers", "create_transaction"],
+      ["statements", "src/app/tools/statements.ts", "statementHandlers", "refresh_statement"],
+      ["reports", "src/app/tools/reports.ts", "reportHandlers", "cash_projection"],
+      ["budgets", "src/app/tools/budgets.ts", "budgetHandlers", "set_budget"],
+      ["maintenance", "src/app/tools/maintenance.ts", "maintenanceHandlers", "tool_registry"]
+    ] as const;
+    const contents = workflowFiles.map(([name, file, factory, sentinel]) => {
+      const text = readFileSync(join(process.cwd(), file), "utf8");
+      expect(text).toContain(`export function ${factory}`);
+      expect(text).toMatch(new RegExp(`\\n\\s{4}${sentinel}: \\(`));
+      return { name, text };
+    });
+
+    expect(runtime.split(/\r?\n/).length).toBeLessThan(2000);
+    expect(runtime).not.toMatch(/\n\s{2}(create_transaction|income_statement|set_budget|refresh_statement|tool_registry): \(/);
+
+    for (const toolName of TOOL_NAMES) {
+      const owners = contents.filter(({ text }) => new RegExp(`\\n\\s{4}${toolName}: \\(`).test(text)).map(({ name }) => name);
+      expect(owners, `${toolName} should be implemented in exactly one workflow file`).toHaveLength(1);
+    }
+  });
+
   it("round-trips ledger export/import through public JSON", () => {
     const source = tempLedger();
     const target = tempLedger();

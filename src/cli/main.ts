@@ -6,7 +6,7 @@ import { Command, Option } from "commander";
 import { defaultDbPath, openLedger } from "../app/context.js";
 import { callTool, TOOL_NAMES } from "../app/catalog.js";
 import { stringifyPublic, publicize } from "../app/json.js";
-import { TOOL_SIGNATURES } from "../app/signatures.js";
+import { TOOL_SIGNATURES, type ToolSignatureName } from "../app/signatures.js";
 import type { Ledger } from "../core/ledger.js";
 import { parseToolInput } from "../mcp/tools.js";
 import { VERSION } from "../version.js";
@@ -192,7 +192,7 @@ program.command("tools")
     "clovis --format json tools",
     "clovis tools | grep account_balances"
   ]))
-  .action(() => withOutput(program, () => TOOL_NAMES.map((name) => ({ name, signature: TOOL_SIGNATURES[name] }))));
+  .action(() => withOutput(program, () => TOOL_NAMES.map((name) => ({ name, signature: TOOL_SIGNATURES[name as ToolSignatureName] }))));
 
 program.command("doctor")
   .description("Run local diagnostics")
