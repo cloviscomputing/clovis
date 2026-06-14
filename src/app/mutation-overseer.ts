@@ -182,6 +182,10 @@ export function createOperation(ledger: Ledger, input: Row, rows: Row[]): Row {
   return operationPublic(ledger, operation);
 }
 
+export function recordMutationAudit(ledger: Ledger, input: Row, rows: Row[]): Row {
+  return createOperation(ledger, input, rows);
+}
+
 export function mutationPreview(ledger: Ledger, spec: ToolSpec, args: Args): Row {
   if (spec.safety.readOnlyHint) throw new Error(`Tool '${spec.name}' is read-only`);
   if (GENERIC_PREVIEW_FILE_SIDE_EFFECT_TOOLS.has(spec.name)) {

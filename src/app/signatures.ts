@@ -7,7 +7,7 @@ import type {
   ToolSafetyAnnotations,
   ToolTypeDefinition
 } from "./tool-spec.js";
-import { TOOL_DEFINITIONS, type ToolSignatureName } from "./tools/definitions.js";
+import { TOOL_CONTRACT_BY_NAME, TOOL_DEFINITIONS, type ToolSignatureName } from "./tools/definitions.js";
 
 export { TOOL_DEFINITIONS };
 export type { ToolSignatureName };
@@ -25,51 +25,24 @@ export type {
 
 export const STATUS_FILTER_VALUES = ["posted", "pending", "planned", "void", "active", "combined", "all"] as const;
 
-const READ_ONLY_TOOLS = new Set<string>([
-  "account_balances", "account_register", "age_of_money", "assert_balance", "assert_balances", "audit_categorization",
-  "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "cash_flow",
-  "cash_projection", "cash_runway", "compare_scenarios", "count_transactions", "detect_recurring", "export_ledger",
-  "export_transactions", "file_access_status", "financial_overview", "financial_picture", "find_pending_duplicates", "find_realized_planned", "forecast",
-  "forecast_month_end", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_ledger_operation", "get_price",
-  "get_transaction", "goal_progress", "holdings", "income_statement", "inspect_transaction", "integrity_check",
-  "list_accounts", "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries",
-  "list_entries_by_asset", "list_goals", "list_import_batches", "list_ledger_operations", "list_match_rules", "list_prices", "list_scheduled",
-  "list_tags", "list_transactions", "list_uncategorized", "list_unmatched_transfers", "net_worth", "operating_manual", "pending_summary",
-  "preview_commit", "preview_import", "preview_mutation", "project_balances", "project_month_end", "reconcile_diff", "reconcile_statement",
-  "reconcile_statement_plan", "search_transactions", "spending", "spending_rate", "suggest_budgets",
-  "top_descriptions", "tool_registry", "trial_balance", "unbudgeted_spending"
-]);
-
-const DESTRUCTIVE_TOOLS = new Set<string>([
-  "delete_account", "delete_asset", "delete_budget", "delete_budgets", "delete_goal", "delete_match_rule",
-  "delete_match_rules", "delete_tag", "delete_tags", "delete_transaction", "discard_batch", "discard_branch",
-  "merge_accounts", "migrate_asset_entries", "move_transactions", "reconcile_planned", "repair_integrity", "reverse_ledger_operation", "rollback_import",
-  "rollback_recategorize", "void_by_filter"
-]);
-
 function parameterNames(definition: ToolDefinition): Set<string> {
   return new Set(definition.parameters.map((parameter) => parameter[0]));
 }
 
 export function toolAnnotations(name: string): ToolSafetyAnnotations {
-  const readOnly = READ_ONLY_TOOLS.has(name);
+  const safety = TOOL_CONTRACT_BY_NAME[name as ToolSignatureName]?.safety;
   return {
-    readOnlyHint: readOnly,
-    destructiveHint: DESTRUCTIVE_TOOLS.has(name),
-    idempotentHint: readOnly,
+    readOnlyHint: safety?.readOnlyHint ?? false,
+    destructiveHint: safety?.destructiveHint ?? false,
+    idempotentHint: safety?.idempotentHint ?? false,
     openWorldHint: false
   };
 }
 
 export function toolSafety(name: string): ToolRuntimeSafety {
-  const definition = TOOL_DEFINITIONS[name as ToolSignatureName];
-  const dryRun = definition?.parameters.find((parameter) => parameter[0] === "dry_run");
-  const annotations = toolAnnotations(name);
-  return {
-    ...annotations,
-    supportsDryRun: !annotations.readOnlyHint || Boolean(dryRun),
-    defaultDryRun: dryRun?.[2]?.defaultValue === true
-  };
+  const safety = TOOL_CONTRACT_BY_NAME[name as ToolSignatureName]?.safety;
+  if (safety) return safety;
+  return { ...toolAnnotations(name), supportsDryRun: true, defaultDryRun: false };
 }
 
 const SYNTHETIC_DRY_RUN_PARAMETER = ["dry_run", "boolean", { optional: true, defaultValue: false }] as const satisfies ToolParameterDefinition;

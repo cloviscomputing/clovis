@@ -69,6 +69,31 @@ export type ToolSpec<Name extends string = string> = {
   handler: ToolHandler;
 };
 
+export type ToolContract<Name extends string = string> = Omit<ToolSpec<Name>, "handler">;
+
+export function defineToolGroup<const Contracts extends readonly ToolContract[]>(contracts: Contracts): Contracts {
+  const seen = new Set<string>();
+  for (const contract of contracts) {
+    if (!contract.name) throw new Error("Tool contract name is required");
+    if (seen.has(contract.name)) throw new Error(`Duplicate tool contract: ${contract.name}`);
+    seen.add(contract.name);
+    if (!contract.definition) throw new Error(`Tool '${contract.name}' is missing a definition`);
+    if (!contract.safety) throw new Error(`Tool '${contract.name}' is missing safety annotations`);
+  }
+  return contracts;
+}
+
+export function bindToolGroup<const Contracts extends readonly ToolContract[]>(
+  contracts: Contracts,
+  handlers: Record<string, ToolHandler>
+): Array<ToolSpec<Contracts[number]["name"]>> {
+  return contracts.map((contract) => {
+    const handler = handlers[contract.name];
+    if (typeof handler !== "function") throw new Error(`Tool '${contract.name}' is missing a handler`);
+    return { ...contract, handler };
+  });
+}
+
 export function defineTools<const Specs extends readonly ToolSpec[]>(specs: Specs): Specs {
   const seen = new Set<string>();
   for (const spec of specs) {
@@ -84,8 +109,16 @@ export function toolSpecMap<const Specs extends readonly ToolSpec[]>(specs: Spec
   return Object.fromEntries(specs.map((spec) => [spec.name, spec])) as Record<Specs[number]["name"], Specs[number]>;
 }
 
+export function toolContractMap<const Contracts extends readonly ToolContract[]>(contracts: Contracts): Record<Contracts[number]["name"], Contracts[number]> {
+  return Object.fromEntries(contracts.map((contract) => [contract.name, contract])) as Record<Contracts[number]["name"], Contracts[number]>;
+}
+
 export function deriveToolNames<const Specs extends readonly ToolSpec[]>(specs: Specs): Array<Specs[number]["name"]> {
   return specs.map((spec) => spec.name) as Array<Specs[number]["name"]>;
+}
+
+export function deriveToolDefinitionsFromContracts<const Contracts extends readonly ToolContract[]>(contracts: Contracts): Record<Contracts[number]["name"], ToolDefinition> {
+  return Object.fromEntries(contracts.map((contract) => [contract.name, contract.definition])) as Record<Contracts[number]["name"], ToolDefinition>;
 }
 
 export function deriveToolDefinitions<const Specs extends readonly ToolSpec[]>(specs: Specs): Record<Specs[number]["name"], ToolDefinition> {

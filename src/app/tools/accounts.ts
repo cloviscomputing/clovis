@@ -1,4 +1,252 @@
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../tool-runtime.js";
+import { defineToolGroup } from "../tool-spec.js";
+
+export const accountTools = defineToolGroup([
+  {
+    name: "create_asset",
+    definition: {
+      parameters: [
+        ["symbol", "string"],
+        ["asset_type", "string", { optional: true, defaultValue: "currency" }],
+        ["decimals", "integer", { optional: true, defaultValue: 2 }],
+        ["name", "string", { optional: true, defaultValue: "" }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "list_assets",
+    definition: {
+      parameters: [
+        ["asset_type", "string", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object[]" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "get_asset_by_symbol",
+    definition: {
+      parameters: [
+        ["symbol", "string"]
+      ],
+      returns: { type: "object", nullable: true }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "update_asset",
+    definition: {
+      parameters: [
+        ["asset_id", "string"],
+        ["symbol", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["name", "string", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "delete_asset",
+    definition: {
+      parameters: [
+        ["asset_id", "string"],
+        ["force", "boolean", { optional: true, defaultValue: false }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "migrate_asset_entries",
+    definition: {
+      parameters: [
+        ["from_asset_id", "string"],
+        ["to_asset_id", "string"],
+        ["dry_run", "boolean", { optional: true, defaultValue: true }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: true },
+    workflow: "setup",
+    mutation: "dry-run"
+  },
+  {
+    name: "create_account",
+    definition: {
+      parameters: [
+        ["name", "string"],
+        ["type", "string"],
+        ["code", "string", { optional: true, defaultValue: "" }],
+        ["parent_id", "string", { optional: true, defaultValue: "" }],
+        ["color_hex", "string", { optional: true, defaultValue: "#888888" }],
+        ["default_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "create_accounts",
+    definition: {
+      parameters: [
+        ["accounts", "object[]"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "list_accounts",
+    definition: {
+      parameters: [
+        ["type", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["parent_id", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["include_counts", "boolean", { optional: true, defaultValue: false }],
+        ["tree", "boolean", { optional: true, defaultValue: false }]
+      ],
+      returns: { type: "object[]" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "get_account",
+    definition: {
+      parameters: [
+        ["id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "get_account_by_name",
+    definition: {
+      parameters: [
+        ["name", "string"]
+      ],
+      returns: { type: "object", nullable: true }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "update_account",
+    definition: {
+      parameters: [
+        ["id", "string"],
+        ["name", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["type", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["code", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["parent_id", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["color_hex", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["default_asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "delete_account",
+    definition: {
+      parameters: [
+        ["id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "merge_accounts",
+    definition: {
+      parameters: [
+        ["sources", "string[]"],
+        ["target", "string"],
+        ["delete_sources", "boolean", { optional: true, defaultValue: true }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "create_price",
+    definition: {
+      parameters: [
+        ["asset_id", "string"],
+        ["quote_id", "string"],
+        ["rate", "number"],
+        ["time", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  },
+  {
+    name: "list_prices",
+    definition: {
+      parameters: [],
+      returns: { type: "object[]" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "get_price",
+    definition: {
+      parameters: [
+        ["asset_id", "string"],
+        ["quote_id", "string"],
+        ["as_of", "string"]
+      ],
+      returns: { type: "object", nullable: true }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "read"
+  },
+  {
+    name: "init_defaults",
+    definition: {
+      parameters: [
+        ["template", "string", { optional: true, defaultValue: "personal" }],
+        ["currency", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "setup",
+    mutation: "write"
+  }
+] as const);
 
 export function accountHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers): Partial<ToolHandlers> {
   const {

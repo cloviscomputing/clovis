@@ -1,10 +1,8 @@
 import { handlers, installToolSpecMap } from "../tool-runtime.js";
-import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap } from "../tool-spec.js";
-import { toolSafety } from "../signatures.js";
-import { TOOL_DEFINITIONS } from "./definitions.js";
-import { buildToolSpecs } from "./index.js";
+import { bindToolGroup, defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap } from "../tool-spec.js";
+import { TOOL_CONTRACTS } from "./definitions.js";
 
-export const TOOL_SPECS = defineTools(buildToolSpecs(TOOL_DEFINITIONS, handlers, toolSafety));
+export const TOOL_SPECS = defineTools(bindToolGroup(TOOL_CONTRACTS, handlers));
 export const TOOL_SPEC_BY_NAME = toolSpecMap(TOOL_SPECS);
 installToolSpecMap(TOOL_SPEC_BY_NAME);
 

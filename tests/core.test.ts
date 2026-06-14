@@ -650,7 +650,10 @@ describe("app and package surface", () => {
     expect(catalog).not.toContain("amountToQuantity");
     expect(catalog).not.toContain("toAtomicUnits");
     expect(signatures).not.toContain("export const TOOL_DEFINITIONS =");
+    expect(signatures).not.toContain("READ_ONLY_TOOLS");
+    expect(signatures).not.toContain("DESTRUCTIVE_TOOLS");
     expect(definitions).toContain("export const TOOL_DEFINITIONS =");
+    expect(definitions).not.toContain('"account_balances":');
     expect(runtime).not.toMatch(/\b(existsSync|readdirSync|statSync|writeFileSync)\b/);
     expect(filesystem).toContain('type FilePolicyMode = "unrestricted" | "ledger-dir" | "roots"');
     expect(filesystem).toContain('process.env.CLOVIS_FILE_POLICY ?? "unrestricted"');
@@ -671,17 +674,59 @@ describe("app and package surface", () => {
     ] as const;
     const contents = workflowFiles.map(([name, file, factory, sentinel]) => {
       const text = readFileSync(join(process.cwd(), file), "utf8");
+      expect(text).toContain("defineToolGroup");
       expect(text).toContain(`export function ${factory}`);
       expect(text).toMatch(new RegExp(`\\n\\s{4}${sentinel}: \\(`));
       return { name, text };
     });
 
-    expect(runtime.split(/\r?\n/).length).toBeLessThan(2000);
+    expect(runtime.split(/\r?\n/).length).toBeLessThan(500);
     expect(runtime).not.toMatch(/\n\s{2}(create_transaction|income_statement|set_budget|refresh_statement|tool_registry): \(/);
 
     for (const toolName of TOOL_NAMES) {
       const owners = contents.filter(({ text }) => new RegExp(`\\n\\s{4}${toolName}: \\(`).test(text)).map(({ name }) => name);
       expect(owners, `${toolName} should be implemented in exactly one workflow file`).toHaveLength(1);
+    }
+  });
+
+  it("keeps tool import boundaries explicit", () => {
+    const workflowFiles = [
+      "src/app/tools/accounts.ts",
+      "src/app/tools/transactions.ts",
+      "src/app/tools/statements.ts",
+      "src/app/tools/reports.ts",
+      "src/app/tools/budgets.ts",
+      "src/app/tools/maintenance.ts"
+    ];
+    const workflowImport = /from "\.\/(accounts|transactions|statements|reports|budgets|maintenance)\.js"|from "\.\.\/tools\/(accounts|transactions|statements|reports|budgets|maintenance)\.js"/;
+    for (const file of workflowFiles) {
+      expect(readFileSync(join(process.cwd(), file), "utf8"), `${file} should not import another workflow tool module`).not.toMatch(workflowImport);
+    }
+
+    const tracked = execFileSync("git", ["ls-files", "src/app", "src/core"], { encoding: "utf8" })
+      .split(/\r?\n/)
+      .filter((file) => file && existsSync(join(process.cwd(), file)));
+    const fileIoPattern = /\bfrom "node:fs"|\b(existsSync|readFileSync|writeFileSync|readdirSync|statSync|mkdirSync|rmSync|copyFileSync|renameSync|unlinkSync)\b/;
+    const fileIoOwners = new Set([
+      "src/app/filesystem.ts",
+      "src/app/backup-filesystem.ts",
+      "src/core/ledger.ts",
+      "src/core/ledger-export.ts"
+    ]);
+    for (const file of tracked.filter((path) => path.endsWith(".ts"))) {
+      if (fileIoOwners.has(file)) continue;
+      expect(readFileSync(join(process.cwd(), file), "utf8"), `${file} should not own filesystem IO`).not.toMatch(fileIoPattern);
+    }
+
+    const auditOwners = new Set([
+      "src/app/mutation-overseer.ts",
+      "src/app/operation-reversal.ts"
+    ]);
+    for (const file of tracked.filter((path) => path.endsWith(".ts") && path.startsWith("src/app/"))) {
+      if (auditOwners.has(file)) continue;
+      const text = readFileSync(join(process.cwd(), file), "utf8");
+      expect(text, `${file} should not directly create ledger operation audit rows`).not.toMatch(/\bcreateOperation\s*\(/);
+      expect(text, `${file} should not directly call createLedgerOperation`).not.toContain("createLedgerOperation(");
     }
   });
 

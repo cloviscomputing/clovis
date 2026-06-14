@@ -1,4 +1,262 @@
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../tool-runtime.js";
+import { defineToolGroup } from "../tool-spec.js";
+
+export const budgetTools = defineToolGroup([
+  {
+    name: "set_budget",
+    definition: {
+      parameters: [
+        ["account", "string"],
+        ["amount", "number"],
+        ["period", "string", { optional: true, defaultValue: "monthly" }],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["rollover", "boolean", { optional: true, defaultValue: false }],
+        ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  },
+  {
+    name: "set_budgets",
+    definition: {
+      parameters: [
+        ["budgets", "object[]"],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  },
+  {
+    name: "budget_status",
+    definition: {
+      parameters: [
+        ["account", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["rollup", "boolean", { optional: true, defaultValue: false }],
+        ["include_pending", "boolean", { optional: true, defaultValue: false }],
+        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "budget_summary",
+    definition: {
+      parameters: [
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["include_pending", "boolean", { optional: true, defaultValue: false }],
+        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "delete_budget",
+    definition: {
+      parameters: [
+        ["account", "string"],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["include_overrides", "boolean", { optional: true, defaultValue: false }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  },
+  {
+    name: "delete_budgets",
+    definition: {
+      parameters: [
+        ["accounts", "string[]", { nullable: true, optional: true, defaultValue: null }],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["include_overrides", "boolean", { optional: true, defaultValue: false }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  },
+  {
+    name: "copy_budgets",
+    definition: {
+      parameters: [
+        ["from_year", "integer"],
+        ["from_month", "integer"],
+        ["to_year", "integer"],
+        ["to_month", "integer"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  },
+  {
+    name: "budget_rollover_preview",
+    definition: {
+      parameters: [
+        ["year", "integer"],
+        ["month", "integer"],
+        ["include_pending", "boolean", { optional: true, defaultValue: false }],
+        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "apply_rollover",
+    definition: {
+      parameters: [
+        ["year", "integer"],
+        ["month", "integer"],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "read",
+    mutation: "write"
+  },
+  {
+    name: "unbudgeted_spending",
+    definition: {
+      parameters: [
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object[]" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "spending_rate",
+    definition: {
+      parameters: [
+        ["account", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object[]" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "forecast_month_end",
+    definition: {
+      parameters: [
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "reports",
+    mutation: "read"
+  },
+  {
+    name: "suggest_budgets",
+    definition: {
+      parameters: [
+        ["months", "integer", { optional: true, defaultValue: 3 }],
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["skip_budgeted", "boolean", { optional: true, defaultValue: true }],
+        ["quote_asset_id", "string"]
+      ],
+      returns: { type: "object[]" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "set_goal",
+    definition: {
+      parameters: [
+        ["account", "string"],
+        ["target", "number"],
+        ["name", "string"],
+        ["target_date", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["priority", "integer", { optional: true, defaultValue: 1 }],
+        ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  },
+  {
+    name: "list_goals",
+    definition: {
+      parameters: [],
+      returns: { type: "array" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "goal_progress",
+    definition: {
+      parameters: [
+        ["account", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "read"
+  },
+  {
+    name: "delete_goal",
+    definition: {
+      parameters: [
+        ["account", "string"]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false, supportsDryRun: true, defaultDryRun: false },
+    workflow: "budgets",
+    mutation: "write"
+  }
+] as const);
 
 export function budgetHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers): Partial<ToolHandlers> {
   const {
