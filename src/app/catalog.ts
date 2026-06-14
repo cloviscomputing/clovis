@@ -9,45 +9,20 @@ import { openMcpLedger } from "./context.js";
 import { publicize, stringifyPublic } from "./json.js";
 import { assertToolDataSize, fileAccessStatus, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
 import { operatingManual } from "./operating-manual.js";
-import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety } from "./signatures.js";
+import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolAnnotations, toolSafety, type ToolSignatureName } from "./signatures.js";
+import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap, type ToolHandler, type ToolMutation, type ToolWorkflow } from "./tool-spec.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 // Shared command catalog for CLI and MCP. This layer translates user/tool
 // arguments into Ledger calls and public JSON shapes; core owns durable state.
 type Args = Record<string, any>;
-type Handler = (ledger: Ledger, args: Args) => unknown;
+type Handler = ToolHandler;
 type Row = Record<string, any>;
 
 const MAX_IMPORT_ROWS = 10000;
 const MAX_CSV_COLUMNS = 200;
 
-export const TOOL_NAMES = [
-  "account_balances", "account_register", "add_match_rule", "add_match_rules", "age_of_money", "apply_match_rules", "apply_pattern",
-  "apply_reconciliation_plan", "apply_rollover", "assert_balance", "assert_balances", "audit_categorization", "backup_now",
-  "backup_status", "balance_sheet", "budget_rollover_preview", "budget_status", "budget_summary", "buy_security",
-  "cash_flow", "cash_projection", "cash_runway", "close_period", "commit_batch", "compare_scenarios", "consolidate_transfers",
-  "copy_budgets", "count_transactions", "create_account", "create_accounts", "create_asset", "create_branch",
-  "create_price", "create_scheduled_transaction", "create_transaction", "delete_account", "delete_asset", "delete_budget",
-  "delete_budgets", "delete_goal", "delete_match_rule", "delete_match_rules", "delete_tag", "delete_tags",
-  "delete_transaction", "detect_recurring", "discard_batch", "discard_branch", "export_ledger", "export_transactions", "file_access_status",
-  "financial_overview", "financial_picture", "find_pending_duplicates", "find_realized_planned", "flip_entries", "forecast", "forecast_month_end",
-  "fx_transfer", "get_account", "get_account_by_name", "get_asset_by_symbol", "get_balance", "get_ledger_operation", "get_price",
-  "get_transaction", "goal_progress", "holdings", "import_file", "import_ledger", "import_transactions",
-  "income_statement", "init_defaults", "inspect_transaction", "integrity_check", "invert_import", "list_accounts",
-  "list_assets", "list_backups", "list_branches", "list_checkpoints", "list_entries", "list_entries_by_asset",
-  "list_goals", "list_import_batches", "list_ledger_operations", "list_match_rules", "list_prices", "list_scheduled", "list_tags",
-  "list_transactions", "list_uncategorized", "list_unmatched_transfers", "match_transfer_pairs", "match_transfers",
-  "merge_accounts", "merge_branch", "migrate_asset_entries", "move_transactions", "net_worth", "operating_manual", "pending_summary",
-  "plan_transaction", "post_journal_entry", "preview_commit", "preview_import", "process_scheduled", "process_statement",
-  "preview_mutation", "project_balances", "project_month_end", "recategorize_by_pattern", "recategorize_by_patterns", "recategorize_transaction",
-  "recognize_gain_loss", "reconcile_diff", "reconcile_planned", "reconcile_statement", "reconcile_statement_plan", "reconcile_to_balance", "refresh_statement",
-  "record_investment", "record_opening_balance", "record_opening_balances", "record_pending_expenses", "reopen_period",
-  "repair_integrity", "reverse_ledger_operation", "rollback_import", "rollback_recategorize", "search_transactions", "set_budget", "set_budgets",
-  "set_goal", "spending", "spending_rate", "suggest_budgets", "top_descriptions", "tool_registry", "transfer", "trial_balance",
-  "unbudgeted_spending", "update_account", "update_asset", "void_by_filter"
-] as const;
-
-export type ToolName = typeof TOOL_NAMES[number];
+export type ToolName = ToolSignatureName;
 
 function now(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -374,6 +349,59 @@ type LedgerSnapshot = Record<string, Row[]>;
 
 function hasNativeDryRun(name: string): boolean {
   return Boolean(TOOL_DEFINITIONS[name as keyof typeof TOOL_DEFINITIONS]?.parameters.some((parameter) => parameter[0] === "dry_run"));
+}
+
+const FILESYSTEM_TOOLS = new Set<string>([
+  "apply_reconciliation_plan", "backup_now", "export_transactions", "import_file",
+  "preview_import", "process_statement", "refresh_statement"
+]);
+
+function toolWorkflow(name: string): ToolWorkflow {
+  if (name.includes("budget") || name.includes("goal") || ["spending", "spending_rate", "suggest_budgets", "unbudgeted_spending"].includes(name)) return "budgets";
+  if (
+    name.includes("statement") ||
+    name.includes("import") ||
+    name.includes("pending") ||
+    name.includes("planned") ||
+    ["commit_batch", "discard_batch", "invert_import", "preview_import", "record_pending_expenses", "refresh_statement"].includes(name)
+  ) return "statements";
+  if (
+    name.includes("projection") ||
+    name.includes("runway") ||
+    name.includes("forecast") ||
+    ["age_of_money", "balance_sheet", "cash_flow", "compare_scenarios", "financial_overview", "financial_picture", "income_statement", "net_worth", "project_balances", "project_month_end", "trial_balance"].includes(name)
+  ) return "reports";
+  if (
+    name.includes("transaction") ||
+    name.includes("transfer") ||
+    name.includes("categor") ||
+    name.includes("match") ||
+    ["apply_pattern", "flip_entries", "holdings", "list_entries", "list_entries_by_asset", "post_journal_entry", "record_investment", "search_transactions", "top_descriptions"].includes(name)
+  ) return "transactions";
+  if (
+    name.includes("account") ||
+    name.includes("asset") ||
+    name.includes("price") ||
+    name.includes("tag") ||
+    name.includes("rule") ||
+    ["create_branch", "discard_branch", "list_branches", "merge_branch", "init_defaults"].includes(name)
+  ) return "setup";
+  if (
+    name.includes("backup") ||
+    name.includes("integrity") ||
+    name.includes("ledger_operation") ||
+    ["file_access_status", "operating_manual", "preview_mutation", "repair_integrity", "reverse_ledger_operation", "tool_registry"].includes(name)
+  ) return "maintenance";
+  if (name.includes("checkpoint") || name.includes("period") || name.includes("scenario")) return "advanced";
+  return "read";
+}
+
+function toolMutation(name: string): ToolMutation {
+  const safety = toolSafety(name);
+  if (safety.readOnlyHint) return "read";
+  if (FILESYSTEM_TOOLS.has(name)) return "filesystem";
+  if (safety.defaultDryRun) return "dry-run";
+  return "write";
 }
 
 function ledgerSnapshot(ledger: Ledger): LedgerSnapshot {
@@ -2359,10 +2387,13 @@ function registrySafetyMatches(name: ToolName, args: Args): boolean {
 
 function registryEntry(name: ToolName, summary: boolean): Row {
   const safety = toolSafety(name);
+  const spec = TOOL_SPEC_BY_NAME[name];
   const definition = effectiveToolDefinition(name);
   if (summary) {
     return {
       name,
+      workflow: spec.workflow,
+      mutation: spec.mutation,
       signature: TOOL_SIGNATURES[name],
       parameters: definition.parameters.map((parameter) => parameter[0]),
       aliases: parameterAliasesForTool(name),
@@ -2371,6 +2402,8 @@ function registryEntry(name: ToolName, summary: boolean): Row {
   }
   return {
     name,
+    workflow: spec.workflow,
+    mutation: spec.mutation,
     signature: TOOL_SIGNATURES[name],
     definition,
     aliases: parameterAliasesForTool(name),
@@ -4094,7 +4127,21 @@ const handlers: Record<ToolName, Handler> = {
   }
 };
 
-export const toolHandlers = handlers;
+export const TOOL_SPECS = defineTools(Object.entries(TOOL_DEFINITIONS).map(([name, definition]) => {
+  const toolName = name as ToolName;
+  return {
+    name: toolName,
+    definition,
+    safety: toolAnnotations(toolName),
+    workflow: toolWorkflow(toolName),
+    mutation: toolMutation(toolName),
+    handler: handlers[toolName]
+  };
+}));
+
+export const TOOL_SPEC_BY_NAME = toolSpecMap(TOOL_SPECS);
+export const TOOL_NAMES = deriveToolNames(TOOL_SPECS);
+export const toolHandlers = deriveToolHandlers(TOOL_SPECS);
 
 export function callTool(name: string, args: Args = {}, providedLedger?: Ledger): unknown {
   // Tests and CLI pass a ledger explicitly. MCP opens from env and checks

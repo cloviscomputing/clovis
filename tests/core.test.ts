@@ -6,8 +6,8 @@ import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { Ledger, debitCredit, normalAmount, normalSide, toAtomicUnits } from "../src/core/index.js";
-import { callTool, TOOL_NAMES } from "../src/app/index.js";
-import { toolHandlers } from "../src/app/catalog.js";
+import { callTool, TOOL_NAMES, toolSafety } from "../src/app/index.js";
+import { TOOL_SPECS, TOOL_SPEC_BY_NAME, toolHandlers } from "../src/app/catalog.js";
 import { defaultDbPath, mcpDbPathFromEnv } from "../src/app/context.js";
 import { TOOL_DEFINITIONS, TOOL_SIGNATURES } from "../src/app/signatures.js";
 import { inputShapeFromDefinition, inputSchemaFromDefinition } from "../src/mcp/tools.js";
@@ -554,10 +554,54 @@ describe("ledger core", () => {
 });
 
 describe("app and package surface", () => {
-  it("keeps every MCP tool name wired to a signature and handler", () => {
+  it("derives every public tool surface from the tool specs", () => {
+    const specNames = TOOL_SPECS.map((spec) => spec.name);
+    const sortedNames = [...TOOL_NAMES].sort();
+
+    expect(new Set(specNames).size).toBe(TOOL_SPECS.length);
+    expect([...specNames].sort()).toEqual(sortedNames);
+    expect(Object.keys(TOOL_SPEC_BY_NAME).sort()).toEqual(sortedNames);
+    expect(Object.keys(TOOL_DEFINITIONS).sort()).toEqual(sortedNames);
     expect(Object.keys(TOOL_SIGNATURES).sort()).toEqual([...TOOL_NAMES].sort());
+    expect(Object.keys(toolHandlers).sort()).toEqual(sortedNames);
     expect(TOOL_SIGNATURES.create_transaction).toBe("(date: string, amount: number, from_account_id: string, to_account_id: string, description: string, status?: string, asset_id?: string | null, branch?: string | null, dry_run?: boolean) => Record<string, unknown>");
-    for (const name of TOOL_NAMES) expect(toolHandlers[name]).toBeTypeOf("function");
+
+    const validWorkflows = new Set(["setup", "read", "transactions", "statements", "reports", "budgets", "maintenance", "advanced"]);
+    const validMutations = new Set(["read", "write", "dry-run", "filesystem"]);
+    for (const spec of TOOL_SPECS) {
+      expect(TOOL_SPEC_BY_NAME[spec.name]).toBe(spec);
+      expect(TOOL_DEFINITIONS[spec.name]).toBe(spec.definition);
+      expect(toolHandlers[spec.name]).toBe(spec.handler);
+      expect(TOOL_SIGNATURES[spec.name]).toBeTypeOf("string");
+      expect(validWorkflows.has(spec.workflow)).toBe(true);
+      expect(validMutations.has(spec.mutation)).toBe(true);
+
+      const safety = toolSafety(spec.name);
+      expect(spec.safety).toMatchObject({
+        readOnlyHint: safety.readOnlyHint,
+        destructiveHint: safety.destructiveHint,
+        idempotentHint: safety.idempotentHint,
+        openWorldHint: safety.openWorldHint
+      });
+      if (safety.readOnlyHint) expect(spec.mutation).toBe("read");
+      else if (safety.defaultDryRun) expect(["dry-run", "filesystem"]).toContain(spec.mutation);
+    }
+  });
+
+  it("publishes registry rows from the tool specs", () => {
+    const ledger = tempLedger();
+    try {
+      const registry = callTool("tool_registry", { summary: true }, ledger) as any;
+      expect(registry.count).toBe(TOOL_NAMES.length);
+      for (const row of registry.tools) {
+        const spec = TOOL_SPEC_BY_NAME[row.name];
+        expect(row.workflow).toBe(spec.workflow);
+        expect(row.mutation).toBe(spec.mutation);
+        expect(row.signature).toBe(TOOL_SIGNATURES[row.name]);
+      }
+    } finally {
+      ledger.close();
+    }
   });
 
   it("round-trips ledger export/import through public JSON", () => {

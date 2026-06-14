@@ -1,44 +1,20 @@
 // Structured app tool contract. This is the source of truth for tool inputs,
 // return shape summaries, generated text signatures, and runtime Zod schemas.
-export type ToolValueType =
-  | "string"
-  | "number"
-  | "integer"
-  | "boolean"
-  | "object"
-  | "array"
-  | "string[]"
-  | "integer[]"
-  | "object[]";
+import type {
+  ToolDefinition,
+  ToolParameterDefinition,
+  ToolSafetyAnnotations,
+  ToolTypeDefinition
+} from "./tool-spec.js";
 
-export type ToolTypeDefinition = {
-  type: ToolValueType;
-  nullable?: boolean;
-};
-
-export type ToolParameterOptions = {
-  nullable?: boolean;
-  optional?: boolean;
-  defaultValue?: string | number | boolean | null;
-};
-
-export type ToolParameterDefinition = readonly [
-  name: string,
-  type: ToolValueType,
-  options?: ToolParameterOptions
-];
-
-export type ToolDefinition = {
-  parameters: readonly ToolParameterDefinition[];
-  returns: ToolTypeDefinition;
-};
-
-export type ToolSafetyAnnotations = {
-  readOnlyHint: boolean;
-  destructiveHint: boolean;
-  idempotentHint: boolean;
-  openWorldHint: boolean;
-};
+export type {
+  ToolDefinition,
+  ToolParameterDefinition,
+  ToolParameterOptions,
+  ToolSafetyAnnotations,
+  ToolTypeDefinition,
+  ToolValueType
+} from "./tool-spec.js";
 
 export const TOOL_DEFINITIONS = {
   "account_balances": {
