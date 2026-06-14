@@ -24,6 +24,17 @@ export function stringifyPublic(value: unknown, space = 2): string {
   return JSON.stringify(publicize(value), null, space);
 }
 
+export function safeJson(value: unknown): Record<string, any> {
+  if (value == null || value === "") return {};
+  if (typeof value === "object") return value as Record<string, any>;
+  try {
+    const parsed = JSON.parse(String(value));
+    return typeof parsed === "object" && parsed != null ? parsed as Record<string, any> : {};
+  } catch {
+    return {};
+  }
+}
+
 export function addDisplayFields<T extends Record<string, unknown>>(row: T, quantityKey: string, assetScale: number, displayKey = "amount_display"): T {
   const value = row[quantityKey];
   if (typeof value === "bigint") {

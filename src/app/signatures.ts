@@ -3,6 +3,7 @@
 import type {
   ToolDefinition,
   ToolParameterDefinition,
+  ToolRuntimeSafety,
   ToolSafetyAnnotations,
   ToolTypeDefinition
 } from "./tool-spec.js";
@@ -11,6 +12,7 @@ export type {
   ToolDefinition,
   ToolParameterDefinition,
   ToolParameterOptions,
+  ToolRuntimeSafety,
   ToolSafetyAnnotations,
   ToolTypeDefinition,
   ToolValueType
@@ -1505,7 +1507,7 @@ export function toolAnnotations(name: string): ToolSafetyAnnotations {
   };
 }
 
-export function toolSafety(name: string): ToolSafetyAnnotations & { supportsDryRun: boolean; defaultDryRun: boolean } {
+export function toolSafety(name: string): ToolRuntimeSafety {
   const definition = TOOL_DEFINITIONS[name as ToolSignatureName];
   const dryRun = definition?.parameters.find((parameter) => parameter[0] === "dry_run");
   const annotations = toolAnnotations(name);

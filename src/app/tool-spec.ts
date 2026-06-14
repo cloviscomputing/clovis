@@ -40,6 +40,11 @@ export type ToolSafetyAnnotations = {
   openWorldHint: boolean;
 };
 
+export type ToolRuntimeSafety = ToolSafetyAnnotations & {
+  supportsDryRun: boolean;
+  defaultDryRun: boolean;
+};
+
 export type ToolWorkflow =
   | "setup"
   | "read"
@@ -58,7 +63,7 @@ export type ToolHandler = (ledger: Ledger, args: ToolArgs) => unknown;
 export type ToolSpec<Name extends string = string> = {
   name: Name;
   definition: ToolDefinition;
-  safety: ToolSafetyAnnotations;
+  safety: ToolRuntimeSafety;
   workflow: ToolWorkflow;
   mutation: ToolMutation;
   handler: ToolHandler;

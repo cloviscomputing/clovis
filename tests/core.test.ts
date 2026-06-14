@@ -581,7 +581,9 @@ describe("app and package surface", () => {
         readOnlyHint: safety.readOnlyHint,
         destructiveHint: safety.destructiveHint,
         idempotentHint: safety.idempotentHint,
-        openWorldHint: safety.openWorldHint
+        openWorldHint: safety.openWorldHint,
+        supportsDryRun: safety.supportsDryRun,
+        defaultDryRun: safety.defaultDryRun
       });
       if (safety.readOnlyHint) expect(spec.mutation).toBe("read");
       else if (safety.defaultDryRun) expect(["dry-run", "filesystem"]).toContain(spec.mutation);
@@ -598,6 +600,7 @@ describe("app and package surface", () => {
         expect(row.workflow).toBe(spec.workflow);
         expect(row.mutation).toBe(spec.mutation);
         expect(row.signature).toBe(TOOL_SIGNATURES[row.name]);
+        expect(row.safety).toMatchObject(spec.safety);
       }
     } finally {
       ledger.close();

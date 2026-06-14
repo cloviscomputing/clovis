@@ -6,11 +6,21 @@ import type { Account, AccountType, Asset, Journal, JournalLine, TxStatus } from
 import { fromAtomicUnits, toAtomicUnits } from "../core/money.js";
 import { normalAmount } from "../core/accounting.js";
 import { openMcpLedger } from "./context.js";
-import { publicize, stringifyPublic } from "./json.js";
+import { publicize, safeJson, stringifyPublic } from "./json.js";
 import { assertToolDataSize, fileAccessStatus, redactToolPath, resolveToolReadPath, resolveToolWritePath } from "./filesystem.js";
+import {
+  createOperation,
+  MUTATION_AUDIT_TABLES,
+  mutationPreview,
+  operationPublic,
+  operationRowPublic,
+  rowIdentity,
+  stableHash,
+  withMutationOverseer
+} from "./mutation-overseer.js";
 import { operatingManual } from "./operating-manual.js";
-import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolAnnotations, toolSafety, type ToolSignatureName } from "./signatures.js";
-import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap, type ToolHandler, type ToolMutation, type ToolWorkflow } from "./tool-spec.js";
+import { effectiveToolDefinition, normalizeToolInput, parameterAliasesForTool, STATUS_FILTER_VALUES, TOOL_DEFINITIONS, TOOL_SIGNATURES, toolSafety, type ToolSignatureName } from "./signatures.js";
+import { defineTools, deriveToolHandlers, deriveToolNames, toolSpecMap, type ToolHandler, type ToolMutation, type ToolRuntimeSafety, type ToolWorkflow } from "./tool-spec.js";
 import { amountToQuantity, parseSmartDate, parseTxStatus, parseTxStatusFilter, resolveAccount, resolveAsset, validateDate } from "./validation.js";
 
 // Shared command catalog for CLI and MCP. This layer translates user/tool
@@ -300,29 +310,6 @@ function amountForAccount(ledger: Ledger, txId: string, accountId: string, asset
   return ledger.getEntries(txId).filter((entry) => entry.account_id === accountId && (!assetId || entry.asset_id === assetId)).reduce((sum, entry) => sum + entry.quantity, 0n);
 }
 
-function stableJson(value: unknown): string {
-  const normalize = (input: unknown): unknown => {
-    if (typeof input === "bigint") return input.toString();
-    if (Array.isArray(input)) return input.map(normalize);
-    if (input && typeof input === "object") {
-      return Object.fromEntries(Object.entries(input as Row).sort(([left], [right]) => left.localeCompare(right)).map(([key, val]) => [key, normalize(val)]));
-    }
-    return input;
-  };
-  return JSON.stringify(normalize(value));
-}
-
-function stableHash(value: unknown): string {
-  return createHash("sha256").update(stableJson(value)).digest("hex");
-}
-
-const MUTATION_AUDIT_TABLES = [
-  "books", "assets", "accounts", "sources", "journals", "journal_lines", "prices",
-  "annotations", "rules", "targets", "recurrences", "period_closes", "lots",
-  "statement_plans", "statement_plan_rows"
-] as const;
-
-const GENERIC_PREVIEW_FILE_SIDE_EFFECT_TOOLS = new Set<string>(["backup_now"]);
 const GENERIC_REVERSIBLE_TABLES = new Set<string>(MUTATION_AUDIT_TABLES);
 const GENERIC_REVERSIBLE_ACTIONS = new Set<string>(["insert", "update", "delete"]);
 const STATEMENT_AUDIT_TABLES = new Set<string>(["statement_plans", "statement_plan_rows"]);
@@ -344,12 +331,6 @@ const REVERSE_ROW_ORDER = new Map<string, number>([
   ["assets", 100],
   ["books", 110]
 ]);
-
-type LedgerSnapshot = Record<string, Row[]>;
-
-function hasNativeDryRun(name: string): boolean {
-  return Boolean(TOOL_DEFINITIONS[name as keyof typeof TOOL_DEFINITIONS]?.parameters.some((parameter) => parameter[0] === "dry_run"));
-}
 
 const FILESYSTEM_TOOLS = new Set<string>([
   "apply_reconciliation_plan", "backup_now", "export_transactions", "import_file",
@@ -396,135 +377,11 @@ function toolWorkflow(name: string): ToolWorkflow {
   return "read";
 }
 
-function toolMutation(name: string): ToolMutation {
-  const safety = toolSafety(name);
+function toolMutation(name: string, safety: ToolRuntimeSafety): ToolMutation {
   if (safety.readOnlyHint) return "read";
   if (FILESYSTEM_TOOLS.has(name)) return "filesystem";
   if (safety.defaultDryRun) return "dry-run";
   return "write";
-}
-
-function ledgerSnapshot(ledger: Ledger): LedgerSnapshot {
-  return Object.fromEntries(MUTATION_AUDIT_TABLES.map((table) => [table, ledger.tableRows(table)]));
-}
-
-function rowIdentity(table: string, row: Row): string {
-  if (row.id != null) return String(row.id);
-  if (table === "meta") return String(row.key);
-  if (table === "migration_history") return String(row.version);
-  return stableHash(row);
-}
-
-function snapshotDiff(before: LedgerSnapshot, after: LedgerSnapshot): Row[] {
-  const diff: Row[] = [];
-  for (const table of MUTATION_AUDIT_TABLES) {
-    const beforeRows = new Map((before[table] ?? []).map((row) => [rowIdentity(table, row), row]));
-    const afterRows = new Map((after[table] ?? []).map((row) => [rowIdentity(table, row), row]));
-    const ids = [...new Set([...beforeRows.keys(), ...afterRows.keys()])].sort();
-    for (const idValue of ids) {
-      const beforeRow = beforeRows.get(idValue) ?? null;
-      const afterRow = afterRows.get(idValue) ?? null;
-      const beforeHash = beforeRow == null ? null : stableHash(beforeRow);
-      const afterHash = afterRow == null ? null : stableHash(afterRow);
-      if (beforeHash === afterHash) continue;
-      diff.push({
-        entity_type: table,
-        entity_id: idValue,
-        action: beforeRow == null ? "insert" : afterRow == null ? "delete" : "update",
-        before: beforeRow,
-        after: afterRow,
-        before_hash: beforeHash,
-        after_hash: afterHash
-      });
-    }
-  }
-  return diff;
-}
-
-function accountingBalances(snapshot: LedgerSnapshot, bookId: string): Map<string, Row> {
-  const journals = new Map((snapshot.journals ?? []).map((row) => [String(row.id), row]));
-  const balances = new Map<string, Row>();
-  for (const line of snapshot.journal_lines ?? []) {
-    const journal = journals.get(String(line.journal_id));
-    if (!journal || String(journal.book_id) !== bookId || String(line.book_id) !== bookId || journal.finalized_at == null || journal.status === "void") continue;
-    const key = [journal.book_id, journal.status, line.account_id, line.asset_id].map(String).join("|");
-    const current = balances.get(key) ?? {
-      book_id: String(journal.book_id),
-      status: String(journal.status),
-      account_id: String(line.account_id),
-      asset_id: String(line.asset_id),
-      quantity: 0n
-    };
-    current.quantity = BigInt(current.quantity) + BigInt(line.quantity as string | number | bigint | boolean);
-    balances.set(key, current);
-  }
-  return balances;
-}
-
-function accountingDelta(before: LedgerSnapshot, after: LedgerSnapshot, bookId: string): Row[] {
-  const beforeBalances = accountingBalances(before, bookId);
-  const afterBalances = accountingBalances(after, bookId);
-  const keys = [...new Set([...beforeBalances.keys(), ...afterBalances.keys()])].sort();
-  return keys.flatMap((key) => {
-    const beforeRow = beforeBalances.get(key);
-    const afterRow = afterBalances.get(key);
-    const quantity = BigInt(afterRow?.quantity ?? 0n) - BigInt(beforeRow?.quantity ?? 0n);
-    if (quantity === 0n) return [];
-    const row = afterRow ?? beforeRow!;
-    return [{ status: row.status, account_id: row.account_id, asset_id: row.asset_id, quantity }];
-  });
-}
-
-function affectedReportsFromDiff(diff: Row[], delta: Row[]): Row {
-  const accounts = new Set<string>();
-  for (const row of diff) {
-    for (const source of [row.before, row.after]) {
-      if (!source) continue;
-      for (const key of ["account_id", "from_account_id", "to_account_id", "counterpart_account_id"]) {
-        if ((source as Row)[key]) accounts.add(String((source as Row)[key]));
-      }
-    }
-  }
-  for (const row of delta) accounts.add(String(row.account_id));
-  return {
-    tables: [...new Set(diff.map((row) => row.entity_type))].sort(),
-    budgets: [...accounts].sort(),
-    balances: delta.length > 0,
-    income_statement: delta.length > 0,
-    cash_projection: delta.length > 0
-  };
-}
-
-function stripOperationStorage(row: Row): Row {
-  const { _rowid, input_json, preview_json, result_json, metadata_json, ...rest } = row;
-  return rest;
-}
-
-function safeJsonValue(value: unknown): Row | null {
-  if (value == null || value === "") return null;
-  return safeJson(value);
-}
-
-function operationRowPublic(row: Row): Row {
-  const { before_json, after_json, metadata_json, ...rest } = row;
-  return {
-    ...rest,
-    before: safeJsonValue(row.before_json),
-    after: safeJsonValue(row.after_json),
-    metadata: safeJson(row.metadata_json)
-  };
-}
-
-function operationPublic(ledger: Ledger, operation: Row): Row {
-  const rows = ledger.listLedgerOperationRows(String(operation.id)).map(operationRowPublic);
-  return {
-    ...stripOperationStorage(operation),
-    input: safeJson(operation.input_json),
-    preview: safeJson(operation.preview_json),
-    result: safeJson(operation.result_json),
-    metadata: safeJson(operation.metadata_json),
-    rows
-  };
 }
 
 function jsonMentionsAnyId(value: unknown, ids: Set<string>): boolean {
@@ -567,12 +424,6 @@ function activeDependentOperations(ledger: Ledger, operation: Row, rows: Row[]):
     tool_name: String(candidate.tool_name),
     created_at: String(candidate.created_at)
   }));
-}
-
-function stripPreviewOnlyOperationIds(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const { operation_id, mutation_id, ledger_operation, ...rest } = value as Row;
-  return rest;
 }
 
 function sortRowsForReverse(rows: Row[]): Row[] {
@@ -806,110 +657,6 @@ function postAccountingDeltaReversal(ledger: Ledger, operationId: string, delta:
   return reverseIds;
 }
 
-function mutationPreview(ledger: Ledger, name: ToolName, args: Args): Row {
-  if (toolSafety(name).readOnlyHint) throw new Error(`Tool '${name}' is read-only`);
-  if (GENERIC_PREVIEW_FILE_SIDE_EFFECT_TOOLS.has(name)) {
-    if (!hasNativeDryRun(name)) throw new Error(`Tool '${name}' has filesystem side effects and cannot be generically previewed`);
-    const result = handlers[name](ledger, { ...args, dry_run: true });
-    return {
-      dry_run: true,
-      tool_name: name,
-      apply_args: { ...args, dry_run: false },
-      would_result: stripPreviewOnlyOperationIds(result),
-      diff: [],
-      accounting_delta: [],
-      affected_reports: { budgets: [], balance_sheet: false, income_statement: false, cash_projection: false },
-      ids_are_preview_only: false
-    };
-  }
-  const applyArgs = { ...args };
-  if (hasNativeDryRun(name)) applyArgs.dry_run = false;
-  if (name === "repair_integrity") applyArgs.backup = false;
-  const before = ledgerSnapshot(ledger);
-  let result: unknown;
-  let after: LedgerSnapshot = before;
-  const rollback = { rollback: "clovis_mutation_preview" };
-  try {
-    ledger.runInTransaction(() => {
-      result = handlers[name](ledger, applyArgs);
-      after = ledgerSnapshot(ledger);
-      throw rollback;
-    });
-  } catch (error) {
-    if (error !== rollback) throw error;
-  }
-  const diff = snapshotDiff(before, after);
-  const delta = accountingDelta(before, after, ledger.bookId);
-  return {
-    dry_run: true,
-    tool_name: name,
-    apply_args: applyArgs,
-    would_result: stripPreviewOnlyOperationIds(result),
-    diff,
-    accounting_delta: delta,
-    affected_reports: affectedReportsFromDiff(diff, delta),
-    ids_are_preview_only: true
-  };
-}
-
-function attachOperationResult(result: unknown, operation: Row): Row {
-  if (result && typeof result === "object" && !Array.isArray(result)) {
-    const row = result as Row;
-    return {
-      ...row,
-      mutation_id: row.mutation_id ?? operation.id,
-      operation_id: row.operation_id ?? operation.id
-    };
-  }
-  return { result, mutation_id: operation.id, operation_id: operation.id };
-}
-
-function withMutationOverseer(ledger: Ledger, name: ToolName, args: Args): unknown {
-  const safety = toolSafety(name);
-  if (safety.readOnlyHint) return handlers[name](ledger, args);
-  if (name === "backup_now") return handlers[name](ledger, args);
-  if (args.dry_run === true && !hasNativeDryRun(name)) return mutationPreview(ledger, name, args);
-
-  const external: Row = {};
-  let handlerArgs = args;
-  if (name === "repair_integrity" && args.dry_run === false && args.backup !== false) {
-    external.backup = redactToolPath(ledger.path, ledger.backupNow().path);
-    handlerArgs = { ...args, backup: false };
-  }
-
-  return ledger.runInTransaction(() => {
-    const before = ledgerSnapshot(ledger);
-    const result = handlers[name](ledger, handlerArgs);
-    const resultRow = result && typeof result === "object" && !Array.isArray(result) ? { ...(result as Row), ...external } : result;
-    const after = ledgerSnapshot(ledger);
-    const diff = snapshotDiff(before, after);
-    if (diff.length === 0 || (resultRow && typeof resultRow === "object" && !Array.isArray(resultRow) && ((resultRow as Row).operation_id || (resultRow as Row).mutation_id))) {
-      return resultRow;
-    }
-    const delta = accountingDelta(before, after, ledger.bookId);
-    const affected = affectedReportsFromDiff(diff, delta);
-    const operation = createOperation(ledger, {
-      tool_name: name,
-      operation_type: name,
-      input: handlerArgs,
-      preview: {
-        diff,
-        accounting_delta: delta,
-        affected_reports: affected
-      },
-      result: resultRow,
-      metadata: {
-        overseer: "mutation",
-        reversible: true,
-        generic_reversal: true,
-        accounting_delta: delta,
-        affected_reports: affected
-      }
-    }, diff);
-    return attachOperationResult(resultRow, operation);
-  });
-}
-
 function recategorizePreview(ledger: Ledger, args: Args): Row {
   const tx = ledger.getTx(String(args.tx_id));
   if (!tx) throw new Error(`Transaction '${String(args.tx_id)}' not found`);
@@ -967,23 +714,6 @@ function recategorizePreview(ledger: Ledger, args: Args): Row {
       cash_projection: false
     }
   };
-}
-
-function createOperation(ledger: Ledger, input: Row, rows: Row[]): Row {
-  const operation = ledger.createLedgerOperation({
-    ...input,
-    input_json: stableJson(input.input ?? {}),
-    preview_json: stableJson(input.preview ?? {}),
-    result_json: stableJson(input.result ?? {}),
-    metadata_json: stableJson(input.metadata ?? {})
-  }, rows.map((row, index) => ({
-    ...row,
-    row_index: row.row_index ?? index,
-    before_json: row.before_json ?? (row.before == null ? null : stableJson(row.before)),
-    after_json: row.after_json ?? (row.after == null ? null : stableJson(row.after)),
-    metadata_json: row.metadata_json ?? stableJson(row.metadata ?? {})
-  })));
-  return operationPublic(ledger, operation);
 }
 
 function applyRecategorizeTransaction(ledger: Ledger, args: Args): Row {
@@ -1790,17 +1520,6 @@ function importableStatementDelta(ledger: Ledger, accountId: string, assetId: st
   return { rows: importable, delta };
 }
 
-function safeJson(value: unknown): Row {
-  if (value == null || value === "") return {};
-  if (typeof value === "object") return value as Row;
-  try {
-    const parsed = JSON.parse(String(value));
-    return typeof parsed === "object" && parsed != null ? parsed as Row : {};
-  } catch {
-    return {};
-  }
-}
-
 function statementRowHash(row: Row, quantity: bigint): string {
   return createHash("sha256").update(JSON.stringify({
     index: row.index ?? row.row_index ?? null,
@@ -2364,7 +2083,7 @@ function registryNames(args: Args): { names: ToolName[]; unknown_names: string[]
 }
 
 function registrySafetyMatches(name: ToolName, args: Args): boolean {
-  const safety = toolSafety(name);
+  const safety = TOOL_SPEC_BY_NAME[name].safety;
   const filter = args.safety_filter;
   if (filter == null) return true;
   if (typeof filter === "string") {
@@ -2386,8 +2105,8 @@ function registrySafetyMatches(name: ToolName, args: Args): boolean {
 }
 
 function registryEntry(name: ToolName, summary: boolean): Row {
-  const safety = toolSafety(name);
   const spec = TOOL_SPEC_BY_NAME[name];
+  const safety = spec.safety;
   const definition = effectiveToolDefinition(name);
   if (summary) {
     return {
@@ -3414,7 +3133,7 @@ const handlers: Record<ToolName, Handler> = {
     if (!TOOL_NAMES.includes(target as ToolName)) throw new Error(`Tool '${target}' is not implemented`);
     if (target === "preview_mutation") throw new Error("preview_mutation cannot preview itself");
     const targetArgs = normalizeToolInput(target, safeJson(args.arguments ?? {}));
-    return mutationPreview(ledger, target as ToolName, targetArgs);
+    return mutationPreview(ledger, TOOL_SPEC_BY_NAME[target as ToolName], targetArgs);
   },
   process_statement: (ledger, args) => {
     unsupportedArguments({ transfer_account_id: args.transfer_account_id });
@@ -4129,12 +3848,13 @@ const handlers: Record<ToolName, Handler> = {
 
 export const TOOL_SPECS = defineTools(Object.entries(TOOL_DEFINITIONS).map(([name, definition]) => {
   const toolName = name as ToolName;
+  const safety = toolSafety(toolName);
   return {
     name: toolName,
     definition,
-    safety: toolAnnotations(toolName),
+    safety,
     workflow: toolWorkflow(toolName),
-    mutation: toolMutation(toolName),
+    mutation: toolMutation(toolName, safety),
     handler: handlers[toolName]
   };
 }));
@@ -4147,13 +3867,13 @@ export function callTool(name: string, args: Args = {}, providedLedger?: Ledger)
   // Tests and CLI pass a ledger explicitly. MCP opens from env and checks
   // capabilities before any disk access.
   if (!TOOL_NAMES.includes(name as ToolName)) throw new Error(`Tool '${name}' is not implemented`);
-  const handler = handlers[name as ToolName];
+  const spec = TOOL_SPEC_BY_NAME[name as ToolName];
   const normalizedArgs = normalizeToolInput(name, args);
-  if (providedLedger) return publicize(withMutationOverseer(providedLedger, name as ToolName, normalizedArgs));
+  if (providedLedger) return publicize(withMutationOverseer(providedLedger, spec, normalizedArgs));
   assertMcpCapability(name, normalizedArgs);
   const ledger = openMcpLedger();
   try {
-    return publicize(withMutationOverseer(ledger, name as ToolName, normalizedArgs));
+    return publicize(withMutationOverseer(ledger, spec, normalizedArgs));
   } finally {
     ledger.close();
   }

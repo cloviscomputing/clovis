@@ -66,8 +66,11 @@ describe("release smoke", () => {
       "import { Ledger as TopLevelLedger, SCHEMA_VERSION, VERSION } from 'clovis';",
       "import { Ledger } from 'clovis/core';",
       "import { TOOL_NAMES, TOOL_SIGNATURES } from 'clovis/app';",
+      "import * as app from 'clovis/app';",
       "import { createClovisMcpServer } from 'clovis/mcp';",
       "if (TopLevelLedger !== Ledger) throw new Error('top-level Ledger export drifted');",
+      "const leakedInternals = ['TOOL_SPECS', 'TOOL_SPEC_BY_NAME', 'toolHandlers'].filter((key) => key in app);",
+      "if (leakedInternals.length) throw new Error(`app export leaked internals: ${leakedInternals.join(',')}`);",
       "let deepImportBlocked = false;",
       "try { await import('clovis/dist/core/ledger.js'); }",
       "catch (error) { deepImportBlocked = error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED'; }",
@@ -76,10 +79,10 @@ describe("release smoke", () => {
       "const assetId = ledger.createAsset('USD', 'currency', 2, 'US Dollar');",
       "ledger.initDefaults('personal', assetId);",
       "ledger.close();",
-      "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, version: VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked }));"
+      "console.log(JSON.stringify({ tools: TOOL_NAMES.length, signatures: Object.keys(TOOL_SIGNATURES).length, schemaVersion: SCHEMA_VERSION, version: VERSION, server: Boolean(createClovisMcpServer()), deepImportBlocked, leakedInternals }));"
     ].join("\n"), "utf8");
     const api = JSON.parse(execFileSync(process.execPath, [apiCheck], { cwd: dir, encoding: "utf8" }));
-    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: SCHEMA_VERSION, version: packageVersion, server: true, deepImportBlocked: true });
+    expect(api).toEqual({ tools: TOOL_NAMES.length, signatures: TOOL_NAMES.length, schemaVersion: SCHEMA_VERSION, version: packageVersion, server: true, deepImportBlocked: true, leakedInternals: [] });
 
     const binDir = join(dir, "node_modules", ".bin");
     expect(execFileSync(join(binDir, "clovis"), ["--version"], { cwd: dir, encoding: "utf8" }).trim()).toBe(packageVersion);
