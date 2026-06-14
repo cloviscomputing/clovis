@@ -228,7 +228,6 @@ Recommended tools:
 - `net_worth`
 - `balance_sheet`
 - `forecast`
-- `compare_scenarios`
 
 Watch outs:
 
@@ -292,6 +291,11 @@ explanation.
 
 Read MCP annotations before routing calls. `readOnlyHint`, `destructiveHint`,
 and `idempotentHint` are machine-readable safety labels.
+
+Treat MCP as a trusted local control plane. Clovis does not authenticate MCP
+clients or enforce per-tool capability grants inside the server; use OS
+sandboxing, containers, dedicated user accounts, and filesystem permissions for
+hard boundaries.
 
 Use dry-run-capable tools in preview mode before applying changes. The preview
 is the change request.

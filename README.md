@@ -411,6 +411,12 @@ mutation tools preview by default, and callers must pass `dry_run:false` or an
 equivalent commit argument to apply changes. For tools without native dry-run
 output, use `preview_mutation` or pass generic `dry_run:true` through the tool
 schema to get the overseer diff.
+
+Treat the MCP server as a trusted local control plane. Clovis does not
+authenticate MCP clients or enforce per-tool capability grants inside the server;
+use OS sandboxing, containers, dedicated user accounts, and filesystem
+permissions for hard boundaries.
+
 MCP tools include safety annotations such as `readOnlyHint`,
 `destructiveHint`, and `idempotentHint`. The `tool_registry` tool returns the
 full shared schema, rendered signatures, parameter aliases, status convention,

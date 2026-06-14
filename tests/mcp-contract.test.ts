@@ -353,7 +353,7 @@ const CASES = {
   match_transfer_pairs: { mutation: "dry-run", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, date_tolerance_days: 1 }), assert: expectObject },
   match_transfers: { mutation: "dry-run", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, date_tolerance_days: 1 }), assert: expectObject },
   merge_accounts: { mutation: "write", args: (ctx) => ({ sources: [ctx.accounts["Merge Source"]], target: ctx.accounts.Groceries }), assert: expectObject },
-  merge_branch: { mutation: "write", args: () => ({ source: "scenario" }), assert: expectObject },
+  merge_branch: { mutation: "write", setup: (ctx) => { callTool("create_branch", { name: "scenario" }, ctx.ledger); }, args: () => ({ source: "scenario" }), assert: expectObject },
   migrate_asset_entries: { mutation: "dry-run", args: (ctx) => ({ from_asset_id: ctx.assets.usd, to_asset_id: ctx.assets.unused }), assert: expectObject },
   move_transactions: { mutation: "dry-run", args: (ctx) => ({ from_account: ctx.accounts.Uncategorized, to_account: ctx.accounts.Groceries }), assert: expectObject },
   net_worth: { mutation: "read", args: (ctx) => ({ date: "2026-06-30", quote_asset_id: ctx.assets.usd }), assert: expectObject },

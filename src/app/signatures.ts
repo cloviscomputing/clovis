@@ -316,8 +316,6 @@ export const TOOL_DEFINITIONS = {
   },
   "compare_scenarios": {
     parameters: [
-      ["branch_a", "string", { nullable: true, optional: true, defaultValue: null }],
-      ["branch_b", "string", { nullable: true, optional: true, defaultValue: null }],
       ["as_of_a", "string", { nullable: true, optional: true, defaultValue: null }],
       ["as_of_b", "string", { nullable: true, optional: true, defaultValue: null }],
       ["asset_id", "string"]

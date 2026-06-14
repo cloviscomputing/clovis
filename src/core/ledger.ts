@@ -983,8 +983,10 @@ export class Ledger {
   createScenarioBook(name: string): Row {
     const scenarioId = String(name ?? "").trim();
     if (!scenarioId) throw new Error("Scenario name is required");
-    const existing = this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE id = ? OR lower(name) = lower(?) LIMIT 1").get(scenarioId, scenarioId) as Row | undefined;
+    const existing = this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE type = 'scenario' AND parent_id = ? AND (id = ? OR lower(name) = lower(?)) LIMIT 1").get(this.bookId, scenarioId, scenarioId) as Row | undefined;
     if (existing) return existing;
+    const conflict = this.db.prepare("SELECT id, name, type FROM books WHERE id = ? OR lower(name) = lower(?) LIMIT 1").get(scenarioId, scenarioId) as Row | undefined;
+    if (conflict) throw new Error(`Scenario '${scenarioId}' conflicts with existing ${String(conflict.type)} book '${String(conflict.name)}'`);
 
     const createdAt = now();
     const accountMap = new Map<string, string>();
@@ -1228,9 +1230,17 @@ export class Ledger {
     return this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE type = 'scenario' AND parent_id = ? ORDER BY name").all(this.bookId) as Row[];
   }
 
+  getScenarioBook(name: string): Row | null {
+    const scenarioId = String(name ?? "").trim();
+    if (!scenarioId) throw new Error("Scenario name is required");
+    return (this.db.prepare("SELECT id, name, parent_id, created_at, closed_at FROM books WHERE type = 'scenario' AND parent_id = ? AND (id = ? OR lower(name) = lower(?)) LIMIT 1").get(this.bookId, scenarioId, scenarioId) as Row | undefined) ?? null;
+  }
+
   discardScenarioBook(name: string): number {
-    this.createScenarioBook(name);
-    return Number(this.db.prepare("UPDATE books SET closed_at = ? WHERE type = 'scenario' AND parent_id = ? AND (id = ? OR name = ?)").run(now(), this.bookId, name, name).changes);
+    const scenario = this.getScenarioBook(name);
+    if (!scenario) throw new Error(`Scenario '${String(name)}' not found`);
+    if (scenario.closed_at != null) return 0;
+    return Number(this.db.prepare("UPDATE books SET closed_at = ? WHERE type = 'scenario' AND parent_id = ? AND id = ?").run(now(), this.bookId, String(scenario.id)).changes);
   }
 
   listLots(): Row[] {
@@ -1376,11 +1386,10 @@ export class Ledger {
   }
 
   recordTransaction(date: string, amount: bigint | number, fromAccountId: string, toAccountId: string, assetId: string, description = "", status: TxStatus | string = "pending", options: PostTxOptions = {}): Journal & { entries: JournalLine[] } {
-    const quantity = BigInt(amount);
-    const absolute = quantity < 0n ? -quantity : quantity;
+    const quantity = positiveQuantity(amount, "Transaction amount");
     const txId = this.postTx(date, status, description, [
-      [fromAccountId, assetId, -absolute],
-      [toAccountId, assetId, absolute]
+      [fromAccountId, assetId, -quantity],
+      [toAccountId, assetId, quantity]
     ], options);
     return this.txWithEntries(txId);
   }

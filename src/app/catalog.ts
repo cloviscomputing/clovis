@@ -1741,7 +1741,7 @@ function importFingerprint(row: Row, signed: bigint): string {
 }
 
 function existingImportFingerprints(ledger: Ledger, accountId: string, assetId: string): Set<string> {
-  return new Set(ledger.listTransactions({ status: null }).map((tx) => {
+  return new Set(ledger.listTransactions({ status: "active" }).map((tx) => {
     const amount = amountForAccount(ledger, tx.id, accountId, assetId);
     return importFingerprint(tx, amount);
   }));
@@ -2564,8 +2564,8 @@ export function assertToolCapabilities(name: string, args: Args, granted: Set<To
 }
 
 function assertMcpCapability(name: string, args: Args): void {
-  // Capability gates are intentionally not enforced here. Risk is carried by
-  // explicit tool names, dry-run defaults, file validation, and ledger backups.
+  // MCP is a trusted local control plane; tool annotations and dry-run previews
+  // guide callers, while hard boundaries belong to the host environment.
   void name;
   void args;
 }
@@ -3568,6 +3568,7 @@ const handlers: Record<ToolName, Handler> = {
     const toAsset = asset(ledger, args.to_asset_id);
     const fromQty = amountToQuantity(ledger, fromAsset, args.from_amount);
     const toQty = amountToQuantity(ledger, toAsset, args.to_amount);
+    if (fromQty <= 0n || toQty <= 0n) throw new Error("FX transfer amounts must be positive");
     const txDate = validateDate(args.date);
     const txId = ledger.postTx(txDate, args.status ?? "posted", args.description, [
       [account(ledger, args.from_account_id), fromAsset, -fromQty],
@@ -3777,21 +3778,31 @@ const handlers: Record<ToolName, Handler> = {
   },
 
   create_branch: (ledger, args) => {
-    ledger.createScenarioBook(args.name);
-    return { name: args.name };
+    const branch = ledger.createScenarioBook(args.name);
+    return { id: branch.id, name: branch.name, discarded_at: branch.closed_at ?? null };
   },
   list_branches: (ledger) => ledger.listScenarioBooks().map((row) => ({ ...row, merged_at: null, discarded_at: row.closed_at })),
-  merge_branch: (ledger, args) => { handlers.create_branch(ledger, { name: args.source }); ledger.createAnnotation("book", args.source, "merged_at", now()); return { merged: args.source }; },
-  discard_branch: (ledger, args) => { ledger.discardScenarioBook(args.name); return { discarded: args.name }; },
+  merge_branch: (ledger, args) => {
+    const branch = ledger.getScenarioBook(String(args.source));
+    if (!branch) throw new Error(`Scenario '${String(args.source)}' not found`);
+    if (branch.closed_at != null) throw new Error(`Scenario '${String(args.source)}' is discarded`);
+    ledger.createAnnotation("book", String(branch.id), "merged_at", now());
+    return { merged: branch.id, name: branch.name };
+  },
+  discard_branch: (ledger, args) => {
+    const branch = ledger.getScenarioBook(String(args.name));
+    if (!branch) throw new Error(`Scenario '${String(args.name)}' not found`);
+    const discarded = ledger.discardScenarioBook(String(args.name));
+    return { discarded: branch.id, name: branch.name, updated: discarded };
+  },
   compare_scenarios: (ledger, args) => {
-    unsupportedArguments({ branch_a: args.branch_a, branch_b: args.branch_b });
     const assetId = asset(ledger, args.asset_id);
     const rows = ledger.listAccounts().map((acct) => {
       const a = ledger.balanceTree(acct.id, assetId, optionalDate(args.as_of_a), null);
       const b = ledger.balanceTree(acct.id, assetId, optionalDate(args.as_of_b), null);
       return a === b ? null : { account_id: acct.id, account_name: acct.name, a_cents: a, b_cents: b, delta_cents: b - a };
     }).filter(Boolean);
-    return { differences: rows, branch_a: args.branch_a, branch_b: args.branch_b };
+    return { differences: rows, as_of_a: args.as_of_a ?? null, as_of_b: args.as_of_b ?? null };
   },
   close_period: (ledger, args) => ledger.closePeriod(args.name, validateDate(args.as_of), args.description),
   list_checkpoints: (ledger) => ledger.listCheckpoints(),

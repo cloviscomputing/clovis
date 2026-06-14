@@ -545,6 +545,8 @@ describe("ledger core", () => {
       expect(() => ledger.setGoal(checking, usd, 100n, "Bad date", "2026-99-99")).toThrow(/date/);
       expect(() => ledger.createRecurrence("2026-06-01", 100n, equity, checking, "Bad", "nonsense", null, usd)).toThrow(/frequency/);
       expect(() => ledger.createRecurrence("2026-06-01", 0n, equity, checking, "Bad", "monthly", null, usd)).toThrow(/positive/);
+      expect(() => ledger.recordTransaction("2026-06-01", 0n, equity, checking, usd, "Bad", "posted")).toThrow(/positive/);
+      expect(() => ledger.recordTransaction("2026-06-01", -100n, equity, checking, usd, "Bad", "posted")).toThrow(/positive/);
     } finally {
       ledger.close();
     }
@@ -1564,9 +1566,35 @@ describe("app and package surface", () => {
   it("rejects unsupported branch filters explicitly", () => {
     const ledger = tempLedger();
     try {
-      ledger.createAsset("USD", "currency", 2);
+      const usd = ledger.createAsset("USD", "currency", 2);
       expect(() => callTool("balance_sheet", { branch: "scenario" }, ledger)).toThrow(/branch/);
-      expect(() => callTool("compare_scenarios", { branch_a: "base", branch_b: "scenario" }, ledger)).toThrow(/branch_a, branch_b/);
+      expect(callTool("compare_scenarios", { asset_id: usd }, ledger)).toMatchObject({ differences: [] });
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("fails closed for scenario branch lifecycle commands", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+
+      expect(() => callTool("create_branch", { name: "Actual" }, ledger)).toThrow(/conflicts/);
+      expect(() => callTool("discard_branch", { name: "missing-branch" }, ledger)).toThrow(/not found/);
+      expect(() => callTool("merge_branch", { source: "Actual" }, ledger)).toThrow(/not found/);
+      expect(callTool("list_branches", {}, ledger)).toEqual([]);
+      expect((callTool("integrity_check", {}, ledger) as any).ok).toBe(true);
+
+      const branch = callTool("create_branch", { name: "what-if" }, ledger) as any;
+      expect(branch).toMatchObject({ name: "what-if", discarded_at: null });
+      const merged = callTool("merge_branch", { source: "what-if" }, ledger) as any;
+      expect(merged).toMatchObject({ merged: branch.id, name: "what-if" });
+      expect(ledger.listAnnotations("book", branch.id)).toContainEqual(expect.objectContaining({ key: "merged_at" }));
+      expect((callTool("integrity_check", {}, ledger) as any).ok).toBe(true);
+
+      const discarded = callTool("discard_branch", { name: "what-if" }, ledger) as any;
+      expect(discarded).toMatchObject({ discarded: branch.id, name: "what-if", updated: 1 });
+      expect(() => callTool("merge_branch", { source: "what-if" }, ledger)).toThrow(/discarded/);
     } finally {
       ledger.close();
     }
@@ -1812,6 +1840,24 @@ describe("app and package surface", () => {
       expect(imported.created).toBe(1);
       expect(imported.transactions[0].tags).toContainEqual(expect.objectContaining({ key: "import_kind", value: "manual" }));
       expect(imported.transactions[0].tags).toContainEqual(expect.objectContaining({ key: "row_kind", value: "statement" }));
+
+      callTool("delete_transaction", { id: imported.transactions[0].id }, ledger);
+      const reimported = callTool("import_transactions", {
+        account_id: checking,
+        counterpart_id: equity,
+        asset_id: usd,
+        transactions: [{ date: "2026-06-01", amount: 25, description: "Preview deposit" }]
+      }, ledger) as any;
+      expect(reimported).toMatchObject({ created: 1, skipped: 0 });
+
+      ledger.recordTransaction("2026-06-02", 1000n, equity, checking, usd, "Planned deposit", "planned");
+      const landedPlanned = callTool("import_transactions", {
+        account_id: checking,
+        counterpart_id: equity,
+        asset_id: usd,
+        transactions: [{ date: "2026-06-02", amount: 10, description: "Planned deposit" }]
+      }, ledger) as any;
+      expect(landedPlanned).toMatchObject({ created: 1, skipped: 0 });
     } finally {
       ledger.close();
     }
@@ -1838,6 +1884,27 @@ describe("app and package surface", () => {
       expect(() => callTool("preview_import", { file_path: ambiguousPath, account_id: checking, counterpart_account_id: equity }, ledger)).toThrow(/Ambiguous date/);
       const explicit = callTool("preview_import", { file_path: ambiguousPath, account_id: checking, counterpart_account_id: equity, date_format: "mdy" }, ledger) as any;
       expect(explicit.rows[0].date).toBe("2026-06-10");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("rejects non-positive amounts on manual transaction wrappers", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      const eur = (callTool("create_asset", { symbol: "EUR", asset_type: "currency", decimals: 2 }, ledger) as any).id;
+      const brokerage = (callTool("create_account", { name: "Brokerage", type: "asset", default_asset_id: usd }, ledger) as any).id;
+      const fxClearing = (callTool("create_account", { name: "FX Clearing", type: "asset", default_asset_id: usd }, ledger) as any).id;
+
+      expect(() => callTool("create_transaction", { date: "2026-06-01", amount: 0, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Zero", status: "posted" }, ledger)).toThrow(/positive/);
+      expect(() => callTool("create_transaction", { date: "2026-06-01", amount: -12.34, from_account_id: accounts.Salary, to_account_id: accounts.Checking, description: "Negative", status: "posted" }, ledger)).toThrow(/positive/);
+      expect(() => callTool("transfer", { date: "2026-06-01", amount: 0, from_account_id: accounts.Checking, to_account_id: accounts.Savings, description: "Zero move" }, ledger)).toThrow(/positive/);
+      expect(() => callTool("fx_transfer", { date: "2026-06-01", from_amount: 0, to_amount: 9, from_account_id: accounts.Checking, to_account_id: accounts.Savings, from_asset_id: usd, to_asset_id: eur, fx_account_id: fxClearing, description: "Zero FX" }, ledger)).toThrow(/positive/);
+      expect(() => callTool("create_scheduled_transaction", { date: "2026-06-01", amount: 0, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Zero schedule" }, ledger)).toThrow(/positive/);
+      expect(() => callTool("record_investment", { date: "2026-06-01", amount: -1, source_account_id: accounts.Checking, investment_account_id: brokerage, description: "Negative investment" }, ledger)).toThrow(/positive/);
     } finally {
       ledger.close();
     }
@@ -2880,6 +2947,7 @@ describe("app and package surface", () => {
 
     const compareScenarios = inputShapeFromDefinition(TOOL_DEFINITIONS.compare_scenarios);
     expect(compareScenarios.asset_id.safeParse(undefined).success).toBe(false);
+    expect(compareScenarios.branch_a).toBeUndefined();
 
     const createTransaction = inputShapeFromDefinition(TOOL_DEFINITIONS.create_transaction);
     expect(() => createTransaction.date.parse("today")).toThrow();

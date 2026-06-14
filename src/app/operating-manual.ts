@@ -172,8 +172,7 @@ const SECTIONS = {
       "spending",
       "net_worth",
       "balance_sheet",
-      "forecast",
-      "compare_scenarios"
+      "forecast"
     ],
     warnings: [
       "Net worth is not runway. Illiquid investments and unpaid card balances can make net worth look better than cash reality.",
@@ -218,6 +217,7 @@ const SECTIONS = {
     guidance: [
       "Prefer read-only tools first. They are safe for discovery, diagnosis, and explanation.",
       "Read MCP annotations before routing calls. readOnlyHint, destructiveHint, and idempotentHint are machine-readable safety labels.",
+      "Treat MCP as a trusted local control plane. Clovis does not authenticate MCP clients or enforce per-tool capability grants inside the server; use OS sandboxing, containers, dedicated user accounts, and filesystem permissions for hard boundaries.",
       "Use dry-run-capable tools in preview mode before applying changes. The preview is the change request.",
       "For tools without native dry-run output, use preview_mutation to run the change inside a rolled-back ledger transaction and inspect the structured diff.",
       "Applied ledger mutations return a mutation_id or operation_id. Inspect it with get_ledger_operation or list_ledger_operations, and reverse supported operations with reverse_ledger_operation rather than editing history by hand.",
