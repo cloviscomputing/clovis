@@ -24,8 +24,8 @@ jobs:
       # Stable releases become latest; prereleases stay on next until promoted.
       NPM_TAG: ${{ github.event.release.prerelease && 'next' || 'latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "26.3.0"
           registry-url: "https://registry.npmjs.org/"
