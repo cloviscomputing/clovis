@@ -11,7 +11,7 @@ import {
 } from "./amount-policy.js";
 import { backupPreview, backupResultPublic, backupStatus, listBackupFiles, resolveBackupWritePath } from "./backup-filesystem.js";
 import { safeJson, stringifyPublic } from "./json.js";
-import { assertToolDataSize, fileAccessStatus, readToolTextFile, redactToolPath, resolveToolWritePath, writeToolTextFile } from "./filesystem.js";
+import { assertLedgerImportSize, assertToolDataSize, fileAccessStatus, readLedgerImportFile, readToolTextFile, redactToolPath, resolveToolWritePath, writeToolTextFile } from "./filesystem.js";
 import {
   mutationPreview,
   operationPublic
@@ -86,6 +86,7 @@ import {
 } from "./report-helpers.js";
 import {
   compactTransactionEffects,
+  hasSelectedSameTypeAncestor,
   presentAccountBalance,
   resolveScopedAccounts,
   statementDetailMode
@@ -245,6 +246,13 @@ function scopedExportDocument(ledger: Ledger, args: Args): Row {
   const sourceIds = new Set(transactions.map((tx) => tx.source_id).filter(Boolean).map(String));
   const usedAccountIds = new Set<string>(accountIds ?? []);
   for (const tx of transactions) for (const entry of (tx.entries as Row[]) ?? []) usedAccountIds.add(String(entry.account_id));
+  for (const id of [...usedAccountIds]) {
+    let parentId = ledger.getAccount(id)?.parent_id ?? null;
+    while (parentId) {
+      usedAccountIds.add(parentId);
+      parentId = ledger.getAccount(parentId)?.parent_id ?? null;
+    }
+  }
   const accountScoped = (row: Row): boolean => usedAccountIds.size === 0 || usedAccountIds.has(String(row.account_id));
 
   return {
@@ -307,6 +315,7 @@ const runtimeContext = {
   applyRecategorizeTransaction,
   applyStatementPlan,
   assertToolDataSize,
+  assertLedgerImportSize,
   asset,
   backupPreview,
   backupResultPublic,
@@ -354,12 +363,14 @@ const runtimeContext = {
   parseTxStatusFilter,
   postedAtBound,
   presentAccountBalance,
+  hasSelectedSameTypeAncestor,
   positive,
   positiveAtomicQuantity,
   positiveMoneyAmount,
   positiveShareQuantity,
   previousDate,
   quotedPlannedUnrealized,
+  readLedgerImportFile,
   readToolTextFile,
   realizedPlannedRows,
   recategorizePreview,

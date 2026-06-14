@@ -17,14 +17,26 @@ function checkSuffix(path: string, suffixes?: Set<string>): void {
   if (suffixes && !suffixes.has(extname(path).toLowerCase())) throw new Error(`File suffix not allowed: ${extname(path)}`);
 }
 
-function maxFileBytes(): number {
-  const value = Number(process.env.CLOVIS_MAX_FILE_BYTES || 10 * 1024 * 1024);
-  if (!Number.isFinite(value) || value <= 0) throw new Error("CLOVIS_MAX_FILE_BYTES must be a positive number");
+function positiveByteLimit(name: string, fallback: number): number {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number`);
   return value;
 }
 
-export function assertToolDataSize(text: string): void {
-  if (Buffer.byteLength(text, "utf8") > maxFileBytes()) throw new Error("Input data is too large");
+function maxFileBytes(): number {
+  return positiveByteLimit("CLOVIS_MAX_FILE_BYTES", 10 * 1024 * 1024);
+}
+
+function maxLedgerImportBytes(): number {
+  return positiveByteLimit("CLOVIS_MAX_LEDGER_IMPORT_BYTES", Number(process.env.CLOVIS_MAX_FILE_BYTES || 100 * 1024 * 1024));
+}
+
+export function assertToolDataSize(text: string, maxBytes = maxFileBytes()): void {
+  if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error("Input data is too large");
+}
+
+export function assertLedgerImportSize(text: string): void {
+  assertToolDataSize(text, maxLedgerImportBytes());
 }
 
 function readCandidatePaths(ledgerPath: string, path: string): string[] {
@@ -68,7 +80,7 @@ function assertPathAllowed(ledgerPath: string, target: string, action: "read" | 
   throw new Error(`File ${action} denied by CLOVIS_FILE_POLICY=${configuredFilePolicy()}: ${target}`);
 }
 
-export function resolveToolReadPath(ledgerPath: string, path: string, suffixes?: Set<string>): string {
+export function resolveToolReadPath(ledgerPath: string, path: string, suffixes?: Set<string>, maxBytes = maxFileBytes()): string {
   const requested = readCandidatePaths(ledgerPath, path).find((candidate) => existsSync(candidate));
   if (!requested) throw new Error(`File not found: ${path}`);
   const target = realpathSync(requested);
@@ -76,7 +88,7 @@ export function resolveToolReadPath(ledgerPath: string, path: string, suffixes?:
   checkSuffix(target, suffixes);
   const stat = statSync(target);
   if (!stat.isFile()) throw new Error(`Not a file: ${path}`);
-  if (stat.size > maxFileBytes()) throw new Error(`File is too large: ${path}`);
+  if (stat.size > maxBytes) throw new Error(`File is too large: ${path}`);
   return target;
 }
 
@@ -99,6 +111,13 @@ export function readToolTextFile(ledgerPath: string, path: string, suffixes?: Se
   const target = resolveToolReadPath(ledgerPath, path, suffixes);
   const text = readFileSync(target, "utf8");
   assertToolDataSize(text);
+  return { path: target, text };
+}
+
+export function readLedgerImportFile(ledgerPath: string, path: string): { path: string; text: string } {
+  const target = resolveToolReadPath(ledgerPath, path, new Set([".json"]), maxLedgerImportBytes());
+  const text = readFileSync(target, "utf8");
+  assertLedgerImportSize(text);
   return { path: target, text };
 }
 
@@ -139,10 +158,12 @@ export function fileAccessStatus(ledgerPath: string): Record<string, unknown> {
     roots,
     errors,
     max_file_bytes: maxFileBytes(),
+    max_ledger_import_bytes: maxLedgerImportBytes(),
     env: {
       CLOVIS_FILE_POLICY: process.env.CLOVIS_FILE_POLICY ?? null,
       CLOVIS_FILE_ROOTS: process.env.CLOVIS_FILE_ROOTS ?? null,
-      CLOVIS_MAX_FILE_BYTES: process.env.CLOVIS_MAX_FILE_BYTES ?? null
+      CLOVIS_MAX_FILE_BYTES: process.env.CLOVIS_MAX_FILE_BYTES ?? null,
+      CLOVIS_MAX_LEDGER_IMPORT_BYTES: process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES ?? null
     },
     configure: {
       env: "Set CLOVIS_FILE_POLICY=ledger-dir or CLOVIS_FILE_POLICY=roots with CLOVIS_FILE_ROOTS to restrict file tools.",

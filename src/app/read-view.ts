@@ -29,22 +29,22 @@ export function resolveScopedAccounts(
   }
   if (selected.size === 0) throw new Error("Scope contains no supported accounts");
 
-  const hasSelectedSameTypeAncestor = (accountId: string): boolean => {
-    const account = ledger.getAccount(accountId);
-    let parentId = account?.parent_id ?? null;
-    while (parentId) {
-      const parent = ledger.getAccount(parentId);
-      if (parent && selected.has(parent.id) && parent.account_type === account?.account_type) return true;
-      parentId = parent?.parent_id ?? null;
-    }
-    return false;
-  };
-
   return {
     scoped: true,
-    root_account_ids: [...selected].filter((id) => !hasSelectedSameTypeAncestor(id)),
+    root_account_ids: [...selected].filter((id) => !hasSelectedSameTypeAncestor(ledger, id, selected)),
     account_ids: selected
   };
+}
+
+export function hasSelectedSameTypeAncestor(ledger: Ledger, accountId: string, selected: Set<string>): boolean {
+  const account = ledger.getAccount(accountId);
+  let parentId = account?.parent_id ?? null;
+  while (parentId) {
+    const parent = ledger.getAccount(parentId);
+    if (parent && selected.has(parent.id) && parent.account_type === account?.account_type) return true;
+    parentId = parent?.parent_id ?? null;
+  }
+  return false;
 }
 
 export function presentAccountBalance(
@@ -59,7 +59,7 @@ export function presentAccountBalance(
   const asset = ledger.getAsset(assetId);
   const scale = asset?.scale ?? 2;
   const ledgerQuantity = BigInt(quantity);
-  const mode = String(presentation ?? "ledger").toLowerCase() === "banking" ? "banking" : "ledger";
+  const mode = normalizePresentationMode(presentation);
   const displayQuantity = mode === "banking" && account.account_type === "liability" ? -ledgerQuantity : ledgerQuantity;
   const amounts = annotateAmounts(account.account_type, ledgerQuantity);
   return {
@@ -73,6 +73,11 @@ export function presentAccountBalance(
     credit_cents: amounts.credit,
     normal_balance_display: Number(fromAtomicUnits(amounts.normal_balance_cents, scale))
   };
+}
+
+export function normalizePresentationMode(presentation: unknown): "ledger" | "banking" {
+  const mode = String(presentation ?? "ledger").toLowerCase().replace(/[\s_-]+/g, "");
+  return mode === "bank" || mode === "banking" ? "banking" : "ledger";
 }
 
 export function compactTransactionEffects(ledger: Ledger, tx: Journal, args: Args = {}): Row[] {

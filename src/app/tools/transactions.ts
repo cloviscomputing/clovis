@@ -1,4 +1,5 @@
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../tool-runtime.js";
+import { assertTransactionDeletionAllowed, planTransactionDeletion } from "../transaction-deletion.js";
 import { defineToolGroup } from "../tool-spec.js";
 
 export const transactionTools = defineToolGroup([
@@ -166,7 +167,8 @@ export const transactionTools = defineToolGroup([
     definition: {
       parameters: [
         ["id", "string"],
-        ["hard_delete", "boolean", { optional: true, defaultValue: false }]
+        ["hard_delete", "boolean", { optional: true, defaultValue: false }],
+        ["dry_run", "boolean", { optional: true, defaultValue: false }]
       ],
       returns: { type: "object" }
     },
@@ -225,7 +227,9 @@ export const transactionTools = defineToolGroup([
         ["rollup", "boolean", { optional: true, defaultValue: false }],
         ["hide_zero", "boolean", { optional: true, defaultValue: true }],
         ["native_asset_only", "boolean", { optional: true, defaultValue: false }],
-        ["presentation", "string", { optional: true, defaultValue: "ledger" }]
+        ["presentation", "string", { optional: true, defaultValue: "ledger" }],
+        ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+        ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }]
       ],
       returns: { type: "object[]" }
     },
@@ -688,6 +692,7 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     isBulkCategorizationCandidate,
     iterTransactions,
     journalLegQuantity,
+    hasSelectedSameTypeAncestor,
     monthBounds,
     optionalDate,
     parseTxStatusFilter,
@@ -700,6 +705,7 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     recategorizePreview,
     recurringDateRange,
     reportStatus,
+    resolveScopedAccounts,
     safeMatchRegex,
     signedMoneyAmount,
     tagTx,
@@ -811,9 +817,12 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     get_transaction: (ledger, args) => txWithEntries(ledger, args.id),
 
     delete_transaction: (ledger, args) => {
+      const plan = planTransactionDeletion(ledger, [args.id], Boolean(args.hard_delete));
+      if (args.dry_run === true) return { ...plan, deleted: 0, voided: 0, dry_run: true };
+      assertTransactionDeletionAllowed(plan);
       if (args.hard_delete) ledger.deleteTx(args.id);
       else ledger.voidTx(args.id);
-      return { deleted: args.id, hard_delete: Boolean(args.hard_delete) };
+      return { deleted: args.hard_delete ? 1 : 0, voided: args.hard_delete ? 0 : 1, tx_id: args.id, hard_delete: Boolean(args.hard_delete), dry_run: false };
     },
 
     list_entries: (ledger, args) => {
@@ -852,29 +861,43 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
       };
     },
 
-    account_balances: (ledger, args) => ledger.accountBalances({
-      accountType: args.account_type ?? null,
-      assetId: args.asset_id ? asset(ledger, args.asset_id) : null,
-      asOf: args.as_of ? validateDate(args.as_of) : null,
-      rollup: Boolean(args.rollup),
-      hideZero: args.hide_zero !== false
-    }).filter((row) => args.native_asset_only !== true || args.asset_id || row.asset_id === row.default_asset_id).map((row) => {
-      const current = presentAccountBalance(ledger, row.account_id, row.asset_id, row.current_balance_cents, args.presentation);
-      const posted = presentAccountBalance(ledger, row.account_id, row.asset_id, row.posted_balance_cents, args.presentation);
-      const pending = presentAccountBalance(ledger, row.account_id, row.asset_id, row.pending_balance_cents, args.presentation);
-      return {
-        ...row,
-        display_sign_basis: current.display_sign_basis,
-        display_balance_cents: current.display_balance_cents,
-        display_balance: current.display_balance,
-        posted_display_balance_cents: posted.display_balance_cents,
-        posted_display_balance: posted.display_balance,
-        pending_display_balance_cents: pending.display_balance_cents,
-        pending_display_balance: pending.display_balance,
-        current_display_balance_cents: current.display_balance_cents,
-        current_display_balance: current.display_balance
-      };
-    }),
+    account_balances: (ledger, args) => {
+      const scope = resolveScopedAccounts(ledger, args);
+      const scopedRootIds = new Set(scope.root_account_ids);
+      let rows = ledger.accountBalances({
+        accountType: args.account_type ?? null,
+        assetId: args.asset_id ? asset(ledger, args.asset_id) : null,
+        asOf: args.as_of ? validateDate(args.as_of) : null,
+        rollup: Boolean(args.rollup),
+        hideZero: args.hide_zero !== false
+      });
+      if (scope.account_ids) rows = rows.filter((row) => scope.account_ids!.has(row.account_id));
+      if (scope.scoped && args.rollup === true) rows = rows.filter((row) => scopedRootIds.has(row.account_id));
+      rows = rows.filter((row) => args.native_asset_only !== true || args.asset_id || row.asset_id === row.default_asset_id);
+      const rowIds = new Set(rows.map((row) => row.account_id));
+      const overlappingRollup = args.rollup === true && !scope.scoped && rows.some((row) => hasSelectedSameTypeAncestor(ledger, row.account_id, rowIds));
+      const summable = args.rollup === true ? !overlappingRollup : true;
+      return rows.map((row) => {
+        const current = presentAccountBalance(ledger, row.account_id, row.asset_id, row.current_balance_cents, args.presentation);
+        const posted = presentAccountBalance(ledger, row.account_id, row.asset_id, row.posted_balance_cents, args.presentation);
+        const pending = presentAccountBalance(ledger, row.account_id, row.asset_id, row.pending_balance_cents, args.presentation);
+        return {
+          ...row,
+          summable,
+          ...(scope.scoped ? { scope: { account_ids: [...scope.account_ids!], root_account_ids: scope.root_account_ids } } : {}),
+          ...(overlappingRollup ? { rollup_warning: "Rollup rows include parent and child accounts; pass account_ids or entity_id for summable scoped rollups." } : {}),
+          display_sign_basis: current.display_sign_basis,
+          display_balance_cents: current.display_balance_cents,
+          display_balance: current.display_balance,
+          posted_display_balance_cents: posted.display_balance_cents,
+          posted_display_balance: posted.display_balance,
+          pending_display_balance_cents: pending.display_balance_cents,
+          pending_display_balance: pending.display_balance,
+          current_display_balance_cents: current.display_balance_cents,
+          current_display_balance: current.display_balance
+        };
+      });
+    },
 
     recategorize_transaction: (ledger, args) => {
       const preview = recategorizePreview(ledger, args);
@@ -891,8 +914,11 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     void_by_filter: (ledger, args) => {
       const matches = (handlers.list_transactions(ledger, { ...args, compact: true, limit: 100000 }) as Row).transactions as Row[];
       const dryRun = args.dry_run !== false;
-      if (!dryRun) for (const tx of matches) args.hard_delete ? ledger.deleteTx(String(tx.id)) : ledger.voidTx(String(tx.id));
-      return { matched: matches.length, voided: dryRun ? 0 : matches.length, tx_ids: matches.map((tx) => tx.id), dry_run: dryRun };
+      const plan = planTransactionDeletion(ledger, matches.map((tx) => String(tx.id)), Boolean(args.hard_delete));
+      if (dryRun) return { ...plan, voided: 0, deleted: 0, dry_run: true };
+      assertTransactionDeletionAllowed(plan);
+      for (const tx of matches) args.hard_delete ? ledger.deleteTx(String(tx.id)) : ledger.voidTx(String(tx.id));
+      return { ...plan, voided: args.hard_delete ? 0 : matches.length, deleted: args.hard_delete ? matches.length : 0, dry_run: false };
     },
 
     move_transactions: (ledger, args) => {

@@ -186,6 +186,40 @@ function parseToolArgs(opts: ToolOptions): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function collectOption(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+function scopeArgs(opts: { account?: string[]; entity?: string; parent?: string }): Record<string, unknown> {
+  if (opts.entity && opts.parent && opts.entity !== opts.parent) throw new Error("Use either --entity or --parent, not both");
+  const accountIds = Array.isArray(opts.account) ? opts.account : [];
+  return {
+    ...(accountIds.length > 0 ? { account_ids: accountIds } : {}),
+    ...(opts.entity || opts.parent ? { entity_id: opts.entity ?? opts.parent } : {})
+  };
+}
+
+function hasScope(args: Record<string, unknown>): boolean {
+  return Boolean(args.entity_id) || (Array.isArray(args.account_ids) && args.account_ids.length > 0);
+}
+
+function entityRootNames(ledger: Ledger): string[] {
+  return ledger.listAccounts().filter((account) => {
+    if (account.parent_id) return false;
+    const descendantIds = [...ledger.descendants(account.id)].filter((id) => id !== account.id);
+    if (descendantIds.length === 0) return false;
+    const types = new Set([...descendantIds, account.id].map((id) => ledger.getAccount(id)?.account_type).filter(Boolean));
+    return types.size > 1;
+  }).map((account) => account.name);
+}
+
+function requireScopeWhenAmbiguous(ledger: Ledger, args: Record<string, unknown>, command: string): void {
+  if (hasScope(args)) return;
+  const roots = entityRootNames(ledger);
+  if (roots.length <= 1) return;
+  throw new Error(`${command} is ambiguous across account groups (${roots.join(", ")}); pass --parent/--entity or --account.`);
+}
+
 program.command("tools")
   .description("List every public app tool")
   .addHelpText("after", examples([
@@ -257,8 +291,13 @@ account.command("balances")
   .description("List posted, pending, and current balances by account and asset")
   .option("--type <type>", "Account type")
   .option("--asset <id>", "Asset id or symbol")
+  .option("--entity <id>", "Scope to an account group")
+  .option("--parent <id>", "Alias for --entity")
+  .option("--account <id>", "Restrict to an account or account subtree; may be repeated", collectOption, [])
   .option("--as-of <date>", "Balance date, YYYY-MM-DD")
   .option("--rollup", "Roll balances up through same-type account children")
+  .option("--native-only", "Only include each account's native/default asset")
+  .option("--presentation <mode>", "Display mode: ledger, bank, or banking", "ledger")
   .option("--show-zero", "Include zero-balance rows")
   .addHelpText("after", [
     examples([
@@ -271,7 +310,11 @@ account.command("balances")
       "Current balance is posted plus pending."
     ])
   ].join("\n"))
-  .action((opts) => withLedger(program, (ledger) => callTool("account_balances", { account_type: opts.type, asset_id: opts.asset, as_of: opts.asOf, rollup: Boolean(opts.rollup), hide_zero: !opts.showZero }, ledger)));
+  .action((opts) => withLedger(program, (ledger) => {
+    const args = { account_type: opts.type, asset_id: opts.asset, as_of: opts.asOf, rollup: Boolean(opts.rollup), hide_zero: !opts.showZero, native_asset_only: Boolean(opts.nativeOnly), presentation: opts.presentation, ...scopeArgs(opts) };
+    if (args.rollup) requireScopeWhenAmbiguous(ledger, args, "account balances --rollup");
+    return callTool("account_balances", args, ledger);
+  }));
 account.command("list")
   .description("List accounts")
   .option("--type <type>", "Account type")
@@ -446,8 +489,16 @@ const report = program.command("report")
     notes(["Reports require explicit quote assets; Clovis does not infer report currency."])
   ].join("\n"));
 report.command("income-statement").description("Report income, expenses, and net income").requiredOption("--year <year>", "UTC year").option("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report income-statement --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("income_statement", { year: Number(opts.year), month: opts.month ? Number(opts.month) : undefined, quote_asset_id: opts.quote }, ledger)));
-report.command("balance-sheet").description("Report assets, liabilities, and equity").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report balance-sheet --date 2026-06-30 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("balance_sheet", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
-report.command("net-worth").description("Report net worth").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report net-worth --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("net_worth", { date: opts.date, quote_asset_id: opts.quote }, ledger)));
+report.command("balance-sheet").description("Report assets, liabilities, and equity").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").option("--entity <id>", "Scope to an account group").option("--parent <id>", "Alias for --entity").option("--account <id>", "Restrict to an account or account subtree; may be repeated", collectOption, []).option("--include-pending", "Include pending transactions").option("--status <status>", STATUS_FILTER_HELP).option("--hide-zero", "Hide zero-balance rows").addHelpText("after", examples(["clovis report balance-sheet --date 2026-06-30 --quote CAD --parent Personal"])).action((opts) => withLedger(program, (ledger) => {
+  const args = { date: opts.date, quote_asset_id: opts.quote, include_pending: Boolean(opts.includePending), status: opts.status, hide_zero: Boolean(opts.hideZero), ...scopeArgs(opts) };
+  requireScopeWhenAmbiguous(ledger, args, "report balance-sheet");
+  return callTool("balance_sheet", args, ledger);
+}));
+report.command("net-worth").description("Report net worth").option("--date <date>", "As-of date, YYYY-MM-DD").requiredOption("--quote <asset>", "Quote asset symbol or id").option("--entity <id>", "Scope to an account group").option("--parent <id>", "Alias for --entity").option("--account <id>", "Restrict to an account or account subtree; may be repeated", collectOption, []).option("--include-pending", "Include pending transactions").option("--status <status>", STATUS_FILTER_HELP).addHelpText("after", examples(["clovis report net-worth --quote CAD --parent Personal"])).action((opts) => withLedger(program, (ledger) => {
+  const args = { date: opts.date, quote_asset_id: opts.quote, include_pending: Boolean(opts.includePending), status: opts.status, ...scopeArgs(opts) };
+  requireScopeWhenAmbiguous(ledger, args, "report net-worth");
+  return callTool("net_worth", args, ledger);
+}));
 report.command("spending").description("Report spending by category").requiredOption("--year <year>", "UTC year").requiredOption("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report spending --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("spending", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
 report.command("cash-flow").description("Report cash flow by activity").requiredOption("--year <year>", "UTC year").requiredOption("--month <month>", "Month, 1-12").requiredOption("--quote <asset>", "Quote asset symbol or id").addHelpText("after", examples(["clovis report cash-flow --year 2026 --month 6 --quote CAD"])).action((opts) => withLedger(program, (ledger) => callTool("cash_flow", { year: Number(opts.year), month: Number(opts.month), quote_asset_id: opts.quote }, ledger)));
 report.command("register").description("Show an account register").requiredOption("--account <id>", "Account id").option("--asset <id>", "Asset id or symbol").option("--from <date>", "Start date, YYYY-MM-DD").option("--to <date>", "End date, YYYY-MM-DD").option("--status <status>", STATUS_FILTER_HELP).addHelpText("after", examples(["clovis report register --account <checking-id> --from 2026-06-01 --to 2026-06-30"])).action((opts) => withLedger(program, (ledger) => callTool("account_register", { account_id: opts.account, asset_id: opts.asset, date_from: opts.from, date_to: opts.to, status: opts.status }, ledger)));

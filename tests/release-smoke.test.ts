@@ -86,6 +86,7 @@ describe("release smoke", () => {
 
     const binDir = join(dir, "node_modules", ".bin");
     expect(execFileSync(join(binDir, "clovis"), ["--version"], { cwd: dir, encoding: "utf8" }).trim()).toBe(packageVersion);
+    expect(execFileSync(join(binDir, "clovis-mcp"), ["--version"], { cwd: dir, encoding: "utf8" }).trim()).toBe(packageVersion);
     const cli = JSON.parse(execFileSync(join(binDir, "clovis"), ["--db", join(dir, "cli.db"), "--format", "json", "init", "--currency", "USD"], { cwd: dir, encoding: "utf8" }));
     expect(cli.ok).toBe(true);
     expect(cli.data.accounts_created).toBeGreaterThan(0);

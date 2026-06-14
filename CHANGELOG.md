@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.1
+
+Human read-surface cleanup release.
+
+- Add shared `account_ids` and `entity_id` scoping to `account_balances`, with scoped rollups returning summable non-overlapping rows.
+- Add normal CLI flags for scoped balance-sheet, net-worth, and account-balance reads, including `--parent`, `--entity`, repeatable `--account`, pending/status controls, native-only balances, and bank presentation.
+- Normalize `presentation:"bank"` and `presentation:"banking"` to the same liability display behavior.
+- Accept `balance_sign:"liability"` for user-facing credit-card statement balances and expose raw plus ledger-normalized statement balance metadata.
+- Return current/open-ended public report dates as `as_of:null` with explanatory basis fields instead of leaking the internal open-ended sentinel.
+- Make `clovis-mcp --version` work without `CLOVIS_DB` and add MCP `structuredContent` beside the existing text JSON payload.
+
 ## 0.3.0
 
 Agent read-surface release.

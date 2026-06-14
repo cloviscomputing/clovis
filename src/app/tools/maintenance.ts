@@ -414,7 +414,7 @@ export function maintenanceHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     account,
     accountAsset,
     amountForAccount,
-    assertToolDataSize,
+    assertLedgerImportSize,
     asset,
     backupPreview,
     backupResultPublic,
@@ -433,7 +433,7 @@ export function maintenanceHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     operationPublic,
     optionalDate,
     parseTxStatusFilter,
-    readToolTextFile,
+    readLedgerImportFile,
     redactToolPath,
     registryEntry,
     registryNames,
@@ -504,8 +504,8 @@ export function maintenanceHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
 
     import_ledger: (ledger, args) => {
       if (Boolean(args.file_path) === Boolean(args.data)) throw new Error("Exactly one of file_path or data is required");
-      const text = args.file_path ? readToolTextFile(ledger.path, args.file_path, new Set([".json"])).text : String(args.data);
-      assertToolDataSize(text);
+      const text = args.file_path ? readLedgerImportFile(ledger.path, args.file_path).text : String(args.data);
+      assertLedgerImportSize(text);
       return ledger.importDocument(JSON.parse(text), args.preserve_ids !== false, Boolean(args.dry_run));
     },
 

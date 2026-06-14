@@ -486,6 +486,15 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       missing_conversions: missing
     };
   };
+  const publicCurrentAsOf = (report: Row, args: Row): Row => {
+    if (args.date || report.as_of !== "9999-12-31") return report;
+    return {
+      ...report,
+      as_of: null,
+      as_of_basis: "current_open_ended",
+      as_of_description: "Open-ended current snapshot; no calendar cutoff was applied."
+    };
+  };
   return {
 
     income_statement: (ledger, args) => {
@@ -499,19 +508,20 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
 
     balance_sheet: (ledger, args) => {
       unsupportedArguments({ branch: args.branch });
-      const report = balanceSheetReport(ledger, args);
+      const report = publicCurrentAsOf(balanceSheetReport(ledger, args), args);
       return args.compact ? { total_assets: report.total_assets, total_liabilities: report.total_liabilities, total_equity: report.total_equity, total_assets_cents: report.total_assets, total_liabilities_cents: report.total_liabilities, total_equity_cents: report.total_equity } : report;
     },
 
     net_worth: (ledger, args) => {
       unsupportedArguments({ branch: args.branch });
-      const sheet = balanceSheetReport(ledger, { ...args, hide_zero: false });
+      const sheet = publicCurrentAsOf(balanceSheetReport(ledger, { ...args, hide_zero: false }), args);
       const net = BigInt(sheet.total_assets) + BigInt(sheet.total_liabilities);
       return {
         as_of: sheet.as_of,
         total_assets: sheet.total_assets,
         total_liabilities: sheet.total_liabilities,
         net_worth: net,
+        ...(sheet.as_of_basis ? { as_of_basis: sheet.as_of_basis, as_of_description: sheet.as_of_description } : {}),
         total_assets_cents: sheet.total_assets,
         total_liabilities_cents: sheet.total_liabilities,
         net_worth_cents: net,

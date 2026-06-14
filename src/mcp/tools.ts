@@ -1,11 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z, type ZodTypeAny } from "zod";
 import { callTool } from "../app/catalog.js";
+import type { JsonValue } from "../app/json.js";
 import { OPERATING_MANUAL_INSTRUCTIONS, OPERATING_MANUAL_RESOURCES, operatingManualMarkdown } from "../app/operating-manual.js";
 import { TOOL_DEFINITIONS, normalizeToolInput, parameterAliasesForTool, toolAnnotations, type ToolDefinition, type ToolParameterDefinition } from "../app/signatures.js";
 import { VERSION } from "../version.js";
 
 type Shape = Record<string, ZodTypeAny>;
+type StructuredContent = Record<string, JsonValue>;
 
 // Runtime schemas are intentionally stricter than TypeScript metadata: dates,
 // array sizes, and text sizes are bounded before tool handlers run.
@@ -97,6 +99,12 @@ export function parseToolInput(name: string, input: Record<string, unknown> = {}
   return normalizeToolInput(name, inputSchemaFromDefinition(definition, name).parse(input));
 }
 
+function structuredToolContent(result: unknown): StructuredContent {
+  if (Array.isArray(result)) return { data: result as JsonValue[], count: result.length };
+  if (result && typeof result === "object") return result as StructuredContent;
+  return { value: result as JsonValue };
+}
+
 export function createClovisMcpServer(): McpServer {
   const server = new McpServer({ name: "clovis", version: VERSION }, { instructions: OPERATING_MANUAL_INSTRUCTIONS });
   for (const resource of OPERATING_MANUAL_RESOURCES) {
@@ -122,6 +130,7 @@ export function createClovisMcpServer(): McpServer {
       async (input: Record<string, unknown>) => {
         const result = callTool(name, input ?? {});
         return {
+          structuredContent: structuredToolContent(result),
           content: [
             {
               type: "text",

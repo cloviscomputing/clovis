@@ -236,6 +236,9 @@ async function callMcpTool(ctx: TestContext, name: ToolName, args: Args): Promis
     expect(content[0]?.type).toBe("text");
     expect((result as any).isError, content[0]?.text).not.toBe(true);
     parsed = JSON.parse(String(content[0]?.text ?? ""));
+    const structured = (result as any).structuredContent;
+    if (Array.isArray(parsed)) expect(structured).toEqual({ data: parsed, count: parsed.length });
+    else expect(structured).toEqual(parsed);
   });
   return parsed;
 }

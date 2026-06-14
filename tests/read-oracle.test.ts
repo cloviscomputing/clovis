@@ -533,7 +533,7 @@ const READ_CASES: ReadCase[] = [
       expect(result.monthly_activity.income).toBe(Number(incomeExpense(ctx, "active").income));
       expect(result.include_planned).toBe(false);
       expect(result.warnings).toEqual([]);
-      expect(result.current_snapshot).not.toHaveProperty("as_of");
+      expect(result.current_snapshot.as_of).toBeNull();
       expect(result.current_snapshot.as_of_basis).toBe("current_open_ended");
       expect(result.cash_position.actual.include_planned).toBe(false);
     }

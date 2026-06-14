@@ -8,6 +8,7 @@ import { migrateSchema } from "./migrations.js";
 import {
   getLedgerOperationRow,
   insertLedgerOperation,
+  jsonText,
   listLedgerOperationRows as auditOperationRows,
   listLedgerOperationRowsByBook,
   markLedgerOperationReversedRow,
@@ -452,7 +453,7 @@ export class Ledger {
       label ?? "",
       status,
       now(),
-      JSON.stringify(metadata)
+      jsonText(metadata)
     );
     return sourceId;
   }
@@ -515,7 +516,7 @@ export class Ledger {
         createdAt,
         input.applied_at == null ? null : String(input.applied_at),
         input.discarded_at == null ? null : String(input.discarded_at),
-        JSON.stringify(input.metadata ?? input.metadata_json ?? {})
+        jsonText(input.metadata ?? input.metadata_json ?? {})
       );
       for (const row of rows) {
         this.db.prepare(`
@@ -538,7 +539,7 @@ export class Ledger {
           row.created_journal_id == null ? null : String(row.created_journal_id),
           row.counterpart_account_id == null ? null : String(row.counterpart_account_id),
           String(row.reason ?? ""),
-          JSON.stringify(row.metadata ?? row.metadata_json ?? {})
+          jsonText(row.metadata ?? row.metadata_json ?? {})
         );
       }
       return this.getStatementPlan(planId)!;
@@ -2283,6 +2284,13 @@ export class Ledger {
         lots: 0,
         scheduled_transactions: 0
       },
+      skipped_existing: {
+        assets: 0,
+        accounts: 0,
+        sources: 0,
+        transactions: 0
+      },
+      conflicts: [] as Row[],
       skipped: 0,
       errors: [] as string[],
       dry_run: dryRun
@@ -2365,6 +2373,16 @@ export class Ledger {
       if (key === "recategorize_from" || key === "recategorize_to") return accountMap.get(value) ?? value;
       return value;
     };
+    const sameText = (left: unknown, right: unknown): boolean => String(left ?? "") === String(right ?? "");
+    const noteExisting = (section: keyof typeof result.skipped_existing): void => {
+      result.skipped_existing[section] += 1;
+      result.skipped += 1;
+    };
+    const conflict = (section: string, index: number, idValue: string, message: string): void => {
+      const text = `${section}[${index}].${message}`;
+      result.conflicts.push({ section, index, id: idValue, error: message });
+      errors.push(text);
+    };
 
     assets.forEach((asset, index) => {
       const assetId = requireId("assets", asset, index);
@@ -2378,7 +2396,11 @@ export class Ledger {
         errors.push(`assets[${index}].type is invalid: ${error instanceof Error ? error.message : String(error)}`);
       }
       parseScale(asset.scale ?? asset.decimals ?? 2, `assets[${index}].scale`);
-      if (preserveIds && this.getAsset(assetId)) errors.push(`assets[${index}].id already exists: ${assetId}`);
+      const existing = preserveIds ? this.getAsset(assetId) : null;
+      if (existing) {
+        if (dryRun && sameText(existing.symbol, symbol) && sameText(existing.type, asset.type ?? asset.asset_type) && Number(existing.scale) === Number(asset.scale ?? asset.decimals ?? 2)) noteExisting("assets");
+        else conflict("assets", index, assetId, `id already exists: ${assetId}`);
+      }
       assetMap.set(assetId, preserveIds ? assetId : (symbol ? this.getAssetBySymbol(symbol)?.id ?? id("asset") : id("asset")));
     });
 
@@ -2402,7 +2424,14 @@ export class Ledger {
       if (account.parent_id && !accountMap.has(String(account.parent_id)) && !this.getAccount(String(account.parent_id))) {
         errors.push(`accounts[${index}].parent_id references unknown account ${String(account.parent_id)}`);
       }
-      if (preserveIds && this.getAccount(accountId)) errors.push(`accounts[${index}].id already exists: ${accountId}`);
+      const existing = preserveIds ? this.getAccount(accountId) : null;
+      if (existing) {
+        const parent = account.parent_id ? accountMap.get(String(account.parent_id)) ?? String(account.parent_id) : null;
+        const defaultAsset = account.default_asset_id ?? account.asset_id ?? null;
+        const defaultMatches = defaultAsset == null || sameText(existing.default_asset_id, defaultAsset);
+        if (dryRun && sameText(existing.name, accountName) && sameText(existing.account_type, account.type ?? account.account_type) && sameText(existing.parent_id, parent) && defaultMatches) noteExisting("accounts");
+        else conflict("accounts", index, accountId, `id already exists: ${accountId}`);
+      }
     });
     const accountNames = new Map<string, number>();
     accounts.forEach((account, index) => {
@@ -2495,7 +2524,11 @@ export class Ledger {
           errors.push(`sources[${index}].metadata_json must be valid JSON`);
         }
       }
-      if (preserveIds && existingSource(sourceId)) errors.push(`sources[${index}].id already exists: ${sourceId}`);
+      const existing = preserveIds ? this.db.prepare("SELECT * FROM sources WHERE book_id = ? AND id = ?").get(this.bookId, sourceId) as Row | undefined : undefined;
+      if (existing) {
+        if (dryRun && sameText(existing.type, source.type) && sameText(existing.label, source.label ?? "") && sameText(existing.status, source.status ?? "open")) noteExisting("sources");
+        else conflict("sources", index, sourceId, `id already exists: ${sourceId}`);
+      }
       sourceMap.set(sourceId, preserveIds ? sourceId : id(source.type === "import" ? "batch" : "source"));
     });
 
@@ -2504,7 +2537,11 @@ export class Ledger {
       if (!txId) return;
       trackId("transactions", txId, index);
       txMap.set(txId, preserveIds ? txId : id("tx"));
-      if (preserveIds && this.getTx(txId)) errors.push(`transactions[${index}].id already exists: ${txId}`);
+      const existing = preserveIds ? this.getTx(txId) : null;
+      if (existing) {
+        if (dryRun && sameText(existing.date, tx.date) && sameText(existing.status, tx.status) && sameText(existing.description, tx.description ?? "") && sameText(existing.external_id, tx.external_id)) noteExisting("transactions");
+        else conflict("transactions", index, txId, `id already exists: ${txId}`);
+      }
       try {
         this.assertPeriodOpen(dateOnly(String(tx.date)));
       } catch (error) {

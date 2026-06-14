@@ -5,6 +5,7 @@ import type { Journal, TxStatus } from "../core/types.js";
 import { signedMoneyAmount, statementQuantity } from "./amount-policy.js";
 import { readToolTextFile } from "./filesystem.js";
 import { safeJson } from "./json.js";
+import { statementDetailMode } from "./read-view.js";
 import { publicPlanRows, statementPlanOutput } from "./statement-workflow.js";
 import { isImportDedupeCandidate, isStatementMatchCandidate } from "./transaction-lifecycle.js";
 import { parseTxStatus, validateDate } from "./validation.js";
@@ -402,7 +403,7 @@ export function planRow(row: Row, action: string, quantity: bigint, counterpartI
 export function userFacingLiabilityBalance(args: Args): boolean {
   const statementType = String(args.statement_type ?? "").toLowerCase().replace(/[\s_-]+/g, "");
   const balanceSign = String(args.balance_sign ?? args.balance_basis ?? "").toLowerCase().replace(/[\s_-]+/g, "");
-  return ["creditcard", "cardstatement", "liabilitystatement"].includes(statementType) || ["statement", "userfacing", "positive"].includes(balanceSign);
+  return ["creditcard", "cardstatement", "liabilitystatement"].includes(statementType) || ["statement", "userfacing", "positive", "liability"].includes(balanceSign);
 }
 
 export function expectedStatementBalance(ledger: Ledger, accountId: string, assetId: string, args: Args): bigint | null {
@@ -413,11 +414,16 @@ export function expectedStatementBalance(ledger: Ledger, accountId: string, asse
   return expected;
 }
 
-export function statementBalanceFields(ledger: Ledger, assetId: string, statementFile: Row): Row {
+export function statementBalanceFields(ledger: Ledger, assetId: string, statementFile: Row, accountId?: string | null): Row {
   const metadata = safeJson(statementFile.metadata);
   if (metadata.statement_balance == null || !Number.isFinite(Number(metadata.statement_balance))) return {};
+  const raw = signedMoneyAmount(ledger, assetId, Number(metadata.statement_balance), "Statement balance");
+  const accountRow = accountId ? ledger.getAccount(accountId) : null;
+  const ledgerNormalized = accountRow?.account_type === "liability" && raw > 0n ? -raw : raw;
   return {
-    statement_balance_cents: signedMoneyAmount(ledger, assetId, Number(metadata.statement_balance), "Statement balance"),
+    statement_balance_cents: raw,
+    statement_balance_raw_cents: raw,
+    statement_balance_ledger_cents: ledgerNormalized,
     statement_balance_date: metadata.statement_balance_date ?? null,
     balance_source: metadata.balance_source ?? "statement_balance"
   };
@@ -497,7 +503,7 @@ export function buildStatementPlan(ledger: Ledger, args: Args, options: { persis
     date_to: realizedDateTo,
     date_tolerance_days: tolerance
   });
-  const baseStatus = targetStatus === "pending" ? "pending" : "posted";
+  const baseStatus = targetStatus === "pending" ? "active" : "posted";
   const plannedBalance = ledger.balanceTree(accountId, assetId, null, baseStatus) + plannedDelta;
   const expected = expectedStatementBalance(ledger, accountId, assetId, args);
   const balanceMatches = expected == null ? null : expected === plannedBalance;
@@ -533,7 +539,7 @@ export function buildStatementPlan(ledger: Ledger, args: Args, options: { persis
     dry_run: !options.persist,
     realized_planned_rows: realizedPlanned,
     metadata,
-    ...statementBalanceFields(ledger, assetId, statementFile)
+    ...statementBalanceFields(ledger, assetId, statementFile, accountId)
   });
 }
 
@@ -555,6 +561,7 @@ export function applyStatementPlan(ledger: Ledger, planId: string, args: Args = 
   let committed = 0;
   let voided = 0;
   const createdTransactions: Row[] = [];
+  const includeDetails = statementDetailMode(args);
   const sourceId = ledger.runInTransaction(() => {
     const batchId = batch(ledger, args.batch_label ?? `Statement plan ${planId}`, { statement_plan_id: planId, statement_type: plan.statement_kind }, targetStatus === "posted" ? "posted_import" : "pending_import");
     for (const row of rows) {
@@ -602,7 +609,7 @@ export function applyStatementPlan(ledger: Ledger, planId: string, args: Args = 
     voided,
     skipped: appliedRows.filter((row) => row.action === "matched").length,
     imported: created,
-    transactions: createdTransactions,
+    ...(includeDetails ? { transactions: createdTransactions } : {}),
     balance_matches: appliedPlan.expected_balance == null ? null : BigInt(appliedPlan.expected_balance as string | number | bigint | boolean) === BigInt(appliedPlan.applied_balance as string | number | bigint | boolean),
     actual_balance_cents: appliedPlan.applied_balance
   };

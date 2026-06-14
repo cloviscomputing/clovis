@@ -16,11 +16,15 @@ function sqlIdentifier(value: string): string {
   return value;
 }
 
+export function jsonText(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item);
+}
+
 function sqlValue(value: unknown): SQLInputValue {
   if (value === undefined) return null;
   if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "bigint") return value;
   if (typeof value === "boolean") return value ? 1 : 0;
-  return JSON.stringify(value);
+  return jsonText(value);
 }
 
 function primaryKey(table: string): string {
@@ -49,10 +53,10 @@ export function insertLedgerOperation(db: DatabaseSync, bookId: string, input: R
     input.reversed_at == null ? null : String(input.reversed_at),
     input.reversed_by_operation_id == null ? null : String(input.reversed_by_operation_id),
     input.reverses_operation_id == null ? null : String(input.reverses_operation_id),
-    String(input.input_json ?? JSON.stringify(input.input ?? {})),
-    String(input.preview_json ?? JSON.stringify(input.preview ?? {})),
-    String(input.result_json ?? JSON.stringify(input.result ?? {})),
-    String(input.metadata_json ?? JSON.stringify(input.metadata ?? {}))
+    String(input.input_json ?? jsonText(input.input ?? {})),
+    String(input.preview_json ?? jsonText(input.preview ?? {})),
+    String(input.result_json ?? jsonText(input.result ?? {})),
+    String(input.metadata_json ?? jsonText(input.metadata ?? {}))
   );
   rows.forEach((row, index) => {
     db.prepare(`
@@ -75,7 +79,7 @@ export function insertLedgerOperation(db: DatabaseSync, bookId: string, input: R
       row.after_json == null ? null : String(row.after_json),
       row.correction_journal_id == null ? null : String(row.correction_journal_id),
       row.reverse_journal_id == null ? null : String(row.reverse_journal_id),
-      String(row.metadata_json ?? JSON.stringify(row.metadata ?? {}))
+      String(row.metadata_json ?? jsonText(row.metadata ?? {}))
     );
   });
   return operationId;

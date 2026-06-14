@@ -28,6 +28,19 @@ export function publicPlanRows(rows: Row[]): Row[] {
   });
 }
 
+function samplePlanRows(grouped: Record<string, Row[]>, limit: number): Row[] {
+  if (limit <= 0) return [];
+  const priority = ["ambiguous", "pending_to_commit", "stale_pending_to_void", "new_posted", "new_pending", "matched", "ignored"];
+  const out: Row[] = [];
+  for (const action of priority) {
+    for (const row of grouped[action] ?? []) {
+      if (out.length >= limit) return out;
+      out.push(row);
+    }
+  }
+  return out;
+}
+
 export function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = {}): Row {
   const publicRows = publicPlanRows(rows);
   const grouped = planRowsByAction(publicRows);
@@ -57,7 +70,8 @@ export function statementPlanOutput(plan: Row | null, rows: Row[], extra: Row = 
     applied_balance_cents: plan?.applied_balance ?? null,
     balance_matches: extra.balance_matches ?? null,
     balance_sign: extra.balance_sign ?? null,
-    rows: publicRows.slice(0, extra.sample_limit ?? 20),
+    available_actions: ["plan", "apply", "verify", "discard"],
+    rows: samplePlanRows(grouped, Number(extra.sample_limit ?? 20)),
     total_rows: publicRows.length,
     actions: summary,
     matched: summary.matched,

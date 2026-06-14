@@ -301,6 +301,18 @@ function genericReversalRows(ledger: Ledger, rows: Row[], hasAccountingDelta: bo
   return { reversible: sortRowsForReverse(reversible), skipped };
 }
 
+function canReverseAccountingInPlace(rows: Row[], delta: Row[]): boolean {
+  if (delta.length === 0) return false;
+  const accountingRows = rows.filter((row) => ACCOUNTING_ROW_TABLES.has(String(row.entity_type)));
+  const journalUpdates = accountingRows.filter((row) => (
+    row.entity_type === "journals"
+    && row.action === "update"
+    && row.before?.id === row.after?.id
+    && row.before?.status !== row.after?.status
+  ));
+  return journalUpdates.length > 0 && accountingRows.length === journalUpdates.length;
+}
+
 function postAccountingDeltaReversal(ledger: Ledger, operationId: string, delta: Row[], date: string, deps: OperationReversalDeps): string[] {
   const byStatus = new Map<string, Array<[string, string, bigint]>>();
   for (const row of delta) {
@@ -376,8 +388,11 @@ export function reverseLedgerOperation(ledger: Ledger, args: Row, deps: Operatio
     const date = args.date ? validateDate(String(args.date)) : today();
     const scenarioBooks = createdScenarioBooks(rows);
     const scenarioBookIds = new Set(scenarioBooks.map((row) => String(row.id)));
-    const { reversible, skipped } = genericReversalRows(ledger, rows, genericDelta.length > 0, scenarioBookIds);
-    const hasWork = genericDelta.length > 0 || scenarioBooks.length > 0 || reversible.length > 0;
+    const publicRows = rows.map(operationRowPublic);
+    const reverseAccountingInPlace = canReverseAccountingInPlace(publicRows, genericDelta);
+    const accountingDeltaToPost = reverseAccountingInPlace ? [] : genericDelta;
+    const { reversible, skipped } = genericReversalRows(ledger, rows, accountingDeltaToPost.length > 0, scenarioBookIds);
+    const hasWork = accountingDeltaToPost.length > 0 || scenarioBooks.length > 0 || reversible.length > 0;
     if (args.dry_run !== false) {
       return {
         dry_run: true,
@@ -385,8 +400,8 @@ export function reverseLedgerOperation(ledger: Ledger, args: Row, deps: Operatio
         reverses_operation_id: operation.id,
         reversible: hasWork,
         blocked_reason: hasWork ? null : "operation has no reversible ledger changes",
-        reversal_strategy: "generic_ledger_operation",
-        accounting_delta: genericDelta,
+        reversal_strategy: reverseAccountingInPlace ? "generic_ledger_operation_in_place" : "generic_ledger_operation",
+        accounting_delta: accountingDeltaToPost,
         reverse_date: date,
         scenario_reversals: scenarioBooks.map((row) => ({ book_id: row.id, name: row.name, action: "close" })),
         row_reversals: reversible.map(reversalSummary),
@@ -398,7 +413,7 @@ export function reverseLedgerOperation(ledger: Ledger, args: Row, deps: Operatio
     const reversedRows: Row[] = [];
     const closedScenarioBooks: Row[] = [];
     const reverseOperation = ledger.runInTransaction(() => {
-      reverseIds.push(...postAccountingDeltaReversal(ledger, String(operation.id), genericDelta, date, deps));
+      reverseIds.push(...postAccountingDeltaReversal(ledger, String(operation.id), accountingDeltaToPost, date, deps));
       for (const row of scenarioBooks) {
         ledger.discardScenarioBook(String(row.id ?? row.name));
         closedScenarioBooks.push({ book_id: row.id, name: row.name, action: "closed" });
@@ -419,8 +434,8 @@ export function reverseLedgerOperation(ledger: Ledger, args: Row, deps: Operatio
         reverses_operation_id: operation.id,
         input: { ...args, dry_run: false },
         preview: {
-          reversal_strategy: "generic_ledger_operation",
-          accounting_delta: genericDelta,
+          reversal_strategy: reverseAccountingInPlace ? "generic_ledger_operation_in_place" : "generic_ledger_operation",
+          accounting_delta: accountingDeltaToPost,
           scenario_reversals: scenarioBooks.map((row) => ({ book_id: row.id, name: row.name, action: "close" })),
           row_reversals: reversible,
           skipped_rows: skipped
@@ -441,6 +456,7 @@ export function reverseLedgerOperation(ledger: Ledger, args: Row, deps: Operatio
       dry_run: false,
       operation_id: reverseOperation.id,
       reversed_operation_id: operation.id,
+      reversal_strategy: reverseAccountingInPlace ? "generic_ledger_operation_in_place" : "generic_ledger_operation",
       reverse_journal_ids: reverseIds,
       closed_scenario_books: closedScenarioBooks,
       reversed_rows: reversedRows,

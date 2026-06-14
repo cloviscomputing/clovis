@@ -261,6 +261,7 @@ export const statementTools = defineToolGroup([
         ["date_format", "string", { optional: true, defaultValue: "auto" }],
         ["amount_convention", "string", { optional: true, defaultValue: "signed" }],
         ["statement_type", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["balance_sign", "string", { nullable: true, optional: true, defaultValue: null }],
         ["date_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
         ["min_likely_score", "number", { optional: true, defaultValue: 0.72 }],
         ["row_indexes", "integer[]", { nullable: true, optional: true, defaultValue: null }],
@@ -444,18 +445,23 @@ export function statementHandlers(ctx: ToolRuntimeContext, handlers: ToolHandler
       const rows = statement.rows;
       const accountId = account(_ledger, args.account_id);
       const assetId = args.asset_id ? explicitAsset(_ledger, args.asset_id) : args.currency ? asset(_ledger, null, args.currency) : accountAsset(_ledger, accountId);
-      return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true, ...statementBalanceFields(_ledger, assetId, statement) };
+      return { rows: rows.slice(0, args.rows ?? 3), transactions: rows.slice(0, args.rows ?? 3), total_rows: rows.length, would_import: rows.length, warnings: [], dry_run: true, ...statementBalanceFields(_ledger, assetId, statement, accountId) };
     },
 
     process_statement: (ledger, args) => {
       unsupportedArguments({ transfer_account_id: args.transfer_account_id });
-      const plan = buildStatementPlan(ledger, { ...args, status: "posted", include_details: true }, { persist: Boolean(args.commit), targetStatus: "posted" });
+      const plan = handlers.refresh_statement(ledger, {
+        ...args,
+        action: "plan",
+        status: "posted",
+        dry_run: !args.commit,
+        sample_limit: args.sample_limit ?? args.preview_rows ?? 10
+      }) as Row;
       const actions = plan.actions ?? {};
       const newRows = (actions.new_posted ?? 0) + (actions.new_pending ?? 0);
       const wouldApply = newRows + (actions.pending_to_commit ?? 0) + (actions.stale_pending_to_void ?? 0);
       const preview = {
         ...plan,
-        transactions: [...(plan.new_posted ?? []), ...(plan.pending_to_commit ?? [])].slice(0, args.preview_rows ?? 10),
         matched_existing: actions.matched ?? 0,
         pending_to_commit_count: actions.pending_to_commit ?? 0,
         stale_pending_to_void_count: actions.stale_pending_to_void ?? 0,
@@ -466,7 +472,19 @@ export function statementHandlers(ctx: ToolRuntimeContext, handlers: ToolHandler
         would_apply: wouldApply,
         dry_run: !args.commit
       };
-      return args.commit ? { ...preview, ...applyStatementPlan(ledger, String(plan.plan_id), { dry_run: false, batch_label: args.batch_label }) } : { ...preview, created: 0 };
+      if (!args.commit) return { ...preview, created: 0 };
+      return {
+        ...preview,
+        ...handlers.refresh_statement(ledger, {
+          action: "apply",
+          plan_id: plan.plan_id,
+          dry_run: false,
+          batch_label: args.batch_label,
+          sample_limit: args.sample_limit ?? args.preview_rows ?? 10,
+          include_details: args.include_details,
+          verbosity: args.verbosity
+        }) as Row
+      };
     },
 
     list_import_batches: (ledger, args) => {
@@ -541,10 +559,12 @@ export function statementHandlers(ctx: ToolRuntimeContext, handlers: ToolHandler
     },
 
     apply_reconciliation_plan: (ledger, args) => {
-      const targetStatus = args.status ?? "pending";
-      if (args.plan_id) return applyStatementPlan(ledger, args.plan_id, args);
-      const plan = buildStatementPlan(ledger, { ...args, status: targetStatus }, { persist: args.dry_run === false, targetStatus });
-      return args.dry_run === false ? applyStatementPlan(ledger, String(plan.plan_id), args) : plan;
+      const targetStatus = args.status ?? (args.commit_imported === true ? "posted" : "pending");
+      if (args.plan_id) return handlers.refresh_statement(ledger, { ...args, action: "apply" });
+      const plan = handlers.refresh_statement(ledger, { ...args, action: "plan", status: targetStatus, dry_run: args.dry_run !== false }) as Row;
+      return args.dry_run === false
+        ? handlers.refresh_statement(ledger, { ...args, action: "apply", plan_id: plan.plan_id, dry_run: false }) as Row
+        : plan;
     },
 
     refresh_statement: (ledger, args) => {

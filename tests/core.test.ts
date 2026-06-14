@@ -877,6 +877,14 @@ describe("app and package surface", () => {
 
       const rollupRows = callTool("account_balances", { account_type: "asset", rollup: true }, ledger) as any[];
       expect(rollupRows.find((row) => row.account_id === wallet && row.asset_symbol === "USD")).toMatchObject({ current_balance_cents: 300, rollup: true });
+      expect(rollupRows.find((row) => row.account_id === wallet && row.asset_symbol === "USD")).toMatchObject({ summable: false, rollup_warning: expect.stringContaining("summable scoped rollups") });
+
+      const scopedRollup = callTool("account_balances", { account_type: "asset", entity_id: wallet, rollup: true }, ledger) as any[];
+      expect(scopedRollup.map((row) => row.account_id)).toEqual([wallet]);
+      expect(scopedRollup[0]).toMatchObject({ current_balance_cents: 300, summable: true, scope: { root_account_ids: [wallet] } });
+
+      const scopedDetail = callTool("account_balances", { account_type: "asset", account_ids: [accounts.Checking], native_asset_only: true }, ledger) as any[];
+      expect(scopedDetail.map((row) => row.account_id)).toEqual([accounts.Checking]);
 
       const noisyRows = callTool("account_balances", { account_type: "asset", hide_zero: false }, ledger) as any[];
       expect(noisyRows.some((row) => row.account_id === accounts.Checking && row.asset_symbol === "CAD")).toBe(true);
@@ -885,7 +893,7 @@ describe("app and package surface", () => {
       expect(nativeRows.some((row) => row.account_id === cadCash && row.asset_symbol === "USD")).toBe(false);
 
       callTool("create_transaction", { date: "2026-06-06", amount: 20, from_account_id: accounts["Credit Card"], to_account_id: accounts["Dining Out"], description: "Card dinner", status: "posted" }, ledger);
-      const liabilities = callTool("account_balances", { account_type: "liability", native_asset_only: true, presentation: "banking" }, ledger) as any[];
+      const liabilities = callTool("account_balances", { account_type: "liability", native_asset_only: true, presentation: "bank" }, ledger) as any[];
       expect(liabilities.find((row) => row.account_id === accounts["Credit Card"])).toMatchObject({
         current_balance_cents: -2000,
         current_display_balance_cents: 2000,
@@ -940,10 +948,12 @@ describe("app and package surface", () => {
       expect((callTool("income_statement", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any).income).toBe(10000);
       expect((callTool("income_statement", { year: 2026, month: 6, include_pending: true, quote_asset_id: usd }, ledger) as any).income).toBe(15000);
       expect((callTool("income_statement", { year: 2026, month: 6, status: "active", quote_asset_id: usd }, ledger) as any).income).toBe(15000);
-      expect((callTool("balance_sheet", { quote_asset_id: usd }, ledger) as any).total_assets).toBe(10000);
+      const currentSheet = callTool("balance_sheet", { quote_asset_id: usd }, ledger) as any;
+      expect(currentSheet).toMatchObject({ total_assets: 10000, as_of: null, as_of_basis: "current_open_ended" });
       expect((callTool("balance_sheet", { include_pending: true, quote_asset_id: usd }, ledger) as any).total_assets).toBe(15000);
       expect((callTool("balance_sheet", { status: "active", quote_asset_id: usd }, ledger) as any).total_assets).toBe(15000);
-      expect((callTool("net_worth", { quote_asset_id: usd }, ledger) as any).net_worth).toBe(10000);
+      const currentNetWorth = callTool("net_worth", { quote_asset_id: usd }, ledger) as any;
+      expect(currentNetWorth).toMatchObject({ net_worth: 10000, as_of: null, as_of_basis: "current_open_ended" });
       expect((callTool("net_worth", { include_pending: true, quote_asset_id: usd }, ledger) as any).net_worth).toBe(15000);
       expect((callTool("net_worth", { status: "active", quote_asset_id: usd }, ledger) as any).net_worth).toBe(15000);
       expect((callTool("cash_flow", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any).operating_total).toBe(-10000);
@@ -1063,6 +1073,7 @@ describe("app and package surface", () => {
       const exported = callTool("export_transactions", { account_id: accounts.Checking, date_from: "2026-06-01", date_to: "2026-06-30", status: "all" }, ledger) as any;
       const lines = String(exported.csv).trim().split(/\r?\n/);
       expect(exported.exported).toBe(2);
+      expect(exported).toMatchObject({ entries_exported: 2, transactions_exported: 2, export_granularity: "entry" });
       expect(lines).toHaveLength(3);
       expect(lines[1]).toContain(",10000,");
       expect(lines[2]).toContain(",-1000,");
@@ -1090,6 +1101,14 @@ describe("app and package surface", () => {
 
       const byEntity = JSON.parse((callTool("export_ledger", { entity_id: june.id }, ledger) as any).data);
       expect(byEntity.transactions.map((tx: any) => tx.id)).toEqual([june.id]);
+
+      const parent = ledger.createAccount("Food", "expense");
+      const child = ledger.createAccount("Restaurants", "expense", parent);
+      ledger.createAnnotation("account", parent, "default_asset", (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id);
+      ledger.createAnnotation("account", child, "default_asset", (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id);
+      callTool("create_transaction", { date: "2026-06-05", amount: 12, from_account_id: accounts.Checking, to_account_id: child, description: "Dinner", status: "posted" }, ledger);
+      const childScoped = JSON.parse((callTool("export_ledger", { account_ids: [child], date_from: "2026-06-01", date_to: "2026-06-30" }, ledger) as any).data);
+      expect(childScoped.accounts.map((row: any) => row.id)).toEqual(expect.arrayContaining([parent, child]));
     } finally {
       ledger.close();
     }
@@ -1232,7 +1251,7 @@ describe("app and package surface", () => {
       expect(picture.budget_position.total_spent_cents).toBe(1500);
       expect(picture.include_planned).toBe(false);
       expect(picture.warnings).toEqual([]);
-      expect(picture.current_snapshot).not.toHaveProperty("as_of");
+      expect(picture.current_snapshot.as_of).toBeNull();
       expect(picture.current_snapshot.as_of_basis).toBe("current_open_ended");
       expect(picture.current_snapshot.as_of_description).toContain("Open-ended");
       expect(picture.current_snapshot).not.toHaveProperty("ledger_as_of");
@@ -1869,7 +1888,7 @@ describe("app and package surface", () => {
         const plan = callTool("apply_reconciliation_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity }, ledger) as any;
         expect(plan.dry_run ?? true).toBe(true);
         expect(ledger.balanceTree(checking, usd, null, null)).toBe(0n);
-        const result = callTool("process_statement", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, expected_balance: 25.00, commit: true }, ledger) as any;
+        const result = callTool("process_statement", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, expected_balance: 25.00, commit: true, include_details: true }, ledger) as any;
         expect(result.balance_matches).toBe(true);
         expect(result.actual_balance_cents).toBe(2500);
         expect(result.transactions[0].status).toBe("posted");
@@ -1977,6 +1996,8 @@ describe("app and package surface", () => {
 
       const applied = callTool("refresh_statement", { action: "apply", plan_id: plan.plan_id, dry_run: false }, ledger) as any;
       expect(applied).toMatchObject({ created: 2, committed: 1, voided: 1, balance_matches: true });
+      expect(applied).not.toHaveProperty("transactions");
+      expect(applied.available_actions).toEqual(["plan", "apply", "verify", "discard"]);
       expect(applied.actual_balance_cents).toBe(800);
       expect(ledger.getTx(pending.id)?.status).toBe("posted");
       expect(ledger.getTx(stale.id)?.status).toBe("void");
@@ -2030,8 +2051,22 @@ describe("app and package surface", () => {
       writeFileSync(statementPath, "date,amount,description\n2026-06-01,-10.00,Card charge\n", "utf8");
 
       expect(() => callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: card, counterpart_account_id: shopping, expected_balance: 10 }, ledger)).toThrow(/expected_balance/);
+      const liabilityPlan = callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: card, counterpart_account_id: shopping, expected_balance: 10, balance_sign: "liability" }, ledger) as any;
+      expect(liabilityPlan).toMatchObject({ dry_run: true, balance_matches: true, expected_balance_cents: -1000, planned_balance_cents: -1000, balance_sign: "user_facing_liability" });
       const plan = callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: card, counterpart_account_id: shopping, expected_balance: 10, statement_type: "credit_card" }, ledger) as any;
       expect(plan).toMatchObject({ dry_run: true, balance_matches: true, expected_balance_cents: -1000, planned_balance_cents: -1000, balance_sign: "user_facing_liability" });
+
+      const applied = callTool("apply_reconciliation_plan", {
+        file_path: statementPath,
+        account_id: card,
+        counterpart_account_id: shopping,
+        expected_balance: 10,
+        balance_sign: "liability",
+        commit_imported: true,
+        dry_run: false
+      }, ledger) as any;
+      expect(applied).toMatchObject({ created: 1, balance_matches: true, actual_balance_cents: -1000 });
+      expect(ledger.balanceTree(card, usd, null, "posted")).toBe(-1000n);
     } finally {
       ledger.close();
     }
@@ -2207,7 +2242,7 @@ describe("app and package surface", () => {
       expect(() => callTool("apply_reconciliation_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, expected_balance: 29.99, dry_run: false }, ledger)).toThrow(/expected_balance/);
       expect(ledger.balanceTree(checking, usd, null, null)).toBe(0n);
 
-      const applied = callTool("apply_reconciliation_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, row_indexes: [1], expected_balance: 20, dry_run: false }, ledger) as any;
+      const applied = callTool("apply_reconciliation_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, row_indexes: [1], expected_balance: 20, dry_run: false, include_details: true }, ledger) as any;
       expect(applied).toMatchObject({ created: 1, skipped: 0, balance_matches: true });
       expect(applied.transactions[0].description).toBe("Second");
       expect(ledger.balanceTree(checking, usd, null, "pending")).toBe(2000n);
@@ -2249,6 +2284,11 @@ describe("app and package surface", () => {
       expect(summary.detail_rows_included).toBe(false);
       expect(summary).not.toHaveProperty("ambiguous");
       expect(summary.rows[0].candidates.map((candidate: any) => candidate.journal_id).sort()).toEqual([first.id, second.id].sort());
+
+      const persisted = callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0, dry_run: false }, ledger) as any;
+      expect(persisted.actions.ambiguous).toBe(1);
+      const storedMetadata = JSON.parse(String((ledger.tableRows("statement_plan_rows").find((row) => row.plan_id === persisted.plan_id) as any).metadata_json));
+      expect(storedMetadata.candidates.map((candidate: any) => candidate.journal_id).sort()).toEqual([first.id, second.id].sort());
 
       const plan = callTool("reconcile_statement_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0, include_details: true }, ledger) as any;
       expect(plan.detail_rows_included).toBe(true);
@@ -2301,13 +2341,18 @@ describe("app and package surface", () => {
 
       const preview = callTool("preview_import", { file_path: statementPath, account_id: checking, counterpart_account_id: equity }, ledger) as any;
       expect(preview.total_rows).toBe(2);
-      expect(preview).toMatchObject({ statement_balance_cents: 825, statement_balance_date: "2026-06-02", balance_source: "qfx_ledger_balance" });
+      expect(preview).toMatchObject({ statement_balance_cents: 825, statement_balance_raw_cents: 825, statement_balance_ledger_cents: 825, statement_balance_date: "2026-06-02", balance_source: "qfx_ledger_balance" });
       expect(preview.rows[0]).toMatchObject({ date: "2026-06-01", amount: 12.5, description: "Existing QFX row", external_id: "fitid-1" });
+
+      const card = ledger.createAccount("Visa", "liability");
+      ledger.createAnnotation("account", card, "default_asset", usd);
+      const liabilityPreview = callTool("preview_import", { file_path: statementPath, account_id: card, counterpart_account_id: equity }, ledger) as any;
+      expect(liabilityPreview).toMatchObject({ statement_balance_cents: 825, statement_balance_raw_cents: 825, statement_balance_ledger_cents: -825 });
 
       const plan = callTool("reconcile_statement_plan", { file_path: statementPath, account_id: checking, counterpart_account_id: equity, date_tolerance_days: 0 }, ledger) as any;
       expect(plan).toMatchObject({ matched: 1, unmatched: 1, reconciled: false });
-      expect(plan).toMatchObject({ statement_balance_cents: 825, statement_balance_date: "2026-06-02", balance_source: "qfx_ledger_balance" });
-      expect(plan.rows[1]).toMatchObject({ date: "2026-06-02", amount: -4.25, description: "Coffee" });
+      expect(plan).toMatchObject({ statement_balance_cents: 825, statement_balance_raw_cents: 825, statement_balance_ledger_cents: 825, statement_balance_date: "2026-06-02", balance_source: "qfx_ledger_balance" });
+      expect(plan.rows.find((row: any) => row.description === "Coffee")).toMatchObject({ date: "2026-06-02", amount: -4.25, description: "Coffee" });
     } finally {
       ledger.close();
     }
@@ -2749,6 +2794,67 @@ describe("app and package surface", () => {
     }
   });
 
+  it("reverses void_by_filter by restoring original transaction status", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const txA = ledger.recordTransaction("2026-06-01", 1000n, checking, groceries, usd, "Undo Market A", "posted");
+      const txB = ledger.recordTransaction("2026-06-02", 2000n, checking, groceries, usd, "Undo Market B", "posted");
+      expect(ledger.balanceTree(groceries, usd, null, "posted")).toBe(3000n);
+
+      const voided = callTool("void_by_filter", { status: "posted", desc: "Undo Market", dry_run: false }, ledger) as any;
+      expect(voided).toMatchObject({ matched: 2, voided: 2, dry_run: false });
+      expect(ledger.getTx(txA.id)?.status).toBe("void");
+      expect(ledger.getTx(txB.id)?.status).toBe("void");
+      expect(ledger.balanceTree(groceries, usd, null, "posted")).toBe(0n);
+
+      const preview = callTool("reverse_ledger_operation", { operation_id: voided.operation_id }, ledger) as any;
+      expect(preview).toMatchObject({ dry_run: true, reversible: true, reversal_strategy: "generic_ledger_operation_in_place", accounting_delta: [] });
+      expect(preview.row_reversals).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: "journals", action: "update", entity_id: txA.id }),
+        expect.objectContaining({ table: "journals", action: "update", entity_id: txB.id })
+      ]));
+
+      const reversed = callTool("reverse_ledger_operation", { operation_id: voided.operation_id, dry_run: false }, ledger) as any;
+      expect(reversed.reverse_journal_ids).toEqual([]);
+      expect(ledger.getTx(txA.id)?.status).toBe("posted");
+      expect(ledger.getTx(txB.id)?.status).toBe("posted");
+      expect(ledger.balanceTree(groceries, usd, null, "posted")).toBe(3000n);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("blocks referenced hard deletes during dry-run and apply", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const tx = callTool("create_transaction", {
+        date: "2026-06-01",
+        amount: 10,
+        from_account_id: checking,
+        to_account_id: groceries,
+        asset_id: usd,
+        description: "Blocked hard delete",
+        status: "posted"
+      }, ledger) as any;
+
+      const dryRun = callTool("void_by_filter", { status: "posted", desc: "Blocked hard delete", hard_delete: true }, ledger) as any;
+      expect(dryRun).toMatchObject({ matched: 1, deleted: 0, dry_run: true, hard_delete_safe: false });
+      expect(dryRun.blockers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tx_id: tx.id, table: "ledger_operation_rows" })
+      ]));
+      expect(() => callTool("void_by_filter", { status: "posted", desc: "Blocked hard delete", hard_delete: true, dry_run: false }, ledger)).toThrow(/Hard delete blocked/);
+      expect(ledger.getTx(tx.id)?.status).toBe("posted");
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("posts atomic journal legs and rolls back recategorization batches", () => {
     const ledger = tempLedger();
     try {
@@ -3044,8 +3150,12 @@ describe("app and package surface", () => {
     expect(help("tool")).toContain("dry_run:false");
     expect(help("tool")).not.toContain("--allow-destructive");
     expect(help("account", "balances")).toContain("Current balance is posted plus pending");
+    expect(help("account", "balances")).toContain("--parent <id>");
+    expect(help("account", "balances")).toContain("--native-only");
     expect(help("import")).toContain("Default status is pending");
     expect(help("report", "balance-sheet")).toContain("Quote asset symbol or id");
+    expect(help("report", "balance-sheet")).toContain("--include-pending");
+    expect(help("report", "net-worth")).toContain("--parent <id>");
     expect(help("txn", "add")).toContain("Transaction status: posted, pending, planned, or void");
   });
 
@@ -3054,6 +3164,15 @@ describe("app and package surface", () => {
     dirs.push(dir);
     const db = join(dir, "ledger.db");
     const run = (...args: string[]) => JSON.parse(execFileSync(process.execPath, ["dist/cli/main.js", "--db", db, "--format", "json", ...args], { cwd: process.cwd(), encoding: "utf8" }));
+    const fail = (...args: string[]) => {
+      try {
+        execFileSync(process.execPath, ["dist/cli/main.js", "--db", db, "--format", "json", ...args], { cwd: process.cwd(), encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+        throw new Error("expected CLI command to fail");
+      } catch (error: any) {
+        const stdout = String(error.stdout ?? "");
+        return stdout.trim() ? JSON.parse(stdout) : { ok: false, error: String(error.stderr ?? error.message) };
+      }
+    };
     run("init", "--currency", "USD");
     const accounts = run("account", "list").data;
     const accountId = (name: string) => accounts.find((row: any) => row.name === name).id;
@@ -3069,6 +3188,21 @@ describe("app and package surface", () => {
     expect(run("balance", checking).data.balance).toBe(288000);
     const balances = run("account", "balances", "--type", "asset").data;
     expect(balances.find((row: any) => row.account_id === checking && row.asset_symbol === "USD").current_balance_cents).toBe(288000);
+
+    const personal = run("tool", "create_account", "--json", JSON.stringify({ name: "Personal", type: "equity", default_asset_id: "USD" })).data.id;
+    const business = run("tool", "create_account", "--json", JSON.stringify({ name: "Business", type: "equity", default_asset_id: "USD" })).data.id;
+    run("tool", "update_account", "--json", JSON.stringify({ id: checking, parent_id: personal }));
+    const businessBank = run("tool", "create_account", "--json", JSON.stringify({ name: "Business Bank", type: "asset", parent_id: business, default_asset_id: "USD" })).data.id;
+    const businessEquity = run("tool", "create_account", "--json", JSON.stringify({ name: "Business Equity", type: "equity", parent_id: business, default_asset_id: "USD" })).data.id;
+    run("tool", "create_transaction", "--json", JSON.stringify({ date: "2026-06-04", amount: 500, from_account_id: businessEquity, to_account_id: businessBank, description: "Business capital", status: "posted" }));
+
+    expect(fail("report", "net-worth", "--quote", "USD")).toMatchObject({ ok: false, error: expect.stringContaining("ambiguous across account groups") });
+    expect(fail("account", "balances", "--type", "asset", "--rollup")).toMatchObject({ ok: false, error: expect.stringContaining("ambiguous across account groups") });
+    expect(run("report", "net-worth", "--quote", "USD", "--parent", personal, "--include-pending").data).toMatchObject({ net_worth: 288000, scope: { root_account_ids: expect.arrayContaining([checking]) } });
+    expect(run("report", "balance-sheet", "--quote", "USD", "--account", businessBank, "--status", "active", "--hide-zero").data).toMatchObject({ total_assets: 50000, scope: { root_account_ids: [businessBank] } });
+    const scopedRollup = run("account", "balances", "--type", "asset", "--rollup", "--parent", personal, "--native-only", "--presentation", "bank").data;
+    expect(scopedRollup.map((row: any) => row.account_id)).toEqual([checking]);
+    expect(scopedRollup[0]).toMatchObject({ current_balance_cents: 288000, summable: true });
   });
 
   it("exposes the full app catalog through the generic CLI tool path", () => {
@@ -3204,6 +3338,22 @@ describe("app and package surface", () => {
     }
   });
 
+  it("classifies identical same-ledger import rows as skipped during dry-run", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const exported = callTool("export_ledger", {}, ledger) as any;
+      const preview = callTool("import_ledger", { data: exported.data, dry_run: true }, ledger) as any;
+      expect(preview.valid).toBe(true);
+      expect(preview.errors).toEqual([]);
+      expect(preview.skipped_existing.assets).toBeGreaterThan(0);
+      expect(preview.skipped_existing.accounts).toBeGreaterThan(0);
+      expect(preview.skipped).toBeGreaterThan(0);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("catches import uniqueness conflicts during dry-run", () => {
     const ledger = tempLedger();
     try {
@@ -3228,14 +3378,44 @@ describe("app and package surface", () => {
     const ledger = tempLedger();
     try {
       const previousMax = process.env.CLOVIS_MAX_FILE_BYTES;
+      const previousLedgerMax = process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES;
       process.env.CLOVIS_MAX_FILE_BYTES = "32";
       try {
         expect(() => callTool("import_ledger", { data: JSON.stringify({ format: "clovis-ledger-v1", assets: [] }) }, ledger)).toThrow(/too large/);
       } finally {
         if (previousMax == null) delete process.env.CLOVIS_MAX_FILE_BYTES; else process.env.CLOVIS_MAX_FILE_BYTES = previousMax;
+        if (previousLedgerMax == null) delete process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES; else process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES = previousLedgerMax;
       }
     } finally {
       ledger.close();
+    }
+  });
+
+  it("allows ledger import files to use the ledger-specific size limit", () => {
+    const source = tempLedger();
+    const target = tempLedger();
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "clovis-ledger-import-limit-"));
+      dirs.push(dir);
+      callTool("init_defaults", { template: "personal", currency: "USD" }, source);
+      const exported = callTool("export_ledger", {}, source) as any;
+      const path = join(dir, "snapshot.json");
+      writeFileSync(path, exported.data, "utf8");
+      const previousMax = process.env.CLOVIS_MAX_FILE_BYTES;
+      const previousLedgerMax = process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES;
+      process.env.CLOVIS_MAX_FILE_BYTES = "32";
+      process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES = String(Buffer.byteLength(exported.data, "utf8") + 1024);
+      try {
+        const imported = callTool("import_ledger", { file_path: path }, target) as any;
+        expect(imported.accounts).toBeGreaterThan(0);
+        expect((callTool("integrity_check", {}, target) as any).ok).toBe(true);
+      } finally {
+        if (previousMax == null) delete process.env.CLOVIS_MAX_FILE_BYTES; else process.env.CLOVIS_MAX_FILE_BYTES = previousMax;
+        if (previousLedgerMax == null) delete process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES; else process.env.CLOVIS_MAX_LEDGER_IMPORT_BYTES = previousLedgerMax;
+      }
+    } finally {
+      source.close();
+      target.close();
     }
   });
 
