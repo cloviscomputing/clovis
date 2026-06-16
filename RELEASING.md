@@ -11,6 +11,7 @@ recovery path.
   publish to npm with the `latest` dist-tag.
 - Prereleases are GitHub Releases marked prerelease. They publish to npm with
   the `next` dist-tag.
+- Release tags must be signed with a maintainer GPG or SSH signing key.
 - Patch releases in the `0.x` line should keep reading schema v1 databases and
   should not remove MCP tools or public package exports.
 - Minor releases may change public behavior, schema shape, or MCP contracts,
@@ -41,13 +42,15 @@ Confirm:
 - `main` is green in GitHub Actions.
 - npm Trusted Publishing is still configured for `cloviscomputing/clovis` and
   `.github/workflows/publish.yml`.
+- The release tag is signed and verifiable with `git verify-tag v<version>`.
 
 ## Stable Release
 
 ```sh
-npm version patch
+npm version patch --sign-git-tag
 git push origin main --follow-tags
 VERSION=$(node -p "require('./package.json').version")
+git verify-tag "v$VERSION"
 gh release create "v$VERSION" --generate-notes
 ```
 
@@ -64,9 +67,10 @@ explicitly documents the compatibility impact.
 ## Prerelease
 
 ```sh
-npm version prerelease --preid beta
+npm version prerelease --preid beta --sign-git-tag
 git push origin main --follow-tags
 VERSION=$(node -p "require('./package.json').version")
+git verify-tag "v$VERSION"
 gh release create "v$VERSION" --generate-notes --prerelease
 ```
 
@@ -91,7 +95,8 @@ ledger and, when possible, a representative real ledger before creating the
 GitHub Release.
 
 `npm run release:status` checks that the clean working tree, local tag, GitHub
-Release, npm version, npm dist-tag, and npm `gitHead` all agree.
+Release, signed release tag, npm version, npm dist-tag, and npm `gitHead` all
+agree.
 
 `npm run release:verify` installs the published npm package into a temporary
 consumer project and verifies:
@@ -125,5 +130,11 @@ published version, pass it after `--`, for example
 - `main` requires the `test` status check.
 - Force pushes and branch deletion are disabled on `main`.
 - Publish runs are serialized with workflow concurrency.
+- Releases publish only from GitHub Release events, never from ordinary pushes.
+- The publish workflow uses `id-token: write` and `npm publish --provenance` for
+  npm Trusted Publishing/OIDC provenance.
+- Post-publish verification checks the npm `gitHead` against the local release
+  tag, verifies the signed tag, installs the public package into a temporary
+  project, and runs npm signature/attestation checks.
 - Dependabot security updates, secret scanning, and push protection should stay
   enabled in GitHub repository settings.

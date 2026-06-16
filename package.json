@@ -4,14 +4,16 @@
   "description": "Local-first bookkeeping CLI, MCP server, and SQLite ledger engine",
   "license": "AGPL-3.0-or-later",
   "type": "module",
+  "author": "Clovis Computing <support@cloviscomputing.com> (https://cloviscomputing.com)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cloviscomputing/clovis.git"
   },
   "bugs": {
-    "url": "https://github.com/cloviscomputing/clovis/issues"
+    "url": "https://github.com/cloviscomputing/clovis/issues",
+    "email": "support@cloviscomputing.com"
   },
-  "homepage": "https://github.com/cloviscomputing/clovis#readme",
+  "homepage": "https://cloviscomputing.com/",
   "keywords": [
     "bookkeeping",
     "accounting",
@@ -52,8 +54,11 @@
     "dist",
     "docs",
     "CHANGELOG.md",
+    "CONTRIBUTING.md",
     "README.md",
     "RELEASING.md",
+    "SECURITY.md",
+    "SUPPORT.md",
     "LICENSE"
   ],
   "scripts": {

@@ -665,16 +665,18 @@ describe("app and package surface", () => {
   it("keeps tool handler implementations split by workflow", () => {
     const runtime = readFileSync(join(process.cwd(), "src/app/tool-runtime.ts"), "utf8");
     const workflowFiles = [
-      ["accounts", "src/app/tools/accounts.ts", "accountHandlers", "create_account"],
-      ["transactions", "src/app/tools/transactions.ts", "transactionHandlers", "create_transaction"],
-      ["statements", "src/app/tools/statements.ts", "statementHandlers", "refresh_statement"],
-      ["reports", "src/app/tools/reports.ts", "reportHandlers", "cash_projection"],
-      ["budgets", "src/app/tools/budgets.ts", "budgetHandlers", "set_budget"],
-      ["maintenance", "src/app/tools/maintenance.ts", "maintenanceHandlers", "tool_registry"]
+      ["accounts", ["src/app/tools/accounts.ts"], ["src/app/tools/accounts.ts"], "accountHandlers", "create_account"],
+      ["transactions", ["src/app/tools/transactions/contracts.ts"], ["src/app/tools/transactions/handlers.ts"], "transactionHandlers", "create_transaction"],
+      ["statements", ["src/app/tools/statements/contracts.ts"], ["src/app/tools/statements/handlers.ts"], "statementHandlers", "refresh_statement"],
+      ["reports", ["src/app/tools/reports/contracts.ts"], ["src/app/tools/reports/handlers.ts"], "reportHandlers", "cash_projection"],
+      ["budgets", ["src/app/tools/budgets.ts"], ["src/app/tools/budgets.ts"], "budgetHandlers", "set_budget"],
+      ["maintenance", ["src/app/tools/maintenance/contracts.ts"], ["src/app/tools/maintenance/handlers.ts"], "maintenanceHandlers", "tool_registry"]
     ] as const;
-    const contents = workflowFiles.map(([name, file, factory, sentinel]) => {
-      const text = readFileSync(join(process.cwd(), file), "utf8");
-      expect(text).toContain("defineToolGroup");
+    const contents = workflowFiles.map(([name, contractFiles, handlerFiles, factory, sentinel]) => {
+      for (const file of contractFiles) {
+        expect(readFileSync(join(process.cwd(), file), "utf8"), `${file} should own tool contracts`).toContain("defineToolGroup");
+      }
+      const text = handlerFiles.map((file) => readFileSync(join(process.cwd(), file), "utf8")).join("\n");
       expect(text).toContain(`export function ${factory}`);
       expect(text).toMatch(new RegExp(`\\n\\s{4}${sentinel}: \\(`));
       return { name, text };
@@ -693,10 +695,18 @@ describe("app and package surface", () => {
     const workflowFiles = [
       "src/app/tools/accounts.ts",
       "src/app/tools/transactions.ts",
+      "src/app/tools/transactions/contracts.ts",
+      "src/app/tools/transactions/handlers.ts",
       "src/app/tools/statements.ts",
+      "src/app/tools/statements/contracts.ts",
+      "src/app/tools/statements/handlers.ts",
       "src/app/tools/reports.ts",
+      "src/app/tools/reports/contracts.ts",
+      "src/app/tools/reports/handlers.ts",
       "src/app/tools/budgets.ts",
-      "src/app/tools/maintenance.ts"
+      "src/app/tools/maintenance.ts",
+      "src/app/tools/maintenance/contracts.ts",
+      "src/app/tools/maintenance/handlers.ts"
     ];
     const workflowImport = /from "\.\/(accounts|transactions|statements|reports|budgets|maintenance)\.js"|from "\.\.\/tools\/(accounts|transactions|statements|reports|budgets|maintenance)\.js"/;
     for (const file of workflowFiles) {
@@ -711,6 +721,7 @@ describe("app and package surface", () => {
       "src/app/filesystem.ts",
       "src/app/backup-filesystem.ts",
       "src/core/ledger.ts",
+      "src/core/ledger-store.ts",
       "src/core/ledger-export.ts"
     ]);
     for (const file of tracked.filter((path) => path.endsWith(".ts"))) {

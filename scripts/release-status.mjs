@@ -41,6 +41,11 @@ try {
   fail(`Missing git tag ${tag}`);
 }
 if (head !== tagCommit) fail(`HEAD ${head} does not match ${tag} commit ${tagCommit}`);
+try {
+  run("git", ["verify-tag", tag]);
+} catch {
+  fail(`${tag} is not a verifiable signed tag. Create release tags with GPG or SSH signing before publishing.`);
+}
 
 const npmInfo = readJson("npm", ["view", `clovis@${version}`, "version", "gitHead", "dist-tags", "--json"]);
 if (npmInfo.version !== version) fail(`npm version mismatch: expected ${version}, got ${npmInfo.version}`);
@@ -57,6 +62,7 @@ console.log(JSON.stringify({
   ok: true,
   version,
   tag,
+  signedTag: true,
   commit: tagCommit,
   npmDistTags: npmInfo["dist-tags"],
   githubRelease: release.url,

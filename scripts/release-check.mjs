@@ -33,6 +33,9 @@ function allowedPackedFile(file) {
   // along in a published tarball.
   return file === "README.md" ||
     file === "RELEASING.md" ||
+    file === "SECURITY.md" ||
+    file === "SUPPORT.md" ||
+    file === "CONTRIBUTING.md" ||
     file === "CHANGELOG.md" ||
     file === "LICENSE" ||
     file === "package.json" ||

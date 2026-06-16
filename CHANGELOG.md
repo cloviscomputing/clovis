@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Split the core ledger internals into store, codec, scenario, document import/export, and integrity modules while keeping the public `Ledger` API unchanged.
+- Split oversized tool workflow files into contract and handler modules for transactions, statements, reports, and maintenance without changing tool names or signatures.
+- Add public trust-surface docs, support/security contacts, a deployable `security.txt`, packaged security/support policies, Dependabot configuration, and signed-tag verification in the release status check.
+- Add GitHub issue and pull-request templates that route security reports privately and warn against posting real financial data.
+
 ## 0.3.3
 
 Current balance defaults release.

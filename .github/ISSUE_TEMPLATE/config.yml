@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/cloviscomputing/clovis/security/advisories/new
+    about: Report statement parsing, ledger mutation, filesystem, dependency, or release-provenance vulnerabilities privately.
+  - name: Email security contact
+    url: mailto:security@cloviscomputing.com
+    about: Use email if GitHub private vulnerability reporting is not suitable.
+  - name: Product and licensing support
+    url: mailto:support@cloviscomputing.com
+    about: Contact Clovis Computing for product, support, or commercial licensing questions.

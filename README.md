@@ -46,6 +46,12 @@ Release notes are tracked in [CHANGELOG.md](CHANGELOG.md), indexed at
 [docs/changelog.md](docs/changelog.md), and published through
 [GitHub Releases](https://github.com/cloviscomputing/clovis/releases).
 
+Trust and security materials are published in [SECURITY.md](SECURITY.md),
+[SUPPORT.md](SUPPORT.md), [RELEASING.md](RELEASING.md), and
+[docs/trust.md](docs/trust.md). They cover the private vulnerability channel,
+release provenance, signed-tag expectations, package verification commands,
+known limitations, and the deployable `security.txt` source.
+
 ## What You Can Ask Clovis
 
 Through the CLI or MCP server, Clovis can work over your local ledger as a
@@ -575,3 +581,4 @@ exposed by the package.
 Official npm releases are published by GitHub Actions through npm Trusted
 Publishing. See [RELEASING.md](RELEASING.md) for the full release runbook,
 dist-tag policy, post-publish verification commands, and failure recovery steps.
+For the broader pre-install trust checklist, see [docs/trust.md](docs/trust.md).
