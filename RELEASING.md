@@ -12,10 +12,13 @@ recovery path.
 - Prereleases are GitHub Releases marked prerelease. They publish to npm with
   the `next` dist-tag.
 - Release tags must be signed with a maintainer GPG or SSH signing key.
-- Patch releases in the `0.x` line should keep reading schema v1 databases and
-  should not remove MCP tools or public package exports.
-- Minor releases may change public behavior, schema shape, or MCP contracts,
-  but the changelog must call out the compatibility impact and upgrade path.
+- Patch releases must not break public package exports, CLI command contracts,
+  MCP tool signatures, or readable database migrations.
+- Minor releases may add public APIs, tools, command flags, reports, and schema
+  migrations, but existing 1.x public contracts should keep working unless the
+  changelog documents a narrowly scoped compatibility exception.
+- Breaking changes to public package exports, CLI command contracts, MCP tool
+  signatures, or supported migration paths require a major release.
 - The public package entrypoints are `clovis`, `clovis/core`, `clovis/app`, and
   `clovis/mcp`. Do not expose deep imports as public API.
 
@@ -63,6 +66,16 @@ npm run release:verify
 
 Use `npm version minor` instead of `npm version patch` only when the changelog
 explicitly documents the compatibility impact.
+
+For the first stable release from the `0.x` line, use:
+
+```sh
+npm version major --sign-git-tag
+git push origin main --follow-tags
+VERSION=$(node -p "require('./package.json').version")
+git verify-tag "v$VERSION"
+gh release create "v$VERSION" --generate-notes
+```
 
 ## Prerelease
 

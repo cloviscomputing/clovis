@@ -31,7 +31,7 @@ Use Clovis when you want to:
 - embed a versioned ledger engine and app dispatcher in another Node.js project
 
 Clovis is not a bank, custody system, sync service, tax product, or app UI. The
-public surfaces are:
+stable 1.x public surfaces are:
 
 - the SQLite schema created by the ledger engine
 - the package exports under `clovis`, `clovis/core`, `clovis/app`, and
@@ -39,8 +39,8 @@ public surfaces are:
 - the `clovis` CLI
 - the `clovis-mcp` server and its MCP tool signatures
 
-The project is public and pre-1.0. The package currently defines the local
-database format while the API and schema settle during the `0.x` line.
+The 1.x line treats those surfaces as compatibility contracts. Internal source
+files and deep `dist/` paths are intentionally not public API.
 
 Release notes are tracked in [CHANGELOG.md](CHANGELOG.md), indexed at
 [docs/changelog.md](docs/changelog.md), and published through
@@ -48,9 +48,11 @@ Release notes are tracked in [CHANGELOG.md](CHANGELOG.md), indexed at
 
 Trust and security materials are published in [SECURITY.md](SECURITY.md),
 [SUPPORT.md](SUPPORT.md), [RELEASING.md](RELEASING.md), and
-[docs/trust.md](docs/trust.md). They cover the private vulnerability channel,
-release provenance, signed-tag expectations, package verification commands,
-known limitations, and the deployable `security.txt` source.
+[docs/trust.md](docs/trust.md). The security model is documented in
+[docs/security-model.md](docs/security-model.md). These documents cover the
+private vulnerability channel, release provenance, signed-tag expectations,
+package verification commands, known limitations, and the deployable
+`security.txt` source.
 
 ## What You Can Ask Clovis
 
@@ -102,10 +104,22 @@ Fresh databases are created directly with schema v4. Older v1/v2/v3 ledgers are
 migrated on open. Ledger JSON snapshots can be exported and imported with
 `export_ledger` and `import_ledger`.
 
-Patch releases in the `0.x` line should keep reading schema v1, v2, v3, and v4
-databases, preserve public package entrypoints, and avoid removing MCP tools.
-Minor releases may revise behavior or database shape, but the changelog should
-document the compatibility impact and upgrade path.
+## Compatibility
+
+Clovis follows semver for the stable 1.x line.
+
+- Patch releases fix bugs, security issues, documentation, and internal
+  implementation without breaking public package exports, CLI commands, MCP
+  tool signatures, or readable database migrations.
+- Minor releases may add public APIs, tools, command flags, reports, or schema
+  migrations, but existing 1.x ledgers and public entrypoints should keep
+  working unless the changelog documents a narrowly scoped exception.
+- Breaking changes to public package exports, CLI command contracts, MCP tool
+  signatures, or supported database migration paths require a new major
+  version.
+
+Clovis 1.x keeps reading schema v1, v2, v3, and v4 databases unless a future
+major release documents a migration cutoff.
 
 ## How Clovis Works
 

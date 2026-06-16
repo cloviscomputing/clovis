@@ -10,11 +10,16 @@ Clovis on financial data.
 - Website: <https://cloviscomputing.com/>
 - Security policy: <https://github.com/cloviscomputing/clovis/security/policy>
 - Release runbook: [../RELEASING.md](../RELEASING.md)
+- Security model: [security-model.md](security-model.md)
 - Support policy: [../SUPPORT.md](../SUPPORT.md)
 
 The package metadata points npm users back to the Clovis Computing website,
 GitHub repository, issue tracker, support contact, license, and release
 artifacts.
+
+The GitHub organization verifies control of `cloviscomputing.com`, so the npm
+package, GitHub repository, website, support mailbox, and security mailbox all
+resolve back to the same domain owner.
 
 ## Security Contact
 
@@ -27,6 +32,10 @@ be deployed verbatim to:
 https://cloviscomputing.com/.well-known/security.txt
 ```
 
+The support and security mailboxes authenticate with SPF, DKIM, and DMARC.
+DMARC starts in monitor mode so delivery can be observed before enforcement is
+raised to quarantine or reject.
+
 ## Release Provenance
 
 Releases are controlled by the repository, not a local npm publish:
@@ -35,6 +44,7 @@ Releases are controlled by the repository, not a local npm publish:
 - Publishing runs only from GitHub Release events.
 - The publish workflow uses npm Trusted Publishing with OIDC and
   `npm publish --provenance`.
+- Release tags are signed and verified before release status checks pass.
 - `npm run release:status` verifies a clean tree, a signed release tag, the
   GitHub Release, npm dist-tags, and npm `gitHead` alignment.
 - `npm run release:verify` installs the public npm package into a temporary

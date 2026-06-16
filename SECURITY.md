@@ -2,9 +2,10 @@
 
 ## Supported Versions
 
-Security fixes are prioritized for the latest published release. During the
-pre-1.0 line, fixes are considered for the latest `0.x` release only unless a
-maintainer explicitly announces broader support in the release notes.
+Security fixes are prioritized for the latest published stable release. The
+1.x line receives security fixes through normal patch releases. Older major
+versions receive fixes only when a maintainer explicitly announces extended
+support in the release notes.
 
 ## Reporting a Vulnerability
 

@@ -6,6 +6,7 @@
 - Split oversized tool workflow files into contract and handler modules for transactions, statements, reports, and maintenance without changing tool names or signatures.
 - Add public trust-surface docs, support/security contacts, a deployable `security.txt`, packaged security/support policies, Dependabot configuration, and signed-tag verification in the release status check.
 - Add GitHub issue and pull-request templates that route security reports privately and warn against posting real financial data.
+- Replace pre-1.0 stability language with a 1.x compatibility policy and add a first-party security model for local data, MCP, filesystem, statement import, ledger mutation, and release integrity boundaries.
 
 ## 0.3.3
 
