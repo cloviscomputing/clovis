@@ -24,9 +24,25 @@ recovery path.
 
 ## Pre-Release Checklist
 
-Before bumping the version:
+Before bumping the version, decide the release type from the public contract:
+
+- `patch`: bug fixes, docs, internal refactors, and compatible behavior fixes.
+- `minor`: additive public APIs, tools, command flags, report fields, MCP
+  signatures, schema migrations, or documented user-visible capabilities.
+- `major`: breaking package exports, CLI command contracts, MCP tool
+  signatures, supported migrations, or documented 1.x compatibility promises.
+
+Prepare release notes before tagging. Move the relevant `CHANGELOG.md`
+`Unreleased` entries under the target version and date, and confirm any schema,
+MCP, CLI, package export, or security-impacting changes are documented. If the
+runbook, changelog, or release metadata needs cleanup, merge that cleanup
+through a normal PR before creating the release tag.
+
+From a clean, up-to-date `main`:
 
 ```sh
+git switch main
+git pull --ff-only
 git status --short
 npm run release:check
 tmpdir=$(mktemp -d)
@@ -39,7 +55,6 @@ node dist/cli/main.js --db "$tmpdir/ledger.db" --format json doctor --read-only-
 Confirm:
 
 - `CHANGELOG.md` has an entry for the version being released.
-- Any schema, MCP, CLI, or package export changes are documented.
 - The read-only doctor passes for status handling, registry metadata, export
   filters, integrity checks, and quote-report smoke coverage.
 - `main` is green in GitHub Actions.
@@ -49,8 +64,10 @@ Confirm:
 
 ## Stable Release
 
+Use the SemVer bump chosen in the checklist:
+
 ```sh
-npm version patch --sign-git-tag
+npm version patch|minor|major --sign-git-tag
 git push origin main --follow-tags
 VERSION=$(node -p "require('./package.json').version")
 git verify-tag "v$VERSION"
@@ -64,18 +81,8 @@ npm run release:status
 npm run release:verify
 ```
 
-Use `npm version minor` instead of `npm version patch` only when the changelog
-explicitly documents the compatibility impact.
-
-For the first stable release from the `0.x` line, use:
-
-```sh
-npm version major --sign-git-tag
-git push origin main --follow-tags
-VERSION=$(node -p "require('./package.json').version")
-git verify-tag "v$VERSION"
-gh release create "v$VERSION" --generate-notes
-```
+Do not create or move tags after npm accepts a package. npm versions are
+immutable; fix forward with a new version.
 
 ## Prerelease
 
