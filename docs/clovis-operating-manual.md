@@ -147,6 +147,10 @@ Before `include_planned:true` projections, run `find_realized_planned` or
 `reconcile_planned` for the period. `cash_projection` excludes realized planned
 rows, but unresolved matches still deserve review.
 
+Use `forecast_month_end` for expense exposure against budget. It separates
+posted spend, pending spend, unrealized planned known spend, current over/under
+budget, and known projected over/under budget.
+
 Use budgets to explain variance, not just totals. A month-end answer should say
 which categories are driving the result.
 
@@ -155,6 +159,7 @@ unhealthy, the report is not ready.
 
 Recommended tools:
 
+- `forecast_month_end`
 - `cash_projection`
 - `find_realized_planned`
 - `reconcile_planned`
@@ -172,6 +177,8 @@ Watch outs:
   paid.
 - Do not mix planned, pending, and posted rows without saying which universe the
   answer uses.
+- Known projected spend is a floor, not a cap; it excludes future unplanned
+  transactions.
 - Month-end projections are assumptions. State expected inflows, expected
   outflows, included accounts, and quote asset.
 
@@ -209,6 +216,10 @@ questions.
 Use `cash_projection` when you need the audit trail behind spendable cash:
 starting cash, liabilities, earmarks, remaining budget, and planned income.
 
+Use `forecast_month_end` when the question is whether expense behavior is
+running hot against budget; `cash_projection` is not the primary budget-risk
+owner.
+
 Remove earmarked money when it is not available for general spending. A tax
 reserve or rent reserve is not free cash.
 
@@ -223,6 +234,7 @@ Recommended tools:
 - `cash_projection`
 - `find_realized_planned`
 - `reconcile_planned`
+- `forecast_month_end`
 - `budget_summary`
 - `spending_rate`
 - `spending`

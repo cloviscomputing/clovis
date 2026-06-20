@@ -315,6 +315,11 @@ excludes realized planned rows from planned projections and reports them as
 `realized_planned_rows`; `reconcile_planned` can void landed planned rows with
 `dry_run:false` after review.
 
+For budget risk, use `forecast_month_end`. It reports posted spend, pending
+spend, unrealized planned known spend, current over/under budget, and known
+projected over/under budget. Its projected spend is a floor, not a cap: future
+unplanned transactions are explicitly outside the projection.
+
 Import a QFX, OFX, or CSV statement into an existing account. The CLI import
 command and generic import tools accept all three suffixes. Prefer QFX or OFX
 when your bank provides them because they usually include a stable institution

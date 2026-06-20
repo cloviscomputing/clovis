@@ -240,6 +240,7 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       const month = args.month ?? new Date().getUTCMonth() + 1;
       const actualCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: false, include_planned: false }) as Row;
       const projectedCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
+      const budgetProjection = handlers.forecast_month_end(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
       const currentSnapshot = overview.current_snapshot as Row;
       if (currentSnapshot.as_of === "9999-12-31") {
         delete currentSnapshot.as_of;
@@ -260,6 +261,7 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
           actual: actualCash,
           selected: projectedCash
         },
+        budget_projection: budgetProjection,
         warnings,
         conversion_warning: projectedCash.conversion_warning
       };

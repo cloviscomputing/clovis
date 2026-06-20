@@ -1296,6 +1296,100 @@ describe("app and package surface", () => {
     }
   });
 
+  it("projects budget exposure with pending and unrealized planned expenses", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Opening Balances", "equity");
+      const salary = ledger.createAccount("Salary", "income");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const personalCare = ledger.createAccount("Personal Care", "expense");
+      const dining = ledger.createAccount("Dining", "expense");
+
+      ledger.setBudget(groceries, usd, 100000n, "monthly", 2026, 6);
+      ledger.setBudget(personalCare, usd, 50000n, "monthly", 2026, 6);
+      ledger.recordTransaction("2026-06-01", 300000n, equity, checking, usd, "Opening cash", "posted");
+      ledger.recordTransaction("2026-06-03", 60000n, checking, groceries, usd, "Posted groceries", "posted");
+      ledger.recordTransaction("2026-06-04", 10000n, checking, groceries, usd, "Pending groceries", "pending");
+      ledger.recordTransaction("2026-06-20", 25000n, checking, groceries, usd, "Known groceries", "planned");
+      ledger.recordTransaction("2026-06-05", 45000n, checking, personalCare, usd, "Posted care", "posted");
+      const matchedPostedCare = ledger.recordTransaction("2026-06-14", 12000n, checking, personalCare, usd, "Example Care Visit", "posted");
+      const matchedPlannedCare = ledger.recordTransaction("2026-06-15", 12000n, checking, personalCare, usd, "Example Care Visit", "planned");
+      ledger.recordTransaction("2026-06-22", 50000n, salary, checking, usd, "Planned payroll", "planned");
+      ledger.recordTransaction("2026-06-23", 7000n, checking, dining, usd, "Known dining", "planned");
+
+      const projection = callTool("forecast_month_end", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      expect(projection).toMatchObject({
+        basis: "posted_plus_pending_plus_planned_known",
+        total_budgeted_cents: 150000,
+        posted_spent_cents: 117000,
+        pending_spend_cents: 10000,
+        planned_known_spend_cents: 25000,
+        active_spend_cents: 127000,
+        known_projected_spend_cents: 152000,
+        remaining_budget_now_cents: 23000,
+        projected_remaining_budget_cents: -2000,
+        budget_variance_now_cents: 23000,
+        projected_budget_variance_cents: -2000,
+        over_budget_now_cents: 0,
+        projected_over_budget_cents: 2000,
+        is_projection_floor: true,
+        unplanned_future_spend_cents: null
+      });
+      expect(projection.message).toContain("future unplanned transactions");
+      expect(projection.realized_planned_count).toBe(1);
+      expect(projection.realized_planned_rows[0]).toMatchObject({ planned_tx_id: matchedPlannedCare.id, matched_tx_id: matchedPostedCare.id });
+      expect(projection.warnings).toContain("excluded realized planned expense rows from planned budget exposure; run reconcile_planned to void or review them");
+      expect(projection.unbudgeted_known_projected_spend_cents).toBe(7000);
+      expect(projection.known_projected_expense_cents).toBe(159000);
+      expect(projection.unbudgeted_spending).toEqual([expect.objectContaining({ account_id: dining, planned_known_spend_cents: 7000 })]);
+
+      const groceriesRow = projection.categories.find((row: any) => row.account_id === groceries);
+      expect(groceriesRow).toMatchObject({
+        budgeted_cents: 100000,
+        posted_spent_cents: 60000,
+        pending_spend_cents: 10000,
+        planned_known_spend_cents: 25000,
+        known_projected_spend_cents: 95000,
+        projected_remaining_budget_cents: 5000,
+        projected_over_budget_cents: 0
+      });
+      const personalCareRow = projection.categories.find((row: any) => row.account_id === personalCare);
+      expect(personalCareRow).toMatchObject({
+        budgeted_cents: 50000,
+        posted_spent_cents: 57000,
+        planned_known_spend_cents: 0,
+        remaining_cents: -7000,
+        projected_over_budget_cents: 7000
+      });
+      expect(projection.overspend_risk.map((row: any) => row.account_id)).toEqual([personalCare]);
+      expect(projection.projected_overspend_risk.map((row: any) => row.account_id)).toEqual([personalCare]);
+
+      const postedOnly = callTool("forecast_month_end", { year: 2026, month: 6, quote_asset_id: usd, include_pending: false, include_planned: false }, ledger) as any;
+      expect(postedOnly).toMatchObject({
+        basis: "posted_only",
+        known_projected_spend_cents: 117000,
+        projected_budget_variance_cents: 33000,
+        projected_over_budget_cents: 0
+      });
+
+      const postedPlusPlanned = callTool("forecast_month_end", { year: 2026, month: 6, quote_asset_id: usd, include_pending: false, include_planned: true }, ledger) as any;
+      expect(postedPlusPlanned).toMatchObject({
+        basis: "posted_plus_planned_known",
+        known_projected_spend_cents: 142000,
+        projected_budget_variance_cents: 8000,
+        projected_over_budget_cents: 0
+      });
+
+      const picture = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_planned: true }, ledger) as any;
+      expect(picture.budget_projection.known_projected_spend_cents).toBe(152000);
+      expect(picture.budget_projection.is_projection_floor).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("rejects report and reconciliation scopes that are not implemented", () => {
     const ledger = tempLedger();
     try {

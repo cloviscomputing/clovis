@@ -14,6 +14,7 @@ import {
   monthEnd,
   nonOverlappingAccounts,
   optionalDate,
+  realizedPlannedRows,
   reportAsset,
   rootAccountIds,
   today,
@@ -304,6 +305,209 @@ export function budgetSummary(row: Row): Row {
     budget_count: (row.budgets as Row[] ?? []).length,
     valuation_complete: row.valuation_complete,
     missing_conversion_count: (row.missing_conversions as Row[] ?? []).length
+  };
+}
+
+function spendMap(rows: Row[]): Map<string, bigint> {
+  return new Map(rows.map((row) => [String(row.account_id), BigInt(row.amount_cents ?? 0)]));
+}
+
+type ExpenseSpendBucket = { missing: Row[]; totals: Map<string, bigint> };
+
+type ExpenseSpendBuckets = {
+  periodEnd: string;
+  posted: ExpenseSpendBucket;
+  pending: ExpenseSpendBucket;
+  planned: ExpenseSpendBucket;
+  realizedPlanned: Row[];
+  missing: Row[];
+};
+
+function spendRowsForStatus(ledger: Ledger, year: number, month: number, status: TxStatus | "active" | "combined" | null, quote: string): ExpenseSpendBucket {
+  const result = spendingRows(ledger, year, month, status, quote, true) as { rows: Row[]; missing: Row[] };
+  return { missing: result.missing, totals: spendMap(result.rows) };
+}
+
+function plannedExpenseSpendRows(ledger: Ledger, year: number, month: number, quote: string, realizedIds: Set<string>): ExpenseSpendBucket {
+  const [dateFrom, dateTo] = monthBounds(year, month);
+  const accounts = new Map(ledger.listAccounts().map((row) => [row.id, row]));
+  const totals = new Map<string, bigint>();
+  const missing: Row[] = [];
+  for (const tx of ledger.listTransactions({ status: null, dateFrom, dateTo, sort: "date_asc" }).filter(isProjectionPlannedTx)) {
+    if (realizedIds.has(tx.id)) continue;
+    for (const entry of ledger.getEntries(tx.id)) {
+      const acct = accounts.get(entry.account_id);
+      if (!acct || acct.account_type !== "expense") continue;
+      const [converted, error] = ledger.tryConvertQuantity(entry.quantity, entry.asset_id, quote, tx.date);
+      if (converted == null) {
+        missing.push({ tx_id: tx.id, account_id: entry.account_id, asset_id: entry.asset_id, quote_asset_id: quote, quantity: entry.quantity, error });
+        continue;
+      }
+      totals.set(entry.account_id, (totals.get(entry.account_id) ?? 0n) + converted);
+    }
+  }
+  return { missing, totals };
+}
+
+function expenseSpendBuckets(ledger: Ledger, year: number, month: number, quote: string, plannedMatchToleranceDays: number): ExpenseSpendBuckets {
+  const [periodStart, periodEnd] = monthBounds(year, month);
+  const expenseAccountIds = ledger.listAccounts().filter((row) => row.account_type === "expense").map((row) => row.id);
+  const realizedPlanned = expenseAccountIds.length > 0 ? realizedPlannedRows(ledger, {
+    year,
+    month,
+    date_from: periodStart,
+    date_to: periodEnd,
+    account_ids: expenseAccountIds,
+    date_tolerance_days: plannedMatchToleranceDays
+  }) : [];
+  const realizedPlannedIds = new Set(realizedPlanned.map((row) => String(row.planned_tx_id)));
+  const posted = spendRowsForStatus(ledger, year, month, "posted", quote);
+  const pending = spendRowsForStatus(ledger, year, month, "pending", quote);
+  const planned = plannedExpenseSpendRows(ledger, year, month, quote, realizedPlannedIds);
+  return {
+    periodEnd,
+    posted,
+    pending,
+    planned,
+    realizedPlanned,
+    missing: [...posted.missing, ...pending.missing, ...planned.missing]
+  };
+}
+
+function budgetExposureBasis(includePending: boolean, includePlanned: boolean): string {
+  if (includePending && includePlanned) return "posted_plus_pending_plus_planned_known";
+  if (includePending) return "posted_plus_pending";
+  if (includePlanned) return "posted_plus_planned_known";
+  return "posted_only";
+}
+
+export function budgetExposure(ledger: Ledger, args: Args): Row {
+  const nowDate = new Date();
+  const year = Number(args.year ?? nowDate.getUTCFullYear());
+  const month = Number(args.month ?? nowDate.getUTCMonth() + 1);
+  const quote = reportAsset(ledger, args.quote_asset_id);
+  const includePending = args.include_pending !== false;
+  const includePlanned = args.include_planned === true;
+  const { periodEnd, posted, pending, planned, realizedPlanned, missing } = expenseSpendBuckets(ledger, year, month, quote, args.planned_match_tolerance_days ?? args.date_tolerance_days ?? 3);
+  const effective = effectiveBudgetRows(ledger, null, year, month);
+  const daysTotal = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const daysElapsed = year === nowDate.getUTCFullYear() && month === nowDate.getUTCMonth() + 1 ? nowDate.getUTCDate() : daysTotal;
+  const budgetAccountIds = new Set<string>();
+  const categoryRows = effective.rows.flatMap((budget) => {
+    const accountId = String(budget.account_id);
+    budgetAccountIds.add(accountId);
+    const [budgeted, error] = ledger.tryConvertQuantity(BigInt(budget.quantity), String(budget.asset_id), quote);
+    if (budgeted == null) {
+      missing.push({ account_id: accountId, asset_id: budget.asset_id, quote_asset_id: quote, quantity: budget.quantity, error });
+      return [];
+    }
+    const postedSpend = posted.totals.get(accountId) ?? 0n;
+    const pendingSpend = pending.totals.get(accountId) ?? 0n;
+    const plannedSpend = planned.totals.get(accountId) ?? 0n;
+    const activeSpend = postedSpend + pendingSpend;
+    const includedPending = includePending ? pendingSpend : 0n;
+    const includedPlanned = includePlanned ? plannedSpend : 0n;
+    const projectedSpend = postedSpend + includedPending + includedPlanned;
+    const overBudgetNow = activeSpend > budgeted ? activeSpend - budgeted : 0n;
+    const projectedOverBudget = projectedSpend > budgeted ? projectedSpend - budgeted : 0n;
+    const pace = budgeted * BigInt(daysElapsed) / BigInt(daysTotal);
+    return [{
+      account_id: accountId,
+      account_name: ledger.getAccount(accountId)?.name ?? "",
+      asset_id: quote,
+      source_budget_id: budget.id,
+      budgeted_cents: budgeted,
+      posted_spent_cents: postedSpend,
+      pending_spend_cents: pendingSpend,
+      planned_known_spend_cents: plannedSpend,
+      active_spend_cents: activeSpend,
+      known_projected_spend_cents: projectedSpend,
+      spent_cents: activeSpend,
+      remaining_cents: budgeted - activeSpend,
+      remaining_budget_now_cents: budgeted - activeSpend,
+      projected_remaining_budget_cents: budgeted - projectedSpend,
+      budget_variance_now_cents: budgeted - activeSpend,
+      projected_budget_variance_cents: budgeted - projectedSpend,
+      over_budget_now_cents: overBudgetNow,
+      projected_over_budget_cents: projectedOverBudget,
+      percent_used: budgeted ? Number(activeSpend) / Number(budgeted) * 100 : 0,
+      projected_percent_used: budgeted ? Number(projectedSpend) / Number(budgeted) * 100 : 0,
+      pace_cents: pace,
+      pace: activeSpend > pace ? "over" : "on_track",
+      projected_pace: projectedSpend > budgeted ? "over_budget" : activeSpend > pace ? "over_pace" : "on_track"
+    }];
+  });
+  const coveredTotal = (totals: Map<string, bigint>): bigint => [...budgetAccountIds].reduce((sum, accountId) => sum + (totals.get(accountId) ?? 0n), 0n);
+  const unbudgetedAccountIds = new Set([...posted.totals.keys(), ...pending.totals.keys(), ...planned.totals.keys()].filter((accountId) => !budgetAccountIds.has(accountId)));
+  const unbudgetedRows = [...unbudgetedAccountIds].map((accountId) => {
+    const postedSpend = posted.totals.get(accountId) ?? 0n;
+    const pendingSpend = pending.totals.get(accountId) ?? 0n;
+    const plannedSpend = planned.totals.get(accountId) ?? 0n;
+    const activeSpend = postedSpend + pendingSpend;
+    const projectedSpend = postedSpend + (includePending ? pendingSpend : 0n) + (includePlanned ? plannedSpend : 0n);
+    return {
+      account_id: accountId,
+      account_name: ledger.getAccount(accountId)?.name ?? "",
+      asset_id: quote,
+      posted_spent_cents: postedSpend,
+      pending_spend_cents: pendingSpend,
+      planned_known_spend_cents: plannedSpend,
+      active_spend_cents: activeSpend,
+      known_projected_spend_cents: projectedSpend
+    };
+  }).filter((row) => BigInt(row.known_projected_spend_cents) !== 0n || BigInt(row.active_spend_cents) !== 0n);
+  const totalBudgeted = categoryRows.reduce((sum, row) => sum + BigInt(row.budgeted_cents), 0n);
+  const postedSpent = coveredTotal(posted.totals);
+  const pendingSpend = coveredTotal(pending.totals);
+  const plannedKnownSpend = coveredTotal(planned.totals);
+  const activeSpend = postedSpent + pendingSpend;
+  const knownProjectedSpend = postedSpent + (includePending ? pendingSpend : 0n) + (includePlanned ? plannedKnownSpend : 0n);
+  const overBudgetNow = activeSpend > totalBudgeted ? activeSpend - totalBudgeted : 0n;
+  const projectedOverBudget = knownProjectedSpend > totalBudgeted ? knownProjectedSpend - totalBudgeted : 0n;
+  const unbudgetedKnownProjectedSpend = unbudgetedRows.reduce((sum, row) => sum + BigInt(row.known_projected_spend_cents), 0n);
+  const warnings = [
+    ...(includePlanned && realizedPlanned.length > 0 ? ["excluded realized planned expense rows from planned budget exposure; run reconcile_planned to void or review them"] : []),
+    ...(unbudgetedKnownProjectedSpend !== 0n ? ["known projected spend includes unbudgeted expense accounts; review unbudgeted_spending for budget coverage"] : [])
+  ];
+  return {
+    year,
+    month,
+    as_of: periodEnd,
+    basis: budgetExposureBasis(includePending, includePlanned),
+    scope: "budgeted_expense_accounts",
+    include_pending: includePending,
+    include_planned: includePlanned,
+    total_budgeted_cents: totalBudgeted,
+    posted_spent_cents: postedSpent,
+    pending_spend_cents: pendingSpend,
+    planned_known_spend_cents: plannedKnownSpend,
+    active_spend_cents: activeSpend,
+    known_projected_spend_cents: knownProjectedSpend,
+    known_projected_expense_cents: knownProjectedSpend + unbudgetedKnownProjectedSpend,
+    remaining_budget_now_cents: totalBudgeted - activeSpend,
+    projected_remaining_budget_cents: totalBudgeted - knownProjectedSpend,
+    budget_variance_now_cents: totalBudgeted - activeSpend,
+    projected_budget_variance_cents: totalBudgeted - knownProjectedSpend,
+    over_budget_now_cents: overBudgetNow,
+    projected_over_budget_cents: projectedOverBudget,
+    is_over_budget_now: activeSpend > totalBudgeted,
+    is_projected_over_budget: knownProjectedSpend > totalBudgeted,
+    is_projection_floor: true,
+    unplanned_future_spend_cents: null,
+    message: "Known projected spend excludes future unplanned transactions.",
+    categories: categoryRows,
+    overspend_risk: categoryRows.filter((row) => BigInt(row.remaining_cents) < 0n),
+    projected_overspend_risk: categoryRows.filter((row) => BigInt(row.projected_over_budget_cents) > 0n),
+    unbudgeted_spending: unbudgetedRows,
+    unbudgeted_known_projected_spend_cents: unbudgetedKnownProjectedSpend,
+    shadowed_budget_count: effective.shadowed.length,
+    shadowed_budgets: effective.shadowed.map((row) => ({ id: row.id, account_id: row.account_id, asset_id: row.asset_id, quantity: row.quantity, period: row.period, year: row.year, month: row.month })),
+    realized_planned_rows: realizedPlanned,
+    realized_planned_count: realizedPlanned.length,
+    warnings,
+    valuation_complete: missing.length === 0,
+    missing_conversions: missing,
+    conversion_warning: conversionSeverity(missing)
   };
 }
 
