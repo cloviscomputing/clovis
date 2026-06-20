@@ -3,10 +3,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
-const codeownersPath = ".github/CODEOWNERS";
-const beginMarker = "agent-governance: human-only begin";
-const endMarker = "agent-governance: human-only end";
-
 const knownAiAgentActors = new Set([
   "github-copilot[bot]",
   "copilot-swe-agent[bot]",
@@ -24,6 +20,19 @@ const dependencyBotActors = new Set([
   "dependabot[bot]",
   "renovate[bot]"
 ]);
+
+const humanOnlyPatterns = [
+  "AGENTS.md",
+  ".github/**",
+  "scripts/check-agent-governance.mjs",
+  "scripts/release-*.mjs",
+  "package.json",
+  "package-lock.json",
+  "RELEASING.md",
+  "SECURITY.md",
+  "docs/security-model.md",
+  "docs/trust.md"
+];
 
 function fail(message) {
   console.error(message);
@@ -58,79 +67,6 @@ function readJsonIfPresent(filePath) {
   } catch (error) {
     fail(`Failed to parse ${filePath}: ${error.message}`);
   }
-}
-
-function readGitFile(ref, filePath) {
-  const result = spawnSync("git", ["show", `${ref}:${filePath}`], {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"]
-  });
-  return result.status === 0 ? result.stdout : null;
-}
-
-function readCodeowners(event) {
-  const refs = [
-    event.pull_request?.base?.sha,
-    process.env.GITHUB_BASE_REF ? `origin/${process.env.GITHUB_BASE_REF}` : "",
-    runGit(["rev-parse", "--verify", "origin/main"], true) ? "origin/main" : "",
-    "HEAD"
-  ].filter(Boolean);
-
-  for (const ref of refs) {
-    const text = readGitFile(ref, codeownersPath);
-    if (text !== null) return { text, source: `${ref}:${codeownersPath}` };
-  }
-
-  if (existsSync(codeownersPath)) {
-    return { text: readFileSync(codeownersPath, "utf8"), source: codeownersPath };
-  }
-
-  fail(`${codeownersPath} is required for agent governance.`);
-}
-
-function parseHumanOnlyPatterns(event) {
-  const { text, source } = readCodeowners(event);
-  const patterns = [];
-  let inBlock = false;
-  let sawBegin = false;
-  let sawEnd = false;
-
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    const lower = line.toLowerCase();
-
-    if (lower.includes(beginMarker)) {
-      if (sawBegin) fail(`${source} has duplicate ${beginMarker} markers.`);
-      sawBegin = true;
-      inBlock = true;
-      continue;
-    }
-
-    if (lower.includes(endMarker)) {
-      if (!inBlock) fail(`${source} has ${endMarker} before ${beginMarker}.`);
-      sawEnd = true;
-      inBlock = false;
-      continue;
-    }
-
-    if (!inBlock || !line || line.startsWith("#")) continue;
-
-    const [pattern, ...owners] = line.split(/\s+/);
-    if (!pattern || owners.length === 0) {
-      fail(`Human-only CODEOWNERS line must include a pattern and owner: ${rawLine}`);
-    }
-    patterns.push(pattern);
-  }
-
-  if (!sawBegin || !sawEnd) {
-    fail(`${source} must contain ${beginMarker} and ${endMarker} markers.`);
-  }
-  if (patterns.length === 0) {
-    fail(`${source} human-only block is empty.`);
-  }
-
-  return { patterns, source };
 }
 
 function normalizePath(filePath) {
@@ -272,7 +208,7 @@ function formatMatches(matches) {
 }
 
 const event = readJsonIfPresent(process.env.GITHUB_EVENT_PATH);
-const humanOnlyPolicy = parseHumanOnlyPatterns(event);
+const humanOnlyPolicy = { patterns: humanOnlyPatterns, source: "scripts/check-agent-governance.mjs" };
 const changedFiles = getChangedFiles(event);
 const detection = detectAiAgent(event);
 const blockedMatches = changedFiles
@@ -281,7 +217,7 @@ const blockedMatches = changedFiles
 
 if (detection.detected && blockedMatches.length > 0) {
   fail([
-    "AI-agent PRs may not change human-only CODEOWNERS paths.",
+    "AI-agent PRs may not change human-only governance paths.",
     "",
     `Actor: ${detection.actor || "(unknown)"}`,
     "Signals:",
@@ -294,7 +230,7 @@ if (detection.detected && blockedMatches.length > 0) {
   ].join("\n"));
 }
 
-console.log(`agent governance: loaded ${humanOnlyPolicy.patterns.length} human-only CODEOWNERS pattern(s) from ${humanOnlyPolicy.source}`);
+console.log(`agent governance: loaded ${humanOnlyPolicy.patterns.length} human-only pattern(s) from ${humanOnlyPolicy.source}`);
 console.log(`agent governance: inspected ${changedFiles.length} changed file(s)`);
 if (detection.detected) {
   console.log(`agent governance: detected AI-agent contribution from ${detection.actor || "(unknown)"}`);

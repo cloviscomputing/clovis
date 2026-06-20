@@ -1,8 +1,8 @@
 # AGENTS.md
 
 This file defines the repository rules for AI coding agents working on Clovis.
-It is guidance for agents and reviewers; enforcement lives in CI and
-the marked human-only block in `.github/CODEOWNERS`.
+It is guidance for agents and reviewers; enforcement lives in CI through
+`scripts/check-agent-governance.mjs`.
 
 ## Repository Shape
 
@@ -19,11 +19,9 @@ the marked human-only block in `.github/CODEOWNERS`.
 Agents may propose normal code, tests, and documentation changes when they stay
 inside existing architecture and include appropriate verification.
 
-Agents must not change paths inside the `agent-governance: human-only` block in
-`.github/CODEOWNERS` unless a maintainer explicitly asks for that exact change.
-
-All CODEOWNERS-covered paths need the listed owner review when branch
-protection requires CODEOWNER approval.
+Agents must not change paths listed in `humanOnlyPatterns` inside
+`scripts/check-agent-governance.mjs` unless a maintainer explicitly asks for
+that exact change.
 
 ## Ledger Safety Rules
 
