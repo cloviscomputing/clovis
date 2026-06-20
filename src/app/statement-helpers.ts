@@ -16,6 +16,7 @@ import {
   amountForAccount,
   asset,
   batch,
+  categorizationText,
   dateDeltaDays,
   explicitAsset,
   realizedPlannedRows,
@@ -142,6 +143,8 @@ export function parseQfx(text: string): Row[] {
       external_id: qfxTag(block, "FITID") || null,
       tags: Object.fromEntries([
         ["qfx_fitid", qfxTag(block, "FITID")],
+        ["qfx_name", name],
+        ["qfx_memo", memo],
         ["qfx_type", qfxTag(block, "TRNTYPE")]
       ].filter(([, value]) => value !== ""))
     };
@@ -218,7 +221,8 @@ export function importTransactionRows(ledger: Ledger, accountId: string, counter
   const existing = existingImportFingerprints(ledger, accountId, assetId);
   rows.forEach((row, index) => {
     try {
-      const rowCounterpart = row.counterpart_ref ? account(ledger, String(row.counterpart_ref)) : row.counterpart_id ? account(ledger, String(row.counterpart_id)) : counterpartId;
+      const rowCounterpart = counterpartForRow(ledger, row, counterpartId);
+      if (!rowCounterpart) throw new Error("counterpart_id is required");
       const signed = signedStatementQuantity(ledger, assetId, row, options.amount_convention);
       const fingerprint = importFingerprint(row, signed);
       if (!options.skip_dedup && existing.has(fingerprint)) { skipped += 1; return; }
@@ -288,7 +292,7 @@ export function signedRowEntries(ledger: Ledger, accountId: string, counterpartI
 export function counterpartForRow(ledger: Ledger, row: Row, fallback?: string | null): string | null {
   if (row.counterpart_ref) return account(ledger, String(row.counterpart_ref));
   if (row.counterpart_id) return account(ledger, String(row.counterpart_id));
-  const matched = ledger.autoCategorize(String(row.description ?? ""));
+  const matched = ledger.autoCategorize(categorizationText(row));
   if (matched) return matched;
   return fallback ?? null;
 }

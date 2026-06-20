@@ -1380,7 +1380,7 @@ export class Ledger {
       ...[...totals.income.entries()].filter(([, amount]) => amount !== 0n).sort(byName).map(([accountId, amount]) => line(accountId, amount)),
       ...[...totals.expense.entries()].filter(([, amount]) => amount !== 0n).sort(byName).map(([accountId, amount]) => line(accountId, amount))
     ];
-    const equityEquivalent = new Set(["internal transfers", "opening balance", "opening balances", "retained earnings"]);
+    const equityEquivalent = new Set(["transfer clearing", "opening balance", "opening balances", "retained earnings"]);
     const financing = [...totals.liability.entries()]
       .filter(([accountId, amount]) => amount !== 0n && !equityEquivalent.has((accounts.get(accountId)?.name ?? "").toLowerCase()))
       .sort(byName)

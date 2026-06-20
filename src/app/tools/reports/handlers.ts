@@ -130,6 +130,13 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       as_of_description: "Open-ended current snapshot; no calendar cutoff was applied."
     };
   };
+  const categorizationReviewAccountIds = (ledger: Ledger, args: Row): Set<string> => {
+    if (args.catch_all_account_id) return new Set([account(ledger, args.catch_all_account_id)]);
+    const defaultNames = new Set(["uncategorized", "pending expenses"]);
+    return new Set(ledger.listAccounts()
+      .filter((row) => defaultNames.has(row.name.trim().toLowerCase()))
+      .map((row) => row.id));
+  };
   return {
 
     income_statement: (ledger, args) => {
@@ -565,14 +572,22 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     },
 
     list_uncategorized: (ledger, args) => {
-      const catchAll = args.catch_all_account_id ? account(ledger, args.catch_all_account_id) : null;
+      const reviewAccountIds = categorizationReviewAccountIds(ledger, args);
       const accounts = new Map(ledger.listAccounts().map((row) => [row.id, row]));
-      const rows = iterTransactions(ledger, { status: reportStatus(args, "pending"), date_from: args.date_from, date_to: args.date_to }).filter((tx) => ledger.getEntries(tx.id).some((entry) => catchAll ? entry.account_id === catchAll : accounts.get(entry.account_id)?.name.toLowerCase() === "uncategorized")).map((tx) => txPublic(ledger, tx, Boolean(args.compact)));
-      return { transactions: rows.slice(args.offset ?? 0, (args.offset ?? 0) + (args.limit ?? 50)), items: rows, total: rows.length, limit: args.limit ?? 50, offset: args.offset ?? 0 };
+      const rows = iterTransactions(ledger, { status: reportStatus(args, "pending"), date_from: args.date_from, date_to: args.date_to }).filter((tx) => ledger.getEntries(tx.id).some((entry) => reviewAccountIds.has(entry.account_id))).map((tx) => txPublic(ledger, tx, Boolean(args.compact)));
+      return {
+        transactions: rows.slice(args.offset ?? 0, (args.offset ?? 0) + (args.limit ?? 50)),
+        items: rows,
+        total: rows.length,
+        limit: args.limit ?? 50,
+        offset: args.offset ?? 0,
+        catch_all_account_ids: [...reviewAccountIds],
+        catch_all_accounts: [...reviewAccountIds].map((id) => ({ id, name: accounts.get(id)?.name ?? "" }))
+      };
     },
 
     audit_categorization: (ledger, args) => {
-      const uncategorized = handlers.list_uncategorized(ledger, { status: reportStatus(args, "posted"), date_from: args.date_from, date_to: args.date_to, limit: 1000, compact: true }) as Row;
+      const uncategorized = handlers.list_uncategorized(ledger, { status: reportStatus(args, "posted"), date_from: args.date_from, date_to: args.date_to, catch_all_account_id: args.catch_all_account_id, limit: 1000, compact: true }) as Row;
       const counts = new Map<string, number>();
       for (const tx of uncategorized.transactions as Row[]) counts.set(String(tx.description), (counts.get(String(tx.description)) ?? 0) + 1);
       return { mode: args.mode ?? "budget", uncategorized, frequent_descriptions: [...counts.entries()].filter(([, count]) => count >= (args.min_occurrences ?? 2)).map(([description, count]) => ({ description, count })) };

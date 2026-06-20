@@ -33,12 +33,12 @@ function createGoldenContext(): GoldenContext {
   const expenses = ledger.createAccount("Expenses", "expense");
   const accounts = {
     Cash: ledger.createAccount("Cash", "asset"),
-    Chequing: ledger.createAccount("RBC Chequing 1204", "asset"),
-    Savings: ledger.createAccount("RBC Savings 1212", "asset"),
-    Visa: ledger.createAccount("RBC Avion Visa 5870", "liability"),
-    Investments: ledger.createAccount("RBC Direct Investing 8219", "asset"),
+    Chequing: ledger.createAccount("Primary Checking", "asset"),
+    Savings: ledger.createAccount("Reserve Savings", "asset"),
+    Visa: ledger.createAccount("Rewards Card", "liability"),
+    Investments: ledger.createAccount("Brokerage Account", "asset"),
     Equity: ledger.createAccount("Opening Balances", "equity"),
-    Internal: ledger.createAccount("Internal Transfers", "equity"),
+    Internal: ledger.createAccount("Transfer Clearing", "equity"),
     Salary: ledger.createAccount("Salary", "income"),
     Expenses: expenses,
     Groceries: ledger.createAccount("Groceries", "expense", expenses),
@@ -126,8 +126,8 @@ function seedReimportLedger(ctx: GoldenContext): void {
   ledger.recordTransaction("2026-06-02", 25000n, accounts.Chequing, accounts.Groceries, assets.cad, "Market Groceries", "posted", { externalId: "cheq-market" });
   ledger.recordTransaction("2026-06-03", 50000n, accounts.Equity, accounts.Chequing, assets.cad, "Payroll", "posted", { externalId: "cheq-payroll" });
   ledger.recordTransaction("2026-06-04", 2850000n, accounts.Equity, accounts.Savings, assets.cad, "Savings balance", "posted", { externalId: "sav-open" });
-  ledger.recordTransaction("2026-06-05", 25995n, accounts.Visa, accounts.Shopping, assets.cad, "CLEARLY ECOMM", "posted", { externalId: "visa-clearly" });
-  ledger.recordTransaction("2026-06-06", 1129n, accounts.Visa, accounts.Shopping, assets.cad, "Amazon.ca Prime Member", "posted", { externalId: "visa-prime" });
+  ledger.recordTransaction("2026-06-05", 25995n, accounts.Visa, accounts.Shopping, assets.cad, "Example Online Shop", "posted", { externalId: "visa-online-shop" });
+  ledger.recordTransaction("2026-06-06", 1129n, accounts.Visa, accounts.Shopping, assets.cad, "Example Subscription", "posted", { externalId: "visa-subscription" });
   ledger.recordTransaction("2026-06-07", 154116n, accounts.Internal, accounts.Visa, assets.cad, "PAYMENT", "posted", { externalId: "visa-payment" });
 }
 
@@ -142,8 +142,8 @@ function statementPaths(ctx: GoldenContext): Row {
       { date: "2026-06-04", amount: "28500.00", id: "sav-open", name: "Savings balance" }
     ], "28500.00", "2026-06-04"),
     visa: qfx(join(ctx.dir, "visa.qfx"), [
-      { date: "2026-06-05", amount: "-259.95", id: "visa-clearly", name: "CLEARLY ECOMM" },
-      { date: "2026-06-06", amount: "-11.29", id: "visa-prime", name: "Amazon.ca Prime Member" },
+      { date: "2026-06-05", amount: "-259.95", id: "visa-online-shop", name: "Example Online Shop" },
+      { date: "2026-06-06", amount: "-11.29", id: "visa-subscription", name: "Example Subscription" },
       { date: "2026-06-07", amount: "143.16", id: "visa-payment", name: "PAYMENT", type: "CREDIT" }
     ], "128.08", "2026-06-07")
   };
@@ -292,10 +292,10 @@ describe("golden lifecycle", () => {
     const ctx = createGoldenContext();
     try {
       const { ledger, accounts, assets } = ctx;
-      ledger.recordTransaction("2026-06-10", 2399n, accounts.Visa, accounts.Shopping, assets.cad, "Uber Holdings Canada Inc.", "posted");
-      ledger.recordTransaction("2026-06-11", 2399n, accounts.Visa, accounts.Shopping, assets.cad, "Uber Holdings Canada Inc.", "posted");
+      ledger.recordTransaction("2026-06-10", 2399n, accounts.Visa, accounts.Shopping, assets.cad, "Example Ride Share", "posted");
+      ledger.recordTransaction("2026-06-11", 2399n, accounts.Visa, accounts.Shopping, assets.cad, "Example Ride Share", "posted");
       const file = qfx(join(ctx.dir, "ambiguous.qfx"), [
-        { date: "2026-06-10", amount: "-23.99", id: "ambiguous-uber", name: "Uber Holdings Canada Inc." }
+        { date: "2026-06-10", amount: "-23.99", id: "ambiguous-ride-share", name: "Example Ride Share" }
       ], "47.98", "2026-06-11");
       const before = activeJuneSnapshot(ctx);
 

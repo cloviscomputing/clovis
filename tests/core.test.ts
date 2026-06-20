@@ -2139,6 +2139,42 @@ describe("app and package surface", () => {
     }
   });
 
+  it("uses QFX source memo fields for import categorization", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("add_match_rule", { account_id: accounts.Groceries, pattern: "Source Memo Merchant" }, ledger);
+      const statementPath = join(dirname(ledger.path), "statement.qfx");
+      writeFileSync(statementPath, [
+        "<OFX><CREDITCARDMSGSRSV1><CCSTMTTRNRS><CCSTMTRS><BANKTRANLIST>",
+        "<STMTTRN>",
+        "<TRNTYPE>DEBIT",
+        "<DTPOSTED>20260605000000[-5:EST]",
+        "<TRNAMT>-12.34",
+        "<FITID>generic-fitid-1",
+        "<NAME>Generic Card Purchase",
+        "<MEMO>Source Memo Merchant",
+        "</STMTTRN>",
+        "</BANKTRANLIST></CCSTMTRS></CCSTMTTRNRS></CREDITCARDMSGSRSV1></OFX>"
+      ].join("\n"));
+
+      const imported = callTool("import_file", {
+        file_path: statementPath,
+        account_id: accounts.Checking,
+        counterpart_account_id: accounts.Uncategorized,
+        status: "pending"
+      }, ledger) as any;
+      expect(imported.created).toBe(1);
+      expect(imported.transactions[0].description).toBe("Generic Card Purchase");
+      expect(imported.transactions[0].entries).toContainEqual(expect.objectContaining({ account_id: accounts.Groceries }));
+      expect(imported.transactions[0].tags).toContainEqual(expect.objectContaining({ key: "qfx_name", value: "Generic Card Purchase" }));
+      expect(imported.transactions[0].tags).toContainEqual(expect.objectContaining({ key: "qfx_memo", value: "Source Memo Merchant" }));
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("parses CSV date wrappers and requires explicit ambiguous numeric date formats", () => {
     const ledger = tempLedger();
     try {
@@ -2206,6 +2242,51 @@ describe("app and package surface", () => {
       expect(ledger.getEntries(active.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Groceries }));
       expect(ledger.getEntries(voided.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Uncategorized }));
       expect(ledger.getEntries(planned.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Uncategorized }));
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("applies match rules from source annotations and skips catch-all no-ops", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      callTool("add_match_rule", { account_id: accounts.Groceries, pattern: "Source Memo Merchant" }, ledger);
+      callTool("add_match_rule", { account_id: accounts.Uncategorized, pattern: "Review Bucket Merchant" }, ledger);
+      const matched = callTool("create_transaction", { date: "2026-06-01", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Uncategorized, description: "Generic Card Purchase", status: "pending" }, ledger) as any;
+      const noOp = callTool("create_transaction", { date: "2026-06-02", amount: 10, from_account_id: accounts.Checking, to_account_id: accounts.Uncategorized, description: "Review Bucket Merchant", status: "pending" }, ledger) as any;
+      ledger.createAnnotation("tx", matched.id, "qfx_memo", "Source Memo Merchant");
+
+      const preview = callTool("apply_match_rules", { catch_all_account_id: accounts.Uncategorized }, ledger) as any;
+      expect(preview).toMatchObject({ matched: 1, updated: 0, dry_run: true });
+      expect(preview.transactions.map((row: any) => row.tx_id)).toEqual([matched.id]);
+
+      const applied = callTool("apply_match_rules", { catch_all_account_id: accounts.Uncategorized, dry_run: false }, ledger) as any;
+      expect(applied).toMatchObject({ matched: 1, updated: 1, dry_run: false });
+      expect(ledger.getEntries(matched.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Groceries }));
+      expect(ledger.getEntries(noOp.id)).toContainEqual(expect.objectContaining({ account_id: accounts.Uncategorized }));
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("audits explicit categorization review accounts", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      const review = callTool("create_account", { name: "Review Queue", type: "expense" }, ledger) as any;
+      callTool("create_transaction", { date: "2026-06-01", amount: 10, from_account_id: accounts.Checking, to_account_id: review.id, description: "Generic Review Merchant", status: "pending", asset_id: usd }, ledger);
+
+      const defaultList = callTool("list_uncategorized", { status: "pending" }, ledger) as any;
+      expect(defaultList.total).toBe(0);
+      const explicitList = callTool("list_uncategorized", { catch_all_account_id: review.id, status: "pending" }, ledger) as any;
+      expect(explicitList).toMatchObject({ total: 1, catch_all_account_ids: [review.id] });
+      const audit = callTool("audit_categorization", { catch_all_account_id: review.id, status: "pending", min_occurrences: 1 }, ledger) as any;
+      expect(audit.uncategorized.total).toBe(1);
+      expect(audit.frequent_descriptions).toContainEqual({ description: "Generic Review Merchant", count: 1 });
     } finally {
       ledger.close();
     }

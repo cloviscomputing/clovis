@@ -12,6 +12,8 @@ const MAX_MATCH_PATTERN_LENGTH = 200;
 
 export const MAX_MATCH_INPUT_LENGTH = 2048;
 
+const CATEGORIZATION_TAG_KEYS = new Set(["merchant", "memo", "name", "ofx_memo", "ofx_name", "payee", "qfx_memo", "qfx_name"]);
+
 const NESTED_QUANTIFIER_PATTERN = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,?\d*\})/;
 
 export function now(): string {
@@ -254,6 +256,37 @@ export function txWithEntries(ledger: Ledger, txId: string): Row {
   const tx = ledger.getTx(txId);
   if (!tx) throw new Error(`Transaction '${txId}' not found`);
   return txPublic(ledger, tx);
+}
+
+function categoryTagValue(row: Row): string | null {
+  const key = String(row.key ?? "").toLowerCase();
+  if (!CATEGORIZATION_TAG_KEYS.has(key)) return null;
+  const value = row.value ?? row.val;
+  return value == null ? null : String(value);
+}
+
+export function categorizationText(row: Row, annotations: Row[] = []): string {
+  const values: string[] = [String(row.description ?? "")];
+  const tags = row.tags;
+  if (Array.isArray(tags)) {
+    for (const tag of tags) {
+      const value = categoryTagValue(tag);
+      if (value) values.push(value);
+    }
+  } else if (tags && typeof tags === "object") {
+    for (const [key, value] of Object.entries(tags)) {
+      if (CATEGORIZATION_TAG_KEYS.has(key.toLowerCase()) && value != null) values.push(String(value));
+    }
+  }
+  for (const tag of annotations) {
+    const value = categoryTagValue(tag);
+    if (value) values.push(value);
+  }
+  return values.map((value) => value.trim()).filter(Boolean).join(" ").slice(0, MAX_MATCH_INPUT_LENGTH);
+}
+
+export function transactionCategorizationText(ledger: Ledger, tx: Journal): string {
+  return categorizationText(tx as unknown as Row, ledger.listAnnotations("tx", tx.id));
 }
 
 export function directedTxPublic(ledger: Ledger, tx: Journal, fromAccountId: string, toAccountId: string): Row {

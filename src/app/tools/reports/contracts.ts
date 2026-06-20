@@ -300,6 +300,7 @@ export const reportTools = defineToolGroup([
       parameters: [
         ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
         ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["catch_all_account_id", "string", { nullable: true, optional: true, defaultValue: null }],
         ["min_occurrences", "integer", { optional: true, defaultValue: 2 }],
         ["status", "string", { optional: true, defaultValue: "posted" }],
         ["mode", "string", { optional: true, defaultValue: "budget" }]

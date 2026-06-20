@@ -41,6 +41,7 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
     tagTx,
     today,
     transactionAsset,
+    transactionCategorizationText,
     transactionMagnitude,
     txPublic,
     txWithEntries,
@@ -285,10 +286,10 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
       const changed: Row[] = [];
       const dryRun = args.dry_run !== false;
       for (const tx of ledger.listTransactions({ status: null, dateFrom: optionalDate(args.date_from), dateTo: optionalDate(args.date_to) }).filter(isBulkCategorizationCandidate)) {
-        const match = ledger.autoCategorize(tx.description);
-        if (!match) continue;
+        const match = ledger.autoCategorize(transactionCategorizationText(ledger, tx));
+        if (!match || match === catchAll) continue;
         if (ledger.getEntries(tx.id).some((entry) => entry.account_id === catchAll)) {
-          changed.push({ tx_id: tx.id, new_account_id: match });
+          changed.push({ tx_id: tx.id, old_account_id: catchAll, new_account_id: match, description: tx.description });
           if (!dryRun) ledger.recategorizeTransaction(tx.id, catchAll, match);
         }
       }
@@ -307,7 +308,7 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
       const matches: Row[] = [];
       const regex = safeMatchRegex(args.pattern);
       for (const tx of iterTransactions(ledger, { status: reportStatus(args, "posted"), date_from: args.date_from, date_to: args.date_to })) {
-        if (!regex.test(tx.description.slice(0, MAX_MATCH_INPUT_LENGTH))) continue;
+        if (!regex.test(transactionCategorizationText(ledger, tx).slice(0, MAX_MATCH_INPUT_LENGTH))) continue;
         const entries = ledger.getEntries(tx.id);
         const magnitudes = entries.map((entry) => entry.quantity < 0n ? -entry.quantity : entry.quantity);
         if (args.amount_min != null && (magnitudes.length === 0 || magnitudes.every((amount) => amount < BigInt(args.amount_min as string | number | bigint | boolean)))) continue;
