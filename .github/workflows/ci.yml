@@ -1,0 +1,26 @@
+name: CI
+
+# CI is the release-readiness gate for every change. It intentionally runs the
+# same package-level check used before publish so main never drifts from what
+# npm would accept.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26.3.0"
+          cache: npm
+      - run: npm ci
+      - run: npm run security:audit
+      - run: npm run release:check

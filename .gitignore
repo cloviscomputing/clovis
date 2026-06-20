@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+.vitest/
+.DS_Store
+
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.tmp
+*.bak
+
+.env
+.env.*
+.envrc
+
+# Internal agent/operator reports — never commit
+private/
+

@@ -1,0 +1,6 @@
+Contact: mailto:security@cloviscomputing.com
+Contact: https://github.com/cloviscomputing/clovis/security/advisories/new
+Policy: https://github.com/cloviscomputing/clovis/security/policy
+Preferred-Languages: en
+Canonical: https://cloviscomputing.com/.well-known/security.txt
+Expires: 2027-06-01T00:00:00Z

@@ -1,0 +1,86 @@
+{
+  "name": "clovis",
+  "version": "1.0.0",
+  "description": "Local-first bookkeeping CLI, MCP server, and SQLite ledger engine",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "author": "Clovis Computing <support@cloviscomputing.com> (https://cloviscomputing.com)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cloviscomputing/clovis.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloviscomputing/clovis/issues",
+    "email": "support@cloviscomputing.com"
+  },
+  "homepage": "https://cloviscomputing.com/",
+  "keywords": [
+    "bookkeeping",
+    "accounting",
+    "sqlite",
+    "ledger",
+    "mcp"
+  ],
+  "engines": {
+    "node": ">=26.3.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "bin": {
+    "clovis": "dist/cli/main.js",
+    "clovis-mcp": "dist/mcp/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./app": {
+      "types": "./dist/app/index.d.ts",
+      "import": "./dist/app/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp/index.d.ts",
+      "import": "./dist/mcp/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "RELEASING.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && vitest run --no-file-parallelism",
+    "typecheck": "tsc --noEmit",
+    "security:audit": "npm audit --audit-level=low",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run",
+    "prepublishOnly": "npm run release:check",
+    "release:check": "node scripts/release-check.mjs",
+    "release:status": "node scripts/release-status.mjs",
+    "release:verify": "node scripts/release-verify.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "commander": "^15.0.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}
