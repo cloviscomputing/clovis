@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Expand `forecast_month_end` into a budget exposure projection with posted,
+  pending, and unrealized planned expense buckets, and embed that projection in
+  `financial_picture`.
+
 ## 1.0.0 - 2026-06-20
 
 - Split the core ledger internals into store, codec, scenario, document import/export, and integrity modules while keeping the public `Ledger` API unchanged.

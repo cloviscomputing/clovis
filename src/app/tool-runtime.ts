@@ -69,6 +69,7 @@ import {
 import type { Args, Row } from "./transaction-helpers.js";
 import {
   ageOfMoney,
+  budgetExposure,
   budgetRows,
   budgetSummary,
   cashProjectionSummary,
@@ -324,6 +325,7 @@ const runtimeContext = {
   backupStatus,
   batch,
   budgetBurn,
+  budgetExposure,
   budgetRows,
   budgetSummary,
   buildStatementPlan,

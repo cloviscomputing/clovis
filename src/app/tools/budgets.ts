@@ -180,7 +180,10 @@ export const budgetTools = defineToolGroup([
       parameters: [
         ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
         ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
-        ["status", "string", { optional: true, defaultValue: "posted" }],
+        ["status", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["include_pending", "boolean", { optional: true, defaultValue: true }],
+        ["include_planned", "boolean", { optional: true, defaultValue: true }],
+        ["planned_match_tolerance_days", "integer", { optional: true, defaultValue: 3 }],
         ["quote_asset_id", "string"]
       ],
       returns: { type: "object" }
@@ -263,6 +266,7 @@ export function budgetHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     account,
     accountAsset,
     asset,
+    budgetExposure,
     budgetRows,
     display,
     effectiveBudgetRows,
@@ -386,7 +390,22 @@ export function budgetHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       return (report.budgets as Row[]).map((row) => ({ ...row, pace_cents: BigInt(row.budgeted_cents) * BigInt(daysElapsed) / BigInt(daysTotal), pace: BigInt(row.spent_cents) > BigInt(row.budgeted_cents) * BigInt(daysElapsed) / BigInt(daysTotal) ? "over" : "on_track" }));
     },
 
-    forecast_month_end: (ledger, args) => ({ categories: handlers.spending_rate(ledger, args), overspend_risk: (handlers.spending_rate(ledger, args) as Row[]).filter((row) => BigInt(row.remaining_cents) < 0n) }),
+    forecast_month_end: (ledger, args) => {
+      const explicitStatus = args.status !== undefined && args.status !== "";
+      const includePendingFromArgs = args.include_pending !== false;
+      const includePlannedFromArgs = args.include_planned !== false;
+      const fallbackStatus = includePendingFromArgs && includePlannedFromArgs ? "combined" : includePendingFromArgs ? "active" : includePlannedFromArgs ? "planned" : "posted";
+      const status = explicitStatus ? reportStatus({ status: args.status }, fallbackStatus) : fallbackStatus;
+      const includePending = explicitStatus ? status == null || status === "active" || status === "combined" || status === "pending" : includePendingFromArgs;
+      const includePlanned = explicitStatus ? status == null || status === "combined" || status === "planned" : includePlannedFromArgs;
+      const report = budgetExposure(ledger, { ...args, include_pending: includePending, include_planned: includePlanned }) as Row;
+      const warnings = [...(report.warnings as string[] ?? [])];
+      if (explicitStatus) {
+        if (args.include_pending !== undefined && Boolean(args.include_pending) !== includePending) warnings.push(`Explicit status '${String(args.status)}' overrides include_pending:${Boolean(args.include_pending)}; resolved include_pending:${includePending}.`);
+        if (args.include_planned !== undefined && Boolean(args.include_planned) !== includePlanned) warnings.push(`Explicit status '${String(args.status)}' overrides include_planned:${Boolean(args.include_planned)}; resolved include_planned:${includePlanned}.`);
+      }
+      return { ...report, report_status: status, warnings };
+    },
 
     suggest_budgets: (ledger, args) => {
       const totals = new Map<string, bigint[]>();
