@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-06-20
+
 - Expand `forecast_month_end` into a budget exposure projection with posted,
   pending, and unrealized planned expense buckets, and embed that projection in
   `financial_picture`.
+- Add repository governance for agent-authored changes, including agent
+  instructions, ownership rules, and a CI governance check.
+- Document the issue and pull-request workflow for future agent-assisted
+  changes.
+- Clarify the release runbook so version selection, changelog preparation, and
+  stable-release commands are generic for future releases.
 
 ## 1.0.0 - 2026-06-20
 
