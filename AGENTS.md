@@ -50,3 +50,12 @@ protection requires CODEOWNER approval.
   to make a change pass.
 - Do not add AI attribution footers or co-author trailers unless the maintainer
   asks for them.
+
+## Issue And PR Workflow
+
+- Do not close an issue before the solving PR is merged.
+- Open a PR that references the issue with `Closes #N`.
+- Let GitHub close the issue automatically on merge.
+- Explain rejected alternatives in the PR body when the issue requested a
+  different approach.
+- After merge, verify the issue is closed and post-merge CI passed.
