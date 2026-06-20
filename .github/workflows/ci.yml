@@ -17,10 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: "26.3.0"
           cache: npm
+      - run: npm run governance:agent
       - run: npm ci
       - run: npm run security:audit
       - run: npm run release:check
