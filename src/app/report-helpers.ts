@@ -2,7 +2,7 @@ import { Ledger } from "../core/ledger.js";
 import type { TxStatus } from "../core/types.js";
 import { normalAmount } from "../core/accounting.js";
 import { isProjectionPlannedTx } from "./transaction-lifecycle.js";
-import { validateDate } from "./validation.js";
+import { parseTxStatusFilter, validateDate } from "./validation.js";
 import {
   account,
   addMonths,
@@ -82,6 +82,63 @@ export function spendingRows(ledger: Ledger, year?: number | null, month?: numbe
       amount_display: display(ledger, amount, quote)
     }));
   return returnMissing ? { rows, missing } : rows;
+}
+
+export type ProjectionReportStatus = TxStatus | "active" | "combined" | null;
+
+export type ProjectionStatusResolution = {
+  status: ProjectionReportStatus;
+  includePending: boolean;
+  includePlanned: boolean;
+  explicitStatus: boolean;
+  warnings: Row[];
+};
+
+function optionalBoolean(value: unknown, fallback: boolean): boolean {
+  if (value === true) return true;
+  if (value === false) return false;
+  return fallback;
+}
+
+function projectionFallbackStatus(includePending: boolean, includePlanned: boolean): Exclude<ProjectionReportStatus, null> {
+  if (includePending && includePlanned) return "combined";
+  if (includePending) return "active";
+  if (includePlanned) return "planned";
+  return "posted";
+}
+
+function statusIncludesPending(status: ProjectionReportStatus): boolean {
+  return status == null || status === "active" || status === "combined" || status === "pending";
+}
+
+function statusIncludesPlanned(status: ProjectionReportStatus): boolean {
+  return status == null || status === "combined" || status === "planned";
+}
+
+export function resolveProjectionStatus(args: Args, defaults: { includePending?: boolean; includePlanned?: boolean } = {}): ProjectionStatusResolution {
+  const requestedIncludePending = optionalBoolean(args.include_pending, defaults.includePending ?? false);
+  const requestedIncludePlanned = optionalBoolean(args.include_planned, defaults.includePlanned ?? false);
+  const fallbackStatus = projectionFallbackStatus(requestedIncludePending, requestedIncludePlanned);
+  const explicitStatus = args.status !== undefined && args.status !== null && args.status !== "";
+  const status = explicitStatus ? parseTxStatusFilter(args.status, fallbackStatus) : fallbackStatus;
+  const includePending = explicitStatus ? statusIncludesPending(status) : requestedIncludePending;
+  const includePlanned = explicitStatus ? statusIncludesPlanned(status) : requestedIncludePlanned;
+  const warnings: Row[] = [];
+  if (explicitStatus) {
+    if (args.include_pending !== undefined && Boolean(args.include_pending) !== includePending) {
+      warnings.push({
+        code: "status_overrides_include_pending",
+        message: `Explicit status '${String(args.status)}' overrides include_pending:${Boolean(args.include_pending)}; resolved include_pending:${includePending}.`
+      });
+    }
+    if (args.include_planned !== undefined && Boolean(args.include_planned) !== includePlanned) {
+      warnings.push({
+        code: "status_overrides_include_planned",
+        message: `Explicit status '${String(args.status)}' overrides include_planned:${Boolean(args.include_planned)}; resolved include_planned:${includePlanned}.`
+      });
+    }
+  }
+  return { status, includePending, includePlanned, explicitStatus, warnings };
 }
 
 export function incomeStatementRows(ledger: Ledger, year: number, month: number | null, status: TxStatus | "active" | "combined" | null = "posted", quoteAssetId?: string | null): Row {
@@ -464,7 +521,12 @@ export function budgetExposure(ledger: Ledger, args: Args): Row {
   const knownProjectedSpend = postedSpent + (includePending ? pendingSpend : 0n) + (includePlanned ? plannedKnownSpend : 0n);
   const overBudgetNow = activeSpend > totalBudgeted ? activeSpend - totalBudgeted : 0n;
   const projectedOverBudget = knownProjectedSpend > totalBudgeted ? knownProjectedSpend - totalBudgeted : 0n;
+  const unbudgetedActiveSpend = unbudgetedRows.reduce((sum, row) => sum + BigInt(row.active_spend_cents), 0n);
   const unbudgetedKnownProjectedSpend = unbudgetedRows.reduce((sum, row) => sum + BigInt(row.known_projected_spend_cents), 0n);
+  const activeExpense = activeSpend + unbudgetedActiveSpend;
+  const knownProjectedExpense = knownProjectedSpend + unbudgetedKnownProjectedSpend;
+  const activeExpenseOverBudget = activeExpense > totalBudgeted ? activeExpense - totalBudgeted : 0n;
+  const knownProjectedExpenseOverBudget = knownProjectedExpense > totalBudgeted ? knownProjectedExpense - totalBudgeted : 0n;
   const warnings = [
     ...(includePlanned && realizedPlanned.length > 0 ? ["excluded realized planned expense rows from planned budget exposure; run reconcile_planned to void or review them"] : []),
     ...(unbudgetedKnownProjectedSpend !== 0n ? ["known projected spend includes unbudgeted expense accounts; review unbudgeted_spending for budget coverage"] : [])
@@ -483,7 +545,10 @@ export function budgetExposure(ledger: Ledger, args: Args): Row {
     planned_known_spend_cents: plannedKnownSpend,
     active_spend_cents: activeSpend,
     known_projected_spend_cents: knownProjectedSpend,
-    known_projected_expense_cents: knownProjectedSpend + unbudgetedKnownProjectedSpend,
+    unbudgeted_active_spend_cents: unbudgetedActiveSpend,
+    unbudgeted_known_projected_spend_cents: unbudgetedKnownProjectedSpend,
+    active_expense_cents: activeExpense,
+    known_projected_expense_cents: knownProjectedExpense,
     remaining_budget_now_cents: totalBudgeted - activeSpend,
     projected_remaining_budget_cents: totalBudgeted - knownProjectedSpend,
     budget_variance_now_cents: totalBudgeted - activeSpend,
@@ -492,6 +557,10 @@ export function budgetExposure(ledger: Ledger, args: Args): Row {
     projected_over_budget_cents: projectedOverBudget,
     is_over_budget_now: activeSpend > totalBudgeted,
     is_projected_over_budget: knownProjectedSpend > totalBudgeted,
+    active_expense_over_budget_cents: activeExpenseOverBudget,
+    known_projected_expense_over_budget_cents: knownProjectedExpenseOverBudget,
+    is_active_expense_over_budget: activeExpense > totalBudgeted,
+    is_known_projected_expense_over_budget: knownProjectedExpense > totalBudgeted,
     is_projection_floor: true,
     unplanned_future_spend_cents: null,
     message: "Known projected spend excludes future unplanned transactions.",
@@ -499,7 +568,6 @@ export function budgetExposure(ledger: Ledger, args: Args): Row {
     overspend_risk: categoryRows.filter((row) => BigInt(row.remaining_cents) < 0n),
     projected_overspend_risk: categoryRows.filter((row) => BigInt(row.projected_over_budget_cents) > 0n),
     unbudgeted_spending: unbudgetedRows,
-    unbudgeted_known_projected_spend_cents: unbudgetedKnownProjectedSpend,
     shadowed_budget_count: effective.shadowed.length,
     shadowed_budgets: effective.shadowed.map((row) => ({ id: row.id, account_id: row.account_id, asset_id: row.asset_id, quantity: row.quantity, period: row.period, year: row.year, month: row.month })),
     realized_planned_rows: realizedPlanned,

@@ -1276,8 +1276,16 @@ describe("app and package surface", () => {
       const planned = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_planned: true }, ledger) as any;
       expect(planned.monthly_activity.income).toBe(17500);
       expect(planned.current_snapshot.total_assets).toBe(16000);
+      expect(planned.report_status).toBe("combined");
       expect(planned.include_planned).toBe(true);
       expect(planned.planned_cash_cents).toBe(2500);
+
+      const explicitProjection = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: true, include_planned: true }, ledger) as any;
+      expect(explicitProjection.report_status).toBe("combined");
+      expect(explicitProjection.include_pending).toBe(true);
+      expect(explicitProjection.include_planned).toBe(true);
+      expect(explicitProjection.budget_projection.basis).toBe("posted_plus_pending_plus_planned_known");
+      expect(explicitProjection.warnings).toEqual([]);
 
       const postedOnly = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: false }, ledger) as any;
       expect(postedOnly.monthly_activity.income).toBe(10000);
@@ -1328,12 +1336,20 @@ describe("app and package surface", () => {
         planned_known_spend_cents: 25000,
         active_spend_cents: 127000,
         known_projected_spend_cents: 152000,
+        unbudgeted_active_spend_cents: 0,
+        unbudgeted_known_projected_spend_cents: 7000,
+        active_expense_cents: 127000,
+        known_projected_expense_cents: 159000,
         remaining_budget_now_cents: 23000,
         projected_remaining_budget_cents: -2000,
         budget_variance_now_cents: 23000,
         projected_budget_variance_cents: -2000,
         over_budget_now_cents: 0,
         projected_over_budget_cents: 2000,
+        active_expense_over_budget_cents: 0,
+        known_projected_expense_over_budget_cents: 9000,
+        is_active_expense_over_budget: false,
+        is_known_projected_expense_over_budget: true,
         is_projection_floor: true,
         unplanned_future_spend_cents: null
       });
@@ -1382,9 +1398,48 @@ describe("app and package surface", () => {
         projected_over_budget_cents: 0
       });
 
-      const picture = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_planned: true }, ledger) as any;
+      const plannedStatus = callTool("forecast_month_end", { year: 2026, month: 6, quote_asset_id: usd, status: "planned" }, ledger) as any;
+      expect(plannedStatus).toMatchObject({ report_status: "planned", basis: "posted_plus_planned_known" });
+      expect(plannedStatus.warnings).toContainEqual(expect.stringContaining("posted spend remains the forecast baseline"));
+
+      const pendingStatus = callTool("forecast_month_end", { year: 2026, month: 6, quote_asset_id: usd, status: "pending" }, ledger) as any;
+      expect(pendingStatus).toMatchObject({ report_status: "pending", basis: "posted_plus_pending" });
+      expect(pendingStatus.warnings).toContainEqual(expect.stringContaining("posted spend remains the forecast baseline"));
+
+      const picture = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: true, include_planned: true }, ledger) as any;
+      expect(picture.report_status).toBe("combined");
+      expect(picture.include_planned).toBe(true);
       expect(picture.budget_projection.known_projected_spend_cents).toBe(152000);
       expect(picture.budget_projection.is_projection_floor).toBe(true);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("reports total projected expense over budget when known spend is unbudgeted", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Opening Balances", "equity");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const dining = ledger.createAccount("Dining", "expense");
+      ledger.setBudget(groceries, usd, 10000n, "monthly", 2026, 6);
+      ledger.recordTransaction("2026-06-01", 20000n, equity, checking, usd, "Opening cash", "posted");
+      ledger.recordTransaction("2026-06-02", 9000n, checking, groceries, usd, "Budgeted groceries", "posted");
+      ledger.recordTransaction("2026-06-20", 5000n, checking, dining, usd, "Known unbudgeted dining", "planned");
+
+      const projection = callTool("forecast_month_end", { year: 2026, month: 6, quote_asset_id: usd }, ledger) as any;
+      expect(projection).toMatchObject({
+        total_budgeted_cents: 10000,
+        known_projected_spend_cents: 9000,
+        projected_over_budget_cents: 0,
+        unbudgeted_known_projected_spend_cents: 5000,
+        known_projected_expense_cents: 14000,
+        known_projected_expense_over_budget_cents: 4000,
+        is_projected_over_budget: false,
+        is_known_projected_expense_over_budget: true
+      });
     } finally {
       ledger.close();
     }
@@ -3432,6 +3487,36 @@ describe("app and package surface", () => {
     expect(created.data.symbol).toBe("CAD");
   });
 
+  it("keeps planned projection flags through the generic CLI tool path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "clovis-cli-projection-"));
+    dirs.push(dir);
+    const db = join(dir, "ledger.db");
+    const run = (...args: string[]) => JSON.parse(execFileSync(process.execPath, ["dist/cli/main.js", "--db", db, "--format", "json", ...args], { cwd: process.cwd(), encoding: "utf8" }));
+
+    run("init", "--currency", "USD");
+    const accounts = run("tool", "list_accounts").data;
+    const accountId = (name: string) => accounts.find((row: any) => row.name === name).id;
+    const checking = accountId("Checking");
+    const groceries = accountId("Groceries");
+    run("tool", "set_budget", "--json", JSON.stringify({ account: groceries, amount: 100, year: 2026, month: 6 }));
+    run("tool", "create_transaction", "--json", JSON.stringify({ date: "2026-06-01", amount: 100, from_account_id: accountId("Salary"), to_account_id: checking, description: "Posted pay", status: "posted" }));
+    run("tool", "create_transaction", "--json", JSON.stringify({ date: "2026-06-02", amount: 10, from_account_id: checking, to_account_id: groceries, description: "Posted groceries", status: "posted" }));
+    run("tool", "create_transaction", "--json", JSON.stringify({ date: "2026-06-03", amount: 5, from_account_id: checking, to_account_id: groceries, description: "Pending groceries", status: "pending" }));
+    run("tool", "plan_transaction", "--json", JSON.stringify({ date: "2026-06-20", amount: 25, from_account_id: checking, to_account_id: groceries, description: "Known groceries" }));
+
+    const picture = run("tool", "financial_picture", "--json", JSON.stringify({ year: 2026, month: 6, quote_asset_id: "USD", include_pending: true, include_planned: true })).data;
+    expect(picture.report_status).toBe("combined");
+    expect(picture.include_pending).toBe(true);
+    expect(picture.include_planned).toBe(true);
+    expect(picture.warnings).toEqual([]);
+    expect(picture.budget_projection).toMatchObject({
+      basis: "posted_plus_pending_plus_planned_known",
+      include_pending: true,
+      include_planned: true,
+      known_projected_spend_cents: 4000
+    });
+  });
+
   it("enforces generic CLI tool JSON shape and capability gates", () => {
     const dir = mkdtempSync(join(tmpdir(), "clovis-cli-tool-gates-"));
     dirs.push(dir);
@@ -3686,6 +3771,9 @@ describe("app and package surface", () => {
 
     const ageOfMoney = inputShapeFromDefinition(TOOL_DEFINITIONS.age_of_money);
     expect(ageOfMoney.quote_asset_id.parse("USD")).toBe("USD");
+
+    const financialPicture = inputShapeFromDefinition(TOOL_DEFINITIONS.financial_picture);
+    expect(financialPicture.status.parse(null)).toBeNull();
 
     const compareScenarios = inputShapeFromDefinition(TOOL_DEFINITIONS.compare_scenarios);
     expect(compareScenarios.asset_id.safeParse(undefined).success).toBe(false);

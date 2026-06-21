@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fix `financial_picture` so `include_pending:true` plus
+  `include_planned:true` resolves to a combined planned projection instead of
+  silently dropping planned rows.
+- Add total-expense budget exposure fields that include unbudgeted known spend
+  alongside the existing budgeted-account over-budget fields.
+
 ## 1.1.0 - 2026-06-20
 
 - Expand `forecast_month_end` into a budget exposure projection with posted,
