@@ -1272,6 +1272,17 @@ describe("app and package surface", () => {
       expect(picture.current_snapshot).not.toHaveProperty("ledger_as_of");
       expect(picture.actual_cash_cents).toBe(9000);
       expect(picture.planned_cash_cents).toBe(0);
+      expect(picture.data_quality).toMatchObject({ integrity_ok: true, healthy: true, realized_planned_count: 0 });
+      expect(picture.pnl.posted).toMatchObject({ income_cents: 10000, expense_cents: 1000, net_cents: 9000 });
+      expect(picture.pnl.pending).toMatchObject({ income_cents: 5000, expense_cents: 500, net_cents: 4500 });
+      expect(picture.pnl.planned).toMatchObject({ income_cents: 2500, expense_cents: 0, net_cents: 2500 });
+      expect(picture.pnl.projected).toMatchObject({ income_cents: 15000, expense_cents: 1500, net_cents: 13500 });
+      expect(picture.net_position.current).toMatchObject({ assets_cents: 13500, liabilities_cents: 0, net_cents: 13500 });
+      expect(picture.net_position.projected).toMatchObject({ assets_cents: 13500, liabilities_cents: 0, net_cents: 13500 });
+      expect(picture.budget).toMatchObject({ total_budgeted_cents: 20000, active_spend_cents: 1500, known_projected_spend_cents: 1500 });
+      expect(picture.open_items.pending).toHaveLength(2);
+      expect(picture.open_items.planned).toHaveLength(1);
+      expect(picture.summary_markdown).toBeUndefined();
 
       const planned = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_planned: true }, ledger) as any;
       expect(planned.monthly_activity.income).toBe(17500);
@@ -1279,18 +1290,24 @@ describe("app and package surface", () => {
       expect(planned.report_status).toBe("combined");
       expect(planned.include_planned).toBe(true);
       expect(planned.planned_cash_cents).toBe(2500);
+      expect(planned.pnl.projected).toMatchObject({ income_cents: 17500, expense_cents: 1500, net_cents: 16000 });
+      expect(planned.net_position.projected).toMatchObject({ assets_cents: 16000, liabilities_cents: 0, net_cents: 16000 });
+      expect(planned.accounts.find((row: any) => row.account_name === "Checking")).toMatchObject({ account_type: "asset", projected_cents: 16000 });
 
       const explicitProjection = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: true, include_planned: true }, ledger) as any;
       expect(explicitProjection.report_status).toBe("combined");
       expect(explicitProjection.include_pending).toBe(true);
       expect(explicitProjection.include_planned).toBe(true);
       expect(explicitProjection.budget_projection.basis).toBe("posted_plus_pending_plus_planned_known");
+      expect(explicitProjection.data_quality.conversion_warning.severity).toBe("none");
+      expect(explicitProjection.budget).toMatchObject({ projected_over_budget_cents: 0, is_projection_floor: true });
       expect(explicitProjection.warnings).toEqual([]);
 
       const postedOnly = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: false }, ledger) as any;
       expect(postedOnly.monthly_activity.income).toBe(10000);
       expect(postedOnly.current_snapshot.total_assets).toBe(9000);
       expect(postedOnly.budget_position.total_spent_cents).toBe(1000);
+      expect(postedOnly.pnl.projected).toMatchObject({ income_cents: 10000, expense_cents: 1000, net_cents: 9000 });
 
       const activeConflict = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, status: "active", include_planned: true }, ledger) as any;
       expect(activeConflict.include_planned).toBe(false);
@@ -1299,6 +1316,25 @@ describe("app and package surface", () => {
       const postedConflict = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, status: "posted", include_pending: true }, ledger) as any;
       expect(postedConflict.include_pending).toBe(false);
       expect(postedConflict.warnings).toContainEqual(expect.objectContaining({ code: "status_overrides_include_pending" }));
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("excludes realized planned rows from the financial picture CFO snapshot", () => {
+    const ledger = tempLedger();
+    try {
+      callTool("init_defaults", { template: "personal", currency: "USD" }, ledger);
+      const accounts = Object.fromEntries((callTool("list_accounts", {}, ledger) as any[]).map((row) => [row.name, row.id]));
+      const usd = (callTool("get_asset_by_symbol", { symbol: "USD" }, ledger) as any).id;
+      callTool("plan_transaction", { date: "2026-06-20", amount: 25, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Known groceries" }, ledger);
+      callTool("create_transaction", { date: "2026-06-20", amount: 25, from_account_id: accounts.Checking, to_account_id: accounts.Groceries, description: "Known groceries", status: "posted" }, ledger);
+
+      const picture = callTool("financial_picture", { year: 2026, month: 6, quote_asset_id: usd, include_pending: true, include_planned: true }, ledger) as any;
+      expect(picture.data_quality.realized_planned_count).toBe(1);
+      expect(picture.pnl.planned).toMatchObject({ income_cents: 0, expense_cents: 0, net_cents: 0 });
+      expect(picture.open_items.planned).toHaveLength(0);
+      expect(picture.budget_projection.realized_planned_count).toBe(1);
     } finally {
       ledger.close();
     }
@@ -3626,11 +3662,19 @@ describe("app and package surface", () => {
     run("tool", "create_transaction", "--json", JSON.stringify({ date: "2026-06-03", amount: 5, from_account_id: checking, to_account_id: groceries, description: "Pending groceries", status: "pending" }));
     run("tool", "plan_transaction", "--json", JSON.stringify({ date: "2026-06-20", amount: 25, from_account_id: checking, to_account_id: groceries, description: "Known groceries" }));
 
-    const picture = run("tool", "financial_picture", "--json", JSON.stringify({ year: 2026, month: 6, quote_asset_id: "USD", include_pending: true, include_planned: true })).data;
+    const picture = run("tool", "financial_picture", "--json", JSON.stringify({ year: 2026, month: 6, quote_asset_id: "USD", include_pending: true, include_planned: true, include_summary_markdown: true })).data;
     expect(picture.report_status).toBe("combined");
     expect(picture.include_pending).toBe(true);
     expect(picture.include_planned).toBe(true);
     expect(picture.warnings).toEqual([]);
+    expect(picture.data_quality).toMatchObject({ integrity_ok: true, healthy: true, realized_planned_count: 0 });
+    expect(picture.pnl.projected).toMatchObject({ income_cents: 10000, expense_cents: 4000, net_cents: 6000 });
+    expect(picture.net_position.projected).toMatchObject({ assets_cents: 6000, liabilities_cents: 0, net_cents: 6000 });
+    expect(picture.budget).toMatchObject({ total_budgeted_cents: 10000, active_spend_cents: 1500, known_projected_spend_cents: 4000, projected_over_budget_cents: 0 });
+    expect(picture.accounts.find((row: any) => row.account_name === "Checking")).toMatchObject({ account_type: "asset", projected_cents: 6000 });
+    expect(picture.open_items.pending).toHaveLength(1);
+    expect(picture.open_items.planned).toHaveLength(1);
+    expect(picture.summary_markdown).toContain("Projected net: USD 60.00");
     expect(picture.budget_projection).toMatchObject({
       basis: "posted_plus_pending_plus_planned_known",
       include_pending: true,
@@ -3896,6 +3940,11 @@ describe("app and package surface", () => {
 
     const financialPicture = inputShapeFromDefinition(TOOL_DEFINITIONS.financial_picture);
     expect(financialPicture.status.parse(null)).toBeNull();
+    expect(financialPicture.entity_id.parse(null)).toBeNull();
+    expect(financialPicture.asset_account_ids.parse(null)).toBeNull();
+    expect(financialPicture.liability_account_ids.parse(["acct_liability"])).toEqual(["acct_liability"]);
+    expect(financialPicture.open_item_limit.parse(10)).toBe(10);
+    expect(financialPicture.include_summary_markdown.parse(true)).toBe(true);
 
     const compareScenarios = inputShapeFromDefinition(TOOL_DEFINITIONS.compare_scenarios);
     expect(compareScenarios.asset_id.safeParse(undefined).success).toBe(false);

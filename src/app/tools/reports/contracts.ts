@@ -156,7 +156,15 @@ export const reportTools = defineToolGroup([
         ["quote_asset_id", "string"],
         ["status", "string", { nullable: true, optional: true, defaultValue: null }],
         ["include_pending", "boolean", { optional: true, defaultValue: true }],
-        ["include_planned", "boolean", { optional: true, defaultValue: false }]
+        ["include_planned", "boolean", { optional: true, defaultValue: false }],
+        ["entity_id", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+        ["asset_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+        ["liability_account_ids", "string[]", { nullable: true, optional: true, defaultValue: null }],
+        ["earmarks", "object[]", { nullable: true, optional: true, defaultValue: null }],
+        ["include_open_items", "boolean", { optional: true, defaultValue: true }],
+        ["open_item_limit", "integer", { optional: true, defaultValue: 25 }],
+        ["include_summary_markdown", "boolean", { optional: true, defaultValue: false }]
       ],
       returns: { type: "object" }
     },

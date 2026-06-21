@@ -1,4 +1,5 @@
 import type { Ledger } from "../../../core/ledger.js";
+import { normalAmount } from "../../../core/accounting.js";
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../../tool-runtime.js";
 
 export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers): Partial<ToolHandlers> {
@@ -136,6 +137,137 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       .filter((row) => defaultNames.has(row.name.trim().toLowerCase()))
       .map((row) => row.id));
   };
+  const pnlBuckets = (ledger: Ledger, year: number, month: number, quote: string, excludedPlannedTxIds = new Set<string>()): Row => {
+    const [dateFrom, dateTo] = monthBounds(year, month);
+    const accounts = new Map(ledger.listAccounts().map((row) => [row.id, row]));
+    const empty = () => ({ incomeRows: new Map<string, Row>(), expenseRows: new Map<string, Row>(), missing: [] as Row[] });
+    const buckets = {
+      posted: empty(),
+      pending: empty(),
+      planned: empty()
+    };
+    for (const tx of ledger.listTransactions({ status: null, dateFrom, dateTo, sort: "date_asc" })) {
+      if (!["posted", "pending", "planned"].includes(tx.status)) continue;
+      if (tx.status === "planned" && excludedPlannedTxIds.has(tx.id)) continue;
+      const bucket = buckets[tx.status as "posted" | "pending" | "planned"];
+      for (const entry of ledger.getEntries(tx.id)) {
+        const acct = accounts.get(entry.account_id);
+        if (!acct || !["income", "expense"].includes(acct.account_type)) continue;
+        const [converted, error] = ledger.tryConvertQuantity(entry.quantity, entry.asset_id, quote, tx.date);
+        if (converted == null) {
+          bucket.missing.push({ tx_id: tx.id, account_id: entry.account_id, asset_id: entry.asset_id, quote_asset_id: quote, quantity: entry.quantity, error });
+          continue;
+        }
+        const target = acct.account_type === "income" ? bucket.incomeRows : bucket.expenseRows;
+        const current = target.get(acct.id) ?? { account_id: acct.id, account_name: acct.name, account_type: acct.account_type, amount_cents: 0n };
+        current.amount_cents = BigInt(current.amount_cents) + normalAmount(acct.account_type, converted);
+        target.set(acct.id, current);
+      }
+    }
+    const finalize = (bucket: ReturnType<typeof empty>): Row => {
+      const normalize = (rows: Row[]): Row[] => rows
+        .filter((row) => BigInt(row.amount_cents) !== 0n)
+        .map((row) => ({ ...row, amount: row.amount_cents, quantity: row.amount_cents, asset_id: quote, amount_display: display(ledger, BigInt(row.amount_cents), quote) }));
+      const incomeByAccount = normalize([...bucket.incomeRows.values()].sort((a, b) => String(a.account_name).localeCompare(String(b.account_name))));
+      const expenseByAccount = normalize([...bucket.expenseRows.values()].sort((a, b) => Number(BigInt(b.amount_cents) - BigInt(a.amount_cents))));
+      const income = incomeByAccount.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n);
+      const expense = expenseByAccount.reduce((sum, row) => sum + BigInt(row.amount_cents), 0n);
+      return {
+        income,
+        expense,
+        net: income - expense,
+        income_cents: income,
+        expense_cents: expense,
+        net_cents: income - expense,
+        income_by_account: incomeByAccount,
+        expense_by_account: expenseByAccount,
+        valuation_complete: bucket.missing.length === 0,
+        missing_conversions: bucket.missing
+      };
+    };
+    return {
+      posted: finalize(buckets.posted),
+      pending: finalize(buckets.pending),
+      planned: finalize(buckets.planned)
+    };
+  };
+  const combinePnlBuckets = (buckets: Row[]): Row => {
+    const income = buckets.reduce((sum, row) => sum + BigInt(row.income_cents), 0n);
+    const expense = buckets.reduce((sum, row) => sum + BigInt(row.expense_cents), 0n);
+    return { income, expense, net: income - expense, income_cents: income, expense_cents: expense, net_cents: income - expense };
+  };
+  const projectionAccounts = (ledger: Ledger, args: Row, includeDefaultLiabilities: boolean): Row => {
+    const split = splitProjectionAccounts(ledger, args);
+    const scope = resolveScopedAccounts(ledger, args, ["asset", "liability"]);
+    const scopedAssets = scope.scoped ? scope.root_account_ids.filter((id) => ledger.getAccount(id)?.account_type === "asset") : null;
+    const scopedLiabilities = scope.scoped ? scope.root_account_ids.filter((id) => ledger.getAccount(id)?.account_type === "liability") : null;
+    return {
+      asset_account_ids: split.asset_account_ids ?? scopedAssets ?? rootAccountIds(ledger, ["asset"]),
+      liability_account_ids: split.liability_account_ids ?? scopedLiabilities ?? (includeDefaultLiabilities ? rootAccountIds(ledger, ["liability"]) : undefined)
+    };
+  };
+  const netPosition = (projection: Row): Row => {
+    const assets = BigInt(projection.gross_cash_cents);
+    const liabilityEffect = BigInt(projection.liability_effect_cents);
+    const earmarks = BigInt(projection.earmarks_cents);
+    return {
+      assets_cents: assets,
+      liabilities_cents: BigInt(projection.liability_balance_cents),
+      net_cents: assets + liabilityEffect,
+      earmarks_cents: earmarks,
+      available_after_earmarks_cents: assets + liabilityEffect - earmarks
+    };
+  };
+  const financialPictureAccounts = (projection: Row, includePending: boolean, includePlanned: boolean): Row[] => {
+    const assets = ((projection.account_breakdown ?? []) as Row[]).map((row) => ({
+      account_type: "asset",
+      account_id: row.account_id,
+      account_name: row.account_name,
+      posted_cents: row.posted_cash_cents,
+      pending_cents: row.pending_cash_cents,
+      planned_cents: row.planned_cash_cents,
+      current_cents: BigInt(row.posted_cash_cents) + (includePending ? BigInt(row.pending_cash_cents) : 0n),
+      projected_cents: row.included_cash_cents
+    }));
+    const liabilities = ((projection.liability_breakdown ?? []) as Row[]).map((row) => {
+      const posted = BigInt(row.posted_liability_effect_cents);
+      const pending = includePending ? BigInt(row.pending_liability_effect_cents) : 0n;
+      const planned = includePlanned ? BigInt(row.planned_liability_effect_cents) : 0n;
+      return {
+        account_type: "liability",
+        account_id: row.account_id,
+        account_name: row.account_name,
+        posted_balance_cents: -posted,
+        pending_balance_delta_cents: -BigInt(row.pending_liability_effect_cents),
+        planned_balance_delta_cents: -BigInt(row.planned_liability_effect_cents),
+        current_balance_cents: -(posted + pending),
+        projected_balance_cents: -(posted + pending + planned)
+      };
+    });
+    return [...assets, ...liabilities];
+  };
+  const openItems = (ledger: Ledger, year: number, month: number, excludedPlannedIds: Set<string>, limit: number): Row => {
+    const [dateFrom, dateTo] = monthBounds(year, month);
+    const compact = (status: string) => ledger.listTransactions({ status: null, dateFrom, dateTo, sort: "date_asc" })
+      .filter((tx) => tx.status === status)
+      .filter((tx) => status !== "planned" || !excludedPlannedIds.has(tx.id))
+      .slice(0, limit)
+      .map((tx) => txPublic(ledger, tx, true));
+    return {
+      pending: compact("pending"),
+      planned: compact("planned")
+    };
+  };
+  const formatMoney = (ledger: Ledger, quote: string, cents: bigint): string => {
+    const assetRow = ledger.getAsset(quote);
+    return `${assetRow?.symbol ?? quote} ${display(ledger, cents, quote).toFixed(assetRow?.scale ?? 2)}`;
+  };
+  const financialSummaryMarkdown = (ledger: Ledger, quote: string, pnl: Row, budget: Row, net: Row): string => [
+    `Projected net: ${formatMoney(ledger, quote, BigInt((net.projected as Row).net_cents))}.`,
+    `Projected month P&L: ${formatMoney(ledger, quote, BigInt((pnl.projected as Row).net_cents))}.`,
+    `Known projected spend: ${formatMoney(ledger, quote, BigInt(budget.known_projected_expense_cents ?? budget.known_projected_spend_cents ?? 0))}.`,
+    `Projected over budget: ${formatMoney(ledger, quote, BigInt(budget.known_projected_expense_over_budget_cents ?? budget.projected_over_budget_cents ?? 0))}.`
+  ].join("\n");
   return {
 
     income_statement: (ledger, args) => {
@@ -221,8 +353,19 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       const overview = handlers.financial_overview(ledger, { ...args, status }) as Row;
       const year = args.year ?? new Date().getUTCFullYear();
       const month = args.month ?? new Date().getUTCMonth() + 1;
-      const actualCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: false, include_planned: false }) as Row;
-      const projectedCash = handlers.cash_projection(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
+      const quote = reportAsset(ledger, args.quote_asset_id);
+      const legacyProjectionAccounts = projectionAccounts(ledger, args, false);
+      const netProjectionAccounts = projectionAccounts(ledger, args, true);
+      const baseProjectionArgs = {
+        year,
+        month,
+        quote_asset_id: quote,
+        earmarks: args.earmarks ?? null
+      };
+      const actualCash = handlers.cash_projection(ledger, { ...baseProjectionArgs, ...legacyProjectionAccounts, include_pending: false, include_planned: false }) as Row;
+      const projectedCash = handlers.cash_projection(ledger, { ...baseProjectionArgs, ...legacyProjectionAccounts, include_pending: includePending, include_planned: includePlanned }) as Row;
+      const currentNetProjection = handlers.cash_projection(ledger, { ...baseProjectionArgs, ...netProjectionAccounts, include_pending: includePending, include_planned: false }) as Row;
+      const projectedNetProjection = handlers.cash_projection(ledger, { ...baseProjectionArgs, ...netProjectionAccounts, include_pending: includePending, include_planned: includePlanned }) as Row;
       const budgetProjection = handlers.forecast_month_end(ledger, { year, month, quote_asset_id: args.quote_asset_id, include_pending: includePending, include_planned: includePlanned }) as Row;
       const currentSnapshot = overview.current_snapshot as Row;
       if (currentSnapshot.as_of === "9999-12-31") {
@@ -230,6 +373,71 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
         currentSnapshot.as_of_basis = "current_open_ended";
         currentSnapshot.as_of_description = "Open-ended current snapshot; no calendar cutoff was applied.";
       }
+      const realizedPlanned = realizedPlannedRows(ledger, { year, month });
+      const realizedPlannedIds = new Set(realizedPlanned.map((row) => String(row.planned_tx_id)));
+      const buckets = pnlBuckets(ledger, Number(year), Number(month), quote, realizedPlannedIds);
+      const postedPnl = buckets.posted as Row;
+      const pendingPnl = buckets.pending as Row;
+      const plannedPnl = buckets.planned as Row;
+      const projectedPnl = combinePnlBuckets([
+        postedPnl,
+        ...(includePending ? [pendingPnl] : []),
+        ...(includePlanned ? [plannedPnl] : [])
+      ]);
+      const allPnlMissing = scopedMissingConversions(ledger, [
+        { section: "pnl.posted", affectedModels: ["financial_picture"], rows: postedPnl.missing_conversions },
+        { section: "pnl.pending", affectedModels: ["financial_picture"], rows: pendingPnl.missing_conversions },
+        { section: "pnl.planned", affectedModels: ["financial_picture"], rows: plannedPnl.missing_conversions },
+        { section: "cash_projection", affectedModels: ["financial_picture"], rows: projectedNetProjection.missing_conversions },
+        { section: "budget_projection", affectedModels: ["financial_picture"], rows: budgetProjection.missing_conversions }
+      ]);
+      const integrity = ledger.integrityCheck();
+      const openItemLimit = Number(args.open_item_limit ?? 25);
+      if (!Number.isInteger(openItemLimit) || openItemLimit < 0) throw new Error("open_item_limit must be a non-negative integer");
+      const pnl = {
+        posted: postedPnl,
+        pending: pendingPnl,
+        planned: plannedPnl,
+        projected: projectedPnl,
+        include_pending: includePending,
+        include_planned: includePlanned,
+        quote_asset_id: quote,
+        valuation_complete: allPnlMissing.filter((row) => String(row.affected_sections ?? "").includes("pnl")).length === 0
+      };
+      const net = {
+        current: netPosition(currentNetProjection),
+        projected: netPosition(projectedNetProjection),
+        account_selection: {
+          asset_account_ids: netProjectionAccounts.asset_account_ids,
+          liability_account_ids: netProjectionAccounts.liability_account_ids
+        },
+        quote_asset_id: quote
+      };
+      const dataQuality = {
+        integrity,
+        integrity_ok: integrity.ok,
+        healthy: integrity.ok,
+        valuation_complete: allPnlMissing.length === 0,
+        missing_conversion_count: allPnlMissing.length,
+        missing_conversions: allPnlMissing,
+        conversion_warning: conversionSeverity(allPnlMissing),
+        realized_planned_count: realizedPlanned.length,
+        realized_planned_cash_count: projectedNetProjection.realized_planned_count ?? 0,
+        realized_planned_budget_count: budgetProjection.realized_planned_count ?? 0
+      };
+      const accounts = financialPictureAccounts(projectedNetProjection, includePending, includePlanned);
+      const budget = {
+        total_budgeted_cents: budgetProjection.total_budgeted_cents,
+        active_spend_cents: budgetProjection.active_expense_cents ?? budgetProjection.active_spend_cents,
+        known_projected_spend_cents: budgetProjection.known_projected_expense_cents ?? budgetProjection.known_projected_spend_cents,
+        over_budget_now_cents: budgetProjection.active_expense_over_budget_cents ?? budgetProjection.over_budget_now_cents,
+        projected_over_budget_cents: budgetProjection.known_projected_expense_over_budget_cents ?? budgetProjection.projected_over_budget_cents,
+        is_projection_floor: budgetProjection.is_projection_floor,
+        overspend_risk: budgetProjection.overspend_risk,
+        projected_overspend_risk: budgetProjection.projected_overspend_risk,
+        unbudgeted_spending: budgetProjection.unbudgeted_spending,
+        source: budgetProjection
+      };
       return {
         ...overview,
         current_snapshot: currentSnapshot,
@@ -242,11 +450,20 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
         projected_cash_cents: projectedCash.available_cash_cents,
         cash_position: {
           actual: actualCash,
-          selected: projectedCash
+          selected: projectedCash,
+          current_net: currentNetProjection,
+          projected_net: projectedNetProjection
         },
+        data_quality: dataQuality,
+        pnl,
+        net_position: net,
+        budget,
+        accounts,
+        open_items: args.include_open_items === false ? null : openItems(ledger, Number(year), Number(month), realizedPlannedIds, openItemLimit),
         budget_projection: budgetProjection,
+        ...(args.include_summary_markdown === true ? { summary_markdown: financialSummaryMarkdown(ledger, quote, pnl, budget, net) } : {}),
         warnings: resolved.warnings,
-        conversion_warning: projectedCash.conversion_warning
+        conversion_warning: dataQuality.conversion_warning
       };
     },
 
