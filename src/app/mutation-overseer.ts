@@ -36,6 +36,12 @@ function hasNativeDryRun(spec: Pick<ToolSpec, "definition">): boolean {
   return Boolean(spec.definition.parameters.some((parameter) => parameter[0] === "dry_run"));
 }
 
+function usesNativeDryRun(spec: ToolSpec, args: Args): boolean {
+  if (!hasNativeDryRun(spec)) return false;
+  if (args.dry_run === true) return true;
+  return args.dry_run == null && spec.safety.defaultDryRun;
+}
+
 function ledgerSnapshot(ledger: Ledger): LedgerSnapshot {
   return Object.fromEntries(MUTATION_AUDIT_TABLES.map((table) => [table, ledger.tableRows(table)]));
 }
@@ -247,6 +253,7 @@ function attachOperationResult(result: unknown, operation: Row): Row {
 export function withMutationOverseer(ledger: Ledger, spec: ToolSpec, args: Args): unknown {
   if (spec.safety.readOnlyHint) return spec.handler(ledger, args);
   if (spec.name === "backup_now") return spec.handler(ledger, args);
+  if (usesNativeDryRun(spec, args)) return spec.handler(ledger, { ...args, dry_run: true });
   if (args.dry_run === true && !hasNativeDryRun(spec)) return mutationPreview(ledger, spec, args);
 
   const external: Row = {};

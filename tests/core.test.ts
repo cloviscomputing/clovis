@@ -1304,6 +1304,54 @@ describe("app and package surface", () => {
     }
   });
 
+  it("builds projection reports without per-account balance query fanout", () => {
+    class CountingLedger extends Ledger {
+      balanceCalls = 0;
+      balanceTreeCalls = 0;
+
+      override balance(...args: Parameters<Ledger["balance"]>): bigint {
+        this.balanceCalls += 1;
+        return super.balance(...args);
+      }
+
+      override balanceTree(...args: Parameters<Ledger["balanceTree"]>): bigint {
+        this.balanceTreeCalls += 1;
+        return super.balanceTree(...args);
+      }
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), "clovis-npm-"));
+    dirs.push(dir);
+    const ledger = new CountingLedger(join(dir, "ledger.db"));
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const wallet = ledger.createAccount("Wallet", "asset", checking);
+      const equity = ledger.createAccount("Opening Balances", "equity");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      for (const accountId of [checking, wallet, equity, groceries]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+      ledger.recordTransaction("2026-05-31", 10000n, equity, wallet, usd, "Opening cash", "posted");
+      ledger.recordTransaction("2026-06-01", 2500n, wallet, groceries, usd, "Posted groceries", "posted");
+      ledger.recordTransaction("2026-06-02", 500n, wallet, groceries, usd, "Pending groceries", "pending");
+      ledger.recordTransaction("2026-06-03", 700n, wallet, groceries, usd, "Planned groceries", "planned");
+
+      const sheet = callTool("balance_sheet", { quote_asset_id: usd, status: "combined" }, ledger) as any;
+      expect(sheet.total_assets).toBe(6300);
+      expect(ledger.balanceCalls).toBe(0);
+
+      const projection = callTool("cash_projection", { year: 2026, month: 6, quote_asset_id: usd, include_pending: true, include_planned: true }, ledger) as any;
+      expect(projection).toMatchObject({
+        posted_cash_cents: 7500,
+        pending_cash_cents: -500,
+        planned_cash_cents: -700,
+        available_cash_cents: 6300
+      });
+      expect(ledger.balanceTreeCalls).toBe(0);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("projects budget exposure with pending and unrealized planned expenses", () => {
     const ledger = tempLedger();
     try {
@@ -2102,6 +2150,39 @@ describe("app and package surface", () => {
     }
   });
 
+  it("runs native statement dry-run previews outside mutation transactions", () => {
+    class CountingLedger extends Ledger {
+      transactionRuns = 0;
+
+      override runInTransaction<T>(fn: () => T): T {
+        this.transactionRuns += 1;
+        return super.runInTransaction(fn);
+      }
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), "clovis-statement-preview-"));
+    dirs.push(dir);
+    const ledger = new CountingLedger(join(dir, "ledger.db"));
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Equity", "equity");
+      for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+      const statementPath = join(dir, "statement.csv");
+      writeFileSync(statementPath, "date,amount,description\n2026-06-01,25.00,Deposit\n", "utf8");
+
+      const preview = callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: checking, counterpart_account_id: equity }, ledger) as any;
+      expect(preview).toMatchObject({ dry_run: true, plan_id: null });
+      expect(ledger.transactionRuns).toBe(0);
+
+      const persisted = callTool("refresh_statement", { action: "plan", file_path: statementPath, account_id: checking, counterpart_account_id: equity, dry_run: false }, ledger) as any;
+      expect(persisted.plan_id).toEqual(expect.stringMatching(/^stmtplan_/));
+      expect(ledger.transactionRuns).toBe(1);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("surfaces realized planned rows during statement review", () => {
     const ledger = tempLedger();
     try {
@@ -2743,6 +2824,47 @@ describe("app and package surface", () => {
       for (const result of results) {
         const envelope = JSON.parse(String(result.stdout));
         expect(envelope).toMatchObject({ ok: true, data: { count: 1 } });
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("allows concurrent CLI statement plan previews against the same database", async () => {
+    const ledger = tempLedger();
+    try {
+      const dir = dirname(ledger.path);
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const equity = ledger.createAccount("Opening Balances", "equity");
+      for (const accountId of [checking, equity]) ledger.createAnnotation("account", accountId, "default_asset", usd);
+      ledger.recordTransaction("2026-05-31", 10000n, equity, checking, usd, "Opening cash", "posted");
+      const statementPath = join(dir, "statement.csv");
+      writeFileSync(statementPath, "date,amount,description\n2026-06-01,25.00,Deposit\n", "utf8");
+      const args = JSON.stringify({
+        action: "plan",
+        file_path: statementPath,
+        account_id: checking,
+        counterpart_account_id: equity,
+        sample_limit: 10
+      });
+
+      const results = await Promise.all(Array.from({ length: 8 }, () => execFileAsync(process.execPath, [
+        "dist/cli/main.js",
+        "--db",
+        ledger.path,
+        "--format",
+        "json",
+        "tool",
+        "refresh_statement",
+        "--json",
+        args
+      ], { cwd: process.cwd(), encoding: "utf8" })));
+
+      for (const result of results) {
+        const envelope = JSON.parse(String(result.stdout));
+        expect(envelope).toMatchObject({ ok: true, data: { dry_run: true, plan_id: null } });
+        expect(envelope.data.actions.new_posted).toBe(1);
       }
     } finally {
       ledger.close();

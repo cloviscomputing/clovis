@@ -24,8 +24,8 @@ export class LedgerStore {
     this.path = dbPath;
     this.bookId = options.bookId || DEFAULT_BOOK_ID;
     this.db = new DatabaseSync(this.path, { readBigInts: true });
-    this.db.exec("PRAGMA busy_timeout = 5000");
-    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA busy_timeout = 15000");
+    this.configureJournalMode();
     this.db.exec("PRAGMA synchronous = NORMAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.initialize();
@@ -37,22 +37,34 @@ export class LedgerStore {
 
   initialize(): void {
     const currentVersion = this.detectSchemaVersion();
+    let schemaApplied = false;
     if (currentVersion === 0) {
       this.db.exec(DDL);
+      schemaApplied = true;
       this.db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
       this.db.prepare("INSERT OR IGNORE INTO migration_history(version, name, applied_at) VALUES (?, ?, ?)").run(SCHEMA_VERSION, "initial schema", now());
     } else if (currentVersion < SCHEMA_VERSION) {
       migrateSchema(this.db, currentVersion);
       this.db.exec(DDL);
-    } else {
-      this.db.exec(DDL);
+      schemaApplied = true;
+    } else if (currentVersion > SCHEMA_VERSION) {
+      throw new Error(`Ledger schema version ${currentVersion} is newer than supported version ${SCHEMA_VERSION}`);
     }
-    this.db.prepare(
-      "INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at) VALUES (?, 'Actual', 'actual', NULL, ?)"
-    ).run(DEFAULT_BOOK_ID, "1970-01-01T00:00:00Z");
+    const hasDefaultBook = this.db.prepare("SELECT id FROM books WHERE id = ?").get(DEFAULT_BOOK_ID);
+    if (!hasDefaultBook) {
+      if (!schemaApplied) this.db.exec(DDL);
+      this.db.prepare(
+        "INSERT OR IGNORE INTO books(id, name, type, parent_id, created_at) VALUES (?, 'Actual', 'actual', NULL, ?)"
+      ).run(DEFAULT_BOOK_ID, "1970-01-01T00:00:00Z");
+    }
     if (this.bookId !== DEFAULT_BOOK_ID && !this.db.prepare("SELECT id FROM books WHERE id = ?").get(this.bookId)) {
       throw new Error(`Book ${this.bookId} not found`);
     }
+  }
+
+  private configureJournalMode(): void {
+    const current = this.db.prepare("PRAGMA journal_mode").get() as Row | undefined;
+    if (String(current?.journal_mode ?? "").toLowerCase() !== "wal") this.db.exec("PRAGMA journal_mode = WAL");
   }
 
   transaction<T>(fn: () => T): T {
