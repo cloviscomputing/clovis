@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-06-21
+
+- Expand `financial_picture` into a one-call CFO snapshot with data-quality,
+  P&L, net-position, budget, account-projection, open-item, and optional
+  summary-markdown sections while preserving existing response fields.
+- Add compatible `financial_picture` inputs for entity/account scoping,
+  explicit asset and liability account projections, earmarks, open-item
+  inclusion, open-item limits, and summary markdown.
+- Exclude realized planned rows from planned P&L and open planned items while
+  surfacing the hygiene count in `data_quality`.
+
 ## 1.1.2 - 2026-06-21
 
 - Run native statement dry-run previews outside mutation transactions, reducing
