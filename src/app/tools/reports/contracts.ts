@@ -154,7 +154,7 @@ export const reportTools = defineToolGroup([
         ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
         ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
         ["quote_asset_id", "string"],
-        ["status", "string", { optional: true, defaultValue: "active" }],
+        ["status", "string", { nullable: true, optional: true, defaultValue: null }],
         ["include_pending", "boolean", { optional: true, defaultValue: true }],
         ["include_planned", "boolean", { optional: true, defaultValue: false }]
       ],

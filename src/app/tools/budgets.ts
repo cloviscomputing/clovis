@@ -274,6 +274,7 @@ export function budgetHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     nonNegativeMoneyAmount,
     positiveMoneyAmount,
     reportAsset,
+    resolveProjectionStatus,
     reportStatus,
     spendingRows
   } = ctx;
@@ -391,18 +392,15 @@ export function budgetHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     },
 
     forecast_month_end: (ledger, args) => {
-      const explicitStatus = args.status !== undefined && args.status !== "";
-      const includePendingFromArgs = args.include_pending !== false;
-      const includePlannedFromArgs = args.include_planned !== false;
-      const fallbackStatus = includePendingFromArgs && includePlannedFromArgs ? "combined" : includePendingFromArgs ? "active" : includePlannedFromArgs ? "planned" : "posted";
-      const status = explicitStatus ? reportStatus({ status: args.status }, fallbackStatus) : fallbackStatus;
-      const includePending = explicitStatus ? status == null || status === "active" || status === "combined" || status === "pending" : includePendingFromArgs;
-      const includePlanned = explicitStatus ? status == null || status === "combined" || status === "planned" : includePlannedFromArgs;
+      const resolved = resolveProjectionStatus(args, { includePending: true, includePlanned: true });
+      const status = resolved.status;
+      const includePending = resolved.includePending;
+      const includePlanned = resolved.includePlanned;
       const report = budgetExposure(ledger, { ...args, include_pending: includePending, include_planned: includePlanned }) as Row;
       const warnings = [...(report.warnings as string[] ?? [])];
-      if (explicitStatus) {
-        if (args.include_pending !== undefined && Boolean(args.include_pending) !== includePending) warnings.push(`Explicit status '${String(args.status)}' overrides include_pending:${Boolean(args.include_pending)}; resolved include_pending:${includePending}.`);
-        if (args.include_planned !== undefined && Boolean(args.include_planned) !== includePlanned) warnings.push(`Explicit status '${String(args.status)}' overrides include_planned:${Boolean(args.include_planned)}; resolved include_planned:${includePlanned}.`);
+      for (const warning of resolved.warnings) warnings.push(String(warning.message));
+      if (resolved.explicitStatus && (status === "pending" || status === "planned")) {
+        warnings.push(`forecast_month_end status '${String(args.status)}' selects projection additions, but posted spend remains the forecast baseline; use basis/include_* fields for exact scope.`);
       }
       return { ...report, report_status: status, warnings };
     },

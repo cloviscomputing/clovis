@@ -28,6 +28,7 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     quotedPlannedUnrealized,
     realizedPlannedRows,
     reportAsset,
+    resolveProjectionStatus,
     reportStatus,
     resolveScopedAccounts,
     rootAccountIds,
@@ -215,26 +216,10 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     },
 
     financial_picture: (ledger, args) => {
-      const fallbackIncludesPending = args.include_pending !== false;
-      const fallbackIncludesPlanned = args.include_planned === true;
-      const status = reportStatus(args, fallbackIncludesPlanned ? "combined" : fallbackIncludesPending ? "active" : "posted");
-      const includePending = status == null || status === "active" || status === "combined" || status === "pending";
-      const includePlanned = status == null || status === "combined" || status === "planned";
-      const warnings: Row[] = [];
-      if (args.status !== undefined && args.status !== "") {
-        if (args.include_pending !== undefined && Boolean(args.include_pending) !== includePending) {
-          warnings.push({
-            code: "status_overrides_include_pending",
-            message: `Explicit status '${String(args.status)}' overrides include_pending:${Boolean(args.include_pending)}; resolved include_pending:${includePending}.`
-          });
-        }
-        if (args.include_planned !== undefined && Boolean(args.include_planned) !== includePlanned) {
-          warnings.push({
-            code: "status_overrides_include_planned",
-            message: `Explicit status '${String(args.status)}' overrides include_planned:${Boolean(args.include_planned)}; resolved include_planned:${includePlanned}.`
-          });
-        }
-      }
+      const resolved = resolveProjectionStatus(args, { includePending: true, includePlanned: false });
+      const status = resolved.status;
+      const includePending = resolved.includePending;
+      const includePlanned = resolved.includePlanned;
       const overview = handlers.financial_overview(ledger, { ...args, status }) as Row;
       const year = args.year ?? new Date().getUTCFullYear();
       const month = args.month ?? new Date().getUTCMonth() + 1;
@@ -262,7 +247,7 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
           selected: projectedCash
         },
         budget_projection: budgetProjection,
-        warnings,
+        warnings: resolved.warnings,
         conversion_warning: projectedCash.conversion_warning
       };
     },
