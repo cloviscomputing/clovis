@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.1.2 - 2026-06-21
+
+- Run native statement dry-run previews outside mutation transactions, reducing
+  SQLite lock contention during concurrent statement plan previews.
+- Speed up balance-sheet, cash-projection, and financial-picture reports by
+  aggregating ledger balances in bulk instead of per-account fanout.
+- Avoid unnecessary schema and journal-mode writes when opening already-current
+  ledgers.
+
 ## 1.1.1 - 2026-06-20
 
 - Fix `financial_picture` so `include_pending:true` plus
