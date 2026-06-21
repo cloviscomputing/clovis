@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-06-20
+
 - Fix `financial_picture` so `include_pending:true` plus
   `include_planned:true` resolves to a combined planned projection instead of
   silently dropping planned rows.
