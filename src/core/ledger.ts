@@ -1214,6 +1214,25 @@ export class Ledger {
     const quote = this.getAsset(quoteAssetId);
     const scale = quote?.scale ?? 2;
     const missing: Row[] = [];
+    const clause = this.statusClause(status);
+    const rawBalances = new Map<string, Map<string, bigint>>();
+    const balanceRows = this.db.prepare(`
+      SELECT l.account_id, l.asset_id, coalesce(sum(l.quantity), 0) AS total
+        FROM journal_lines l
+        JOIN journals t ON t.book_id = l.book_id AND t.id = l.journal_id
+       WHERE l.book_id = ?
+         AND t.finalized_at IS NOT NULL
+         AND t.date <= ?
+         ${clause.sql}
+       GROUP BY l.account_id, l.asset_id
+    `).all(this.bookId, date, ...clause.params as SQLInputValue[]) as Row[];
+    for (const row of balanceRows) {
+      const accountId = String(row.account_id);
+      const assetId = String(row.asset_id);
+      const accountBalances = rawBalances.get(accountId) ?? new Map<string, bigint>();
+      accountBalances.set(assetId, BigInt(row.total as string | number | bigint | boolean));
+      rawBalances.set(accountId, accountBalances);
+    }
     const sameTypeDescendants = (account: Account): Account[] => {
       const rows: Account[] = [];
       const visit = (current: Account): void => {
@@ -1227,11 +1246,10 @@ export class Ledger {
       let total = 0n;
       const rowMissing: Row[] = [];
       for (const typedAccount of sameTypeDescendants(account)) {
-        for (const asset of this.listAssets()) {
-          const raw = this.balance(typedAccount.id, asset.id, date, status);
+        for (const [assetId, raw] of rawBalances.get(typedAccount.id) ?? []) {
           if (raw === 0n) continue;
-          const [converted, error] = this.tryConvertQuantity(raw, asset.id, quoteAssetId, date);
-          if (converted == null) rowMissing.push({ account_id: typedAccount.id, asset_id: asset.id, quote_asset_id: quoteAssetId, quantity: raw, error });
+          const [converted, error] = this.tryConvertQuantity(raw, assetId, quoteAssetId, date);
+          if (converted == null) rowMissing.push({ account_id: typedAccount.id, asset_id: assetId, quote_asset_id: quoteAssetId, quantity: raw, error });
           else total += converted;
         }
       }

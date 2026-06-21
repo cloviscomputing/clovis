@@ -1,5 +1,4 @@
 import type { Ledger } from "../../../core/ledger.js";
-import type { TxStatus } from "../../../core/types.js";
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../../tool-runtime.js";
 
 export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers): Partial<ToolHandlers> {
@@ -25,7 +24,6 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
     positive,
     presentAccountBalance,
     previousDate,
-    quotedPlannedUnrealized,
     realizedPlannedRows,
     reportAsset,
     resolveProjectionStatus,
@@ -270,26 +268,68 @@ export function reportHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers):
       }) : [];
       const realizedPlannedIds = new Set(realizedPlanned.map((row) => String(row.planned_tx_id)));
 
-      const quoted = (accountId: string, status: TxStatus | string, dateFrom?: string | null): bigint => {
-        const result = ledger.quotedBalanceTree(accountId, quote, asOf, status, dateFrom);
-        missing.push(...result.missing);
-        return result.total;
+      type ProjectionBucket = {
+        posted: Map<string, bigint>;
+        pending: Map<string, bigint>;
+        planned: bigint;
+      };
+      const accountsById = new Map(ledger.listAccounts().map((row) => [row.id, row]));
+      const rootForLineAccount = new Map<string, string>();
+      const buckets = new Map<string, ProjectionBucket>();
+      const emptyBucket = (): ProjectionBucket => ({ posted: new Map(), pending: new Map(), planned: 0n });
+      const addRoot = (rootId: string, accountType: "asset" | "liability") => {
+        buckets.set(rootId, emptyBucket());
+        for (const id of ledger.descendants(rootId)) {
+          if (accountsById.get(id)?.account_type === accountType) rootForLineAccount.set(id, rootId);
+        }
+      };
+      for (const rootId of assetAccounts) addRoot(rootId, "asset");
+      for (const rootId of liabilityAccounts) addRoot(rootId, "liability");
+      const addRaw = (totals: Map<string, bigint>, assetId: string, quantity: bigint) => {
+        totals.set(assetId, (totals.get(assetId) ?? 0n) + quantity);
+      };
+      for (const tx of ledger.listTransactions({ status: "combined", dateTo: asOf, sort: "date_asc" })) {
+        const planned = tx.status === "planned";
+        if (planned && (args.include_planned !== true || tx.date <= plannedAfter || realizedPlannedIds.has(tx.id))) continue;
+        if (tx.status === "pending" && args.include_pending !== true) continue;
+        for (const entry of ledger.getEntries(tx.id)) {
+          const rootId = rootForLineAccount.get(entry.account_id);
+          if (!rootId) continue;
+          const bucket = buckets.get(rootId)!;
+          if (tx.status === "posted") addRaw(bucket.posted, entry.asset_id, entry.quantity);
+          else if (tx.status === "pending") addRaw(bucket.pending, entry.asset_id, entry.quantity);
+          else if (planned) {
+            const [converted, error] = ledger.tryConvertQuantity(entry.quantity, entry.asset_id, quote, tx.date);
+            if (converted == null) missing.push({ tx_id: tx.id, account_id: entry.account_id, asset_id: entry.asset_id, quote_asset_id: quote, quantity: entry.quantity, error });
+            else bucket.planned += converted;
+          }
+        }
+      }
+      const quotedBalance = (accountId: string, totals: Map<string, bigint>): bigint => {
+        let total = 0n;
+        for (const [assetId, quantity] of totals) {
+          if (quantity === 0n) continue;
+          const [converted, error] = ledger.tryConvertQuantity(quantity, assetId, quote, asOf);
+          if (converted == null) missing.push({ account_id: accountId, asset_id: assetId, quote_asset_id: quote, quantity, error });
+          else total += converted;
+        }
+        return total;
       };
 
-      const accountBreakdown = assetAccounts.map((ref: string) => {
-        const accountId = account(ledger, ref);
+      const accountBreakdown = assetAccounts.map((accountId: string) => {
         const accountRow = ledger.getAccount(accountId);
-        const posted = quoted(accountId, "posted");
-        const pending = args.include_pending === true ? quoted(accountId, "pending") : 0n;
-        const planned = args.include_planned === true ? quotedPlannedUnrealized(ledger, accountId, quote, asOf, plannedAfter, realizedPlannedIds, missing) : 0n;
+        const bucket = buckets.get(accountId)!;
+        const posted = quotedBalance(accountId, bucket.posted);
+        const pending = quotedBalance(accountId, bucket.pending);
+        const planned = bucket.planned;
         return { account_id: accountId, account_name: accountRow?.name ?? "", posted_cash_cents: posted, pending_cash_cents: pending, planned_cash_cents: planned, included_cash_cents: posted + pending + planned };
       });
-      const liabilityBreakdown = liabilityAccounts.map((ref: string) => {
-        const accountId = account(ledger, ref);
+      const liabilityBreakdown = liabilityAccounts.map((accountId: string) => {
         const accountRow = ledger.getAccount(accountId);
-        const posted = quoted(accountId, "posted");
-        const pending = args.include_pending === true ? quoted(accountId, "pending") : 0n;
-        const planned = args.include_planned === true ? quotedPlannedUnrealized(ledger, accountId, quote, asOf, plannedAfter, realizedPlannedIds, missing) : 0n;
+        const bucket = buckets.get(accountId)!;
+        const posted = quotedBalance(accountId, bucket.posted);
+        const pending = quotedBalance(accountId, bucket.pending);
+        const planned = bucket.planned;
         const effect = posted + pending + planned;
         return { account_id: accountId, account_name: accountRow?.name ?? "", posted_liability_effect_cents: posted, pending_liability_effect_cents: pending, planned_liability_effect_cents: planned, included_liability_effect_cents: effect, included_liability_balance_cents: -effect };
       });
