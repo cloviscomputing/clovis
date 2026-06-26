@@ -50,6 +50,81 @@ describe("ledger core", () => {
     expect(debitCredit(-1200n)).toEqual({ debit: 0n, credit: 1200n });
   });
 
+  it("projects semantic effect lines for income, expenses, transfers, refunds, splits, and corrections", () => {
+    const ledger = tempLedger();
+    try {
+      const usd = ledger.createAsset("USD", "currency", 2);
+      const checking = ledger.createAccount("Checking", "asset");
+      const visa = ledger.createAccount("Visa", "liability");
+      const salary = ledger.createAccount("Salary", "income");
+      const groceries = ledger.createAccount("Groceries", "expense");
+      const dining = ledger.createAccount("Dining", "expense");
+
+      ledger.recordTransaction("2026-06-01", 10000n, salary, checking, usd, "Salary Payroll", "posted");
+      ledger.recordTransaction("2026-06-02", 2500n, checking, groceries, usd, "Fresh Market #42", "posted");
+      ledger.recordTransaction("2026-06-03", 1200n, visa, dining, usd, "Card Dinner", "pending");
+      ledger.recordTransaction("2026-06-04", 500n, checking, visa, usd, "Visa Payment", "posted");
+      ledger.recordTransaction("2026-06-05", 300n, groceries, checking, usd, "Grocery Refund", "posted");
+      ledger.postTx("2026-06-06", "posted", "Split Shop", [
+        [checking, usd, -1000n],
+        [groceries, usd, 600n],
+        [dining, usd, 400n]
+      ]);
+      ledger.postTx("2026-06-07", "posted", "Correction: recategorize dinner", [
+        [groceries, usd, -600n],
+        [dining, usd, 600n]
+      ]);
+
+      const result = ledger.queryEffectLines({ dateFrom: "2026-06-01", dateTo: "2026-06-30", status: "combined", sort: "date_asc", limit: null });
+      expect(result.total).toBe(15);
+      expect(result.effects).toHaveLength(15);
+
+      const effect = (description: string, accountId: string) => result.effects.find((row) => row.description === description && row.account_id === accountId)!;
+      expect(effect("Salary Payroll", salary)).toMatchObject({
+        account_type: "income",
+        income_cents: 10000n,
+        normal_amount_cents: 10000n,
+        has_income: true,
+        has_balance_sheet: true
+      });
+      expect(effect("Fresh Market #42", groceries)).toMatchObject({
+        description_key: "fresh market 42",
+        expense_cents: 2500n,
+        has_expense: true
+      });
+      expect(effect("Card Dinner", dining)).toMatchObject({ status: "pending", expense_cents: 1200n });
+      expect(result.effects.filter((row) => row.description === "Visa Payment")).toEqual(expect.arrayContaining([
+        expect.objectContaining({ is_transfer: true, is_card_payment: true, has_income: false, has_expense: false })
+      ]));
+      expect(effect("Grocery Refund", groceries)).toMatchObject({
+        expense_cents: -300n,
+        has_negative_expense: true,
+        is_refund: true
+      });
+
+      const correction = result.effects.filter((row) => row.description === "Correction: recategorize dinner");
+      expect(correction).toHaveLength(2);
+      expect(correction.every((row) => row.has_mixed_reporting_signs)).toBe(true);
+      expect(correction.every((row) => !row.is_refund)).toBe(true);
+      expect(correction.reduce((sum, row) => sum + row.expense_cents, 0n)).toBe(0n);
+
+      const grouped = callTool("query_effects", { year: 2026, month: 6, status: "combined", group_by: "category", limit: 10 }, ledger) as any;
+      expect(grouped.total).toBe(3);
+      const groups = Object.fromEntries(grouped.groups.map((row: any) => [row.group_label, row]));
+      expect(groups.Salary.income_cents).toBe(10000);
+      expect(groups.Groceries.expense_cents).toBe(2200);
+      expect(groups.Dining.expense_cents).toBe(2200);
+
+      ledger.recordTransaction("2026-06-08", 700n, checking, dining, usd, "Planned Dinner", "planned");
+      const active = callTool("query_effects", { year: 2026, month: 6, status: "active", limit: 1000 }, ledger) as any;
+      const all = callTool("query_effects", { year: 2026, month: 6, status: "all", limit: 1000 }, ledger) as any;
+      expect(active.total).toBe(15);
+      expect(all.total).toBe(17);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("creates schema v4 and default book", () => {
     const ledger = tempLedger();
     try {

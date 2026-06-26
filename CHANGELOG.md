@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-06-26
+
+- Add the read-only `query_effects` CLI/MCP tool for effect-line ledger reads,
+  including ungrouped output plus journal, status, account, category,
+  description-key, and month grouping.
+- Add the core `Ledger.queryEffectLines` read model so agents can inspect
+  income, expense, balance-sheet, transfer, refund, and correction effects
+  without hydrating entries one transaction at a time.
+- Fix `query_effects status:"all"` so it includes every non-void transaction
+  status instead of falling back to active posted/pending rows.
+
 ## 1.2.0 - 2026-06-21
 
 - Expand `financial_picture` into a one-call CFO snapshot with data-quality,

@@ -351,6 +351,7 @@ const CASES = {
   list_scheduled: { mutation: "read", setup: ensureSchedule, args: () => ({}), assert: expectArray },
   list_tags: { mutation: "read", setup: ensureTag, args: (ctx) => ({ entity_type: "tx", entity_id: ctx.tx.pay }), assert: expectArray },
   list_transactions: { mutation: "read", args: () => ({ status: "posted", compact: false, date_from: "2026-06-01", date_to: "2026-06-30" }), assert: expectObject },
+  query_effects: { mutation: "read", args: () => ({ year: 2026, month: 6, status: "combined", group_by: "category" }), assert: expectObject },
   list_uncategorized: { mutation: "read", args: (ctx) => ({ catch_all_account_id: ctx.accounts.Uncategorized, status: "pending" }), assert: expectObject },
   list_unmatched_transfers: { mutation: "read", args: () => ({}), assert: expectArray },
   match_transfer_pairs: { mutation: "dry-run", args: (ctx) => ({ account_a: ctx.accounts.Checking, account_b: ctx.accounts.Savings, date_tolerance_days: 1 }), assert: expectObject },
