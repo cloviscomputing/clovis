@@ -46,8 +46,12 @@ import {
   yearValue
 } from "./ledger-codec.js";
 import { LedgerStore } from "./ledger-store.js";
-import type { Account, AccountBalance, AccountType, Asset, AssetType, Journal, JournalLine, Price, TxStatus } from "./types.js";
+import type { Account, AccountBalance, AccountType, Asset, AssetType, Journal, JournalEffectLine, JournalLine, Price, QueryEffectLinesOptions, TxStatus } from "./types.js";
 import { decimalToScaled, fromAtomicUnits, gcd, reduceRatio, roundRatio, toAtomicUnits } from "./money.js";
+
+function effectDescriptionKey(description: string): string {
+  return description.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ").trim();
+}
 
 export class Ledger {
   readonly path: string;
@@ -1480,6 +1484,175 @@ export class Ledger {
     rows = rows.sort((a, b) => `${a.date}:${a.id}`.localeCompare(`${b.date}:${b.id}`) * (reverse ? -1 : 1));
     const offset = options.offset ?? 0;
     return rows.slice(offset, options.limit == null ? undefined : offset + options.limit);
+  }
+
+  queryEffectLines(options: QueryEffectLinesOptions = {}): { effects: JournalEffectLine[]; total: number; limit: number | null; offset: number } {
+    const clause = this.statusClause(options.status === undefined ? "active" : options.status);
+    const offset = options.offset == null ? 0 : Math.max(0, Math.trunc(options.offset));
+    const limit = options.limit == null ? null : Math.max(0, Math.trunc(options.limit));
+    if (!Number.isFinite(offset)) throw new Error("offset must be finite");
+    if (limit != null && !Number.isFinite(limit)) throw new Error("limit must be finite");
+
+    const params: SQLInputValue[] = [this.bookId, ...clause.params as SQLInputValue[]];
+    let journalWhere = `t.book_id = ? AND t.finalized_at IS NOT NULL ${clause.sql}`;
+    if (options.dateFrom) {
+      journalWhere += " AND t.date >= ?";
+      params.push(dateOnly(options.dateFrom));
+    }
+    if (options.dateTo) {
+      journalWhere += " AND t.date <= ?";
+      params.push(dateOnly(options.dateTo));
+    }
+    const query = options.query?.trim();
+    if (query) {
+      journalWhere += " AND lower(t.description) LIKE ?";
+      params.push(`%${query.toLowerCase()}%`);
+    }
+
+    const lineFilters: string[] = [];
+    if (options.accountId) {
+      lineFilters.push("l.account_id = ?");
+      params.push(options.accountId);
+    }
+    if (options.accountType) {
+      lineFilters.push("a.type = ?");
+      params.push(accountType(String(options.accountType)));
+    }
+    if (options.assetId) {
+      lineFilters.push("l.asset_id = ?");
+      params.push(options.assetId);
+    }
+    const lineWhere = lineFilters.length ? `WHERE ${lineFilters.join(" AND ")}` : "";
+
+    const commonSql = `
+      WITH base_journals AS (
+        SELECT t.*
+        FROM journals t
+        WHERE ${journalWhere}
+      ),
+      journal_flags AS (
+        SELECT
+          t.id AS tx_id,
+          max(CASE WHEN a.type = 'income' THEN 1 ELSE 0 END) AS has_income,
+          max(CASE WHEN a.type = 'expense' THEN 1 ELSE 0 END) AS has_expense,
+          max(CASE WHEN a.type IN ('asset', 'liability', 'equity') THEN 1 ELSE 0 END) AS has_balance_sheet,
+          max(CASE WHEN a.type = 'asset' THEN 1 ELSE 0 END) AS has_asset,
+          max(CASE WHEN a.type = 'liability' THEN 1 ELSE 0 END) AS has_liability,
+          sum(CASE WHEN a.type = 'expense' AND l.quantity < 0 THEN 1 ELSE 0 END) AS negative_expense_count,
+          sum(CASE WHEN (a.type = 'expense' AND l.quantity > 0) OR (a.type = 'income' AND l.quantity < 0) THEN 1 ELSE 0 END) AS positive_reporting_count,
+          sum(CASE WHEN (a.type = 'expense' AND l.quantity < 0) OR (a.type = 'income' AND l.quantity > 0) THEN 1 ELSE 0 END) AS negative_reporting_count
+        FROM base_journals t
+        JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id
+        JOIN accounts a ON a.book_id = l.book_id AND a.id = l.account_id
+        GROUP BY t.id
+      ),
+      selected_lines AS (
+        SELECT
+          t.id AS tx_id,
+          t.date,
+          t.posted_at,
+          t.status,
+          t.description,
+          t.source_id,
+          t.external_id,
+          l.id AS line_id,
+          l.line_no,
+          l.account_id,
+          a.name AS account_name,
+          a.type AS account_type,
+          l.asset_id,
+          s.symbol AS asset_symbol,
+          s.scale,
+          l.quantity,
+          f.has_income,
+          f.has_expense,
+          f.has_balance_sheet,
+          f.has_asset,
+          f.has_liability,
+          f.negative_expense_count,
+          f.positive_reporting_count,
+          f.negative_reporting_count
+        FROM base_journals t
+        JOIN journal_lines l ON l.book_id = t.book_id AND l.journal_id = t.id
+        JOIN accounts a ON a.book_id = l.book_id AND a.id = l.account_id
+        JOIN assets s ON s.id = l.asset_id
+        JOIN journal_flags f ON f.tx_id = t.id
+        ${lineWhere}
+      )`;
+
+    const countRow = this.db.prepare(`${commonSql} SELECT count(*) AS total FROM selected_lines`).get(...params) as Row;
+    const total = Number(countRow.total ?? 0);
+    const sort = options.sort ?? "date_desc";
+    const orderBy = (() => {
+      if (sort === "date_desc" || sort === "recent" || sort === "latest") return "ORDER BY date DESC, tx_id DESC, line_no ASC, line_id ASC";
+      if (sort === "date_asc") return "ORDER BY date ASC, tx_id ASC, line_no ASC, line_id ASC";
+      if (sort === "amount_desc") return "ORDER BY abs(quantity) DESC, date DESC, tx_id DESC, line_no ASC, line_id ASC";
+      if (sort === "amount_asc") return "ORDER BY abs(quantity) ASC, date ASC, tx_id ASC, line_no ASC, line_id ASC";
+      throw new Error(`Unknown effect line sort: ${sort}`);
+    })();
+
+    const pageParams = [...params];
+    let pageSql = `${commonSql} SELECT * FROM selected_lines ${orderBy}`;
+    if (limit != null) {
+      pageSql += " LIMIT ? OFFSET ?";
+      pageParams.push(limit, offset);
+    } else if (offset > 0) {
+      pageSql += " LIMIT -1 OFFSET ?";
+      pageParams.push(offset);
+    }
+
+    const rows = this.db.prepare(pageSql).all(...pageParams) as Row[];
+    const effects = rows.map((row) => {
+      const type = accountType(String(row.account_type));
+      const quantity = BigInt(row.quantity as bigint | number | string);
+      const normal = normalAmount(type, quantity);
+      const hasIncome = Number(row.has_income) !== 0;
+      const hasExpense = Number(row.has_expense) !== 0;
+      const hasBalanceSheet = Number(row.has_balance_sheet) !== 0;
+      const hasAsset = Number(row.has_asset) !== 0;
+      const hasLiability = Number(row.has_liability) !== 0;
+      const isBalanceSheetOnly = !hasIncome && !hasExpense && hasBalanceSheet;
+      const hasNegativeExpense = Number(row.negative_expense_count) > 0;
+      const hasMixedReportingSigns = Number(row.positive_reporting_count) > 0 && Number(row.negative_reporting_count) > 0;
+      return {
+        tx_id: String(row.tx_id),
+        date: String(row.date),
+        time: String(row.date),
+        posted_at: String(row.posted_at),
+        status: txStatus(String(row.status)),
+        description: String(row.description ?? ""),
+        description_key: effectDescriptionKey(String(row.description ?? "")),
+        source_id: row.source_id == null ? null : String(row.source_id),
+        external_id: row.external_id == null ? null : String(row.external_id),
+        line_id: String(row.line_id),
+        line_no: Number(row.line_no),
+        account_id: String(row.account_id),
+        account_name: String(row.account_name),
+        account_type: type,
+        asset_id: String(row.asset_id),
+        asset_symbol: String(row.asset_symbol),
+        scale: Number(row.scale),
+        quantity,
+        quantity_cents: quantity,
+        normal_amount_cents: normal,
+        income_cents: type === "income" ? normal : 0n,
+        expense_cents: type === "expense" ? normal : 0n,
+        asset_cents: type === "asset" ? normal : 0n,
+        liability_cents: type === "liability" ? normal : 0n,
+        equity_cents: type === "equity" ? normal : 0n,
+        balance_sheet_cents: type === "asset" || type === "liability" || type === "equity" ? normal : 0n,
+        has_income: hasIncome,
+        has_expense: hasExpense,
+        has_balance_sheet: hasBalanceSheet,
+        is_balance_sheet_only: isBalanceSheetOnly,
+        is_transfer: isBalanceSheetOnly,
+        is_card_payment: isBalanceSheetOnly && hasAsset && hasLiability,
+        has_negative_expense: hasNegativeExpense,
+        has_mixed_reporting_signs: hasMixedReportingSigns,
+        is_refund: hasNegativeExpense && hasBalanceSheet
+      };
+    });
+    return { effects, total, limit, offset };
   }
 
   trialBalance(assetId: string, status: TxStatus | string | null = "posted") {

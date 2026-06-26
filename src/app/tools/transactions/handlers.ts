@@ -1,5 +1,135 @@
 import type { Row, ToolHandlers, ToolRuntimeContext } from "../../tool-runtime.js";
 import { assertTransactionDeletionAllowed, planTransactionDeletion, presentTransactionDeletionPlan } from "../../transaction-deletion.js";
+import type { JournalEffectLine } from "../../../core/types.js";
+
+type EffectGroupBy = "none" | "journal" | "status" | "account" | "category" | "description_key" | "month";
+
+type EffectGroup = {
+  group_by: EffectGroupBy;
+  group_key: string;
+  group_label: string;
+  account_id?: string;
+  account_name?: string;
+  account_type?: string;
+  status?: string;
+  month?: string;
+  line_count: number;
+  tx_ids: Set<string>;
+  tx_count: number;
+  first_date: string;
+  last_date: string;
+  normal_amount_cents: bigint;
+  income_cents: bigint;
+  expense_cents: bigint;
+  reporting_net_cents: bigint;
+  asset_cents: bigint;
+  liability_cents: bigint;
+  equity_cents: bigint;
+  balance_sheet_cents: bigint;
+  has_income: boolean;
+  has_expense: boolean;
+  has_balance_sheet: boolean;
+  has_negative_expense: boolean;
+  has_mixed_reporting_signs: boolean;
+  is_refund: boolean;
+  is_transfer: boolean;
+  is_card_payment: boolean;
+};
+
+const EFFECT_GROUPS = new Set<EffectGroupBy>(["none", "journal", "status", "account", "category", "description_key", "month"]);
+
+function effectGroupBy(value: unknown): EffectGroupBy {
+  const normalized = String(value ?? "none").trim().toLowerCase().replace(/[\s-]+/g, "_") as EffectGroupBy;
+  if (!EFFECT_GROUPS.has(normalized)) throw new Error(`Invalid group_by: ${value}`);
+  return normalized;
+}
+
+function effectGroupSeed(effect: JournalEffectLine, groupBy: EffectGroupBy): EffectGroup | null {
+  if (groupBy === "category" && effect.account_type !== "income" && effect.account_type !== "expense") return null;
+  const month = effect.date.slice(0, 7);
+  const base = {
+    group_by: groupBy,
+    line_count: 0,
+    tx_ids: new Set<string>(),
+    tx_count: 0,
+    first_date: effect.date,
+    last_date: effect.date,
+    normal_amount_cents: 0n,
+    income_cents: 0n,
+    expense_cents: 0n,
+    reporting_net_cents: 0n,
+    asset_cents: 0n,
+    liability_cents: 0n,
+    equity_cents: 0n,
+    balance_sheet_cents: 0n,
+    has_income: false,
+    has_expense: false,
+    has_balance_sheet: false,
+    has_negative_expense: false,
+    has_mixed_reporting_signs: false,
+    is_refund: false,
+    is_transfer: false,
+    is_card_payment: false
+  };
+  if (groupBy === "journal") return { ...base, group_key: effect.tx_id, group_label: effect.description || effect.tx_id };
+  if (groupBy === "status") return { ...base, group_key: effect.status, group_label: effect.status, status: effect.status };
+  if (groupBy === "account" || groupBy === "category") {
+    return {
+      ...base,
+      group_key: effect.account_id,
+      group_label: effect.account_name,
+      account_id: effect.account_id,
+      account_name: effect.account_name,
+      account_type: effect.account_type
+    };
+  }
+  if (groupBy === "description_key") return { ...base, group_key: effect.description_key || "(blank)", group_label: effect.description_key || "(blank)" };
+  return { ...base, group_key: month, group_label: month, month };
+}
+
+function addEffectToGroup(group: EffectGroup, effect: JournalEffectLine): void {
+  group.line_count += 1;
+  group.tx_ids.add(effect.tx_id);
+  group.tx_count = group.tx_ids.size;
+  if (effect.date < group.first_date) group.first_date = effect.date;
+  if (effect.date > group.last_date) group.last_date = effect.date;
+  group.normal_amount_cents += effect.normal_amount_cents;
+  group.income_cents += effect.income_cents;
+  group.expense_cents += effect.expense_cents;
+  group.reporting_net_cents += effect.income_cents - effect.expense_cents;
+  group.asset_cents += effect.asset_cents;
+  group.liability_cents += effect.liability_cents;
+  group.equity_cents += effect.equity_cents;
+  group.balance_sheet_cents += effect.balance_sheet_cents;
+  group.has_income ||= effect.has_income;
+  group.has_expense ||= effect.has_expense;
+  group.has_balance_sheet ||= effect.has_balance_sheet;
+  group.has_negative_expense ||= effect.has_negative_expense;
+  group.has_mixed_reporting_signs ||= effect.has_mixed_reporting_signs;
+  group.is_refund ||= effect.is_refund;
+  group.is_transfer ||= effect.is_transfer;
+  group.is_card_payment ||= effect.is_card_payment;
+}
+
+function effectGroupMagnitude(group: EffectGroup): bigint {
+  const reporting = group.reporting_net_cents < 0n ? -group.reporting_net_cents : group.reporting_net_cents;
+  const balanceSheet = group.balance_sheet_cents < 0n ? -group.balance_sheet_cents : group.balance_sheet_cents;
+  return reporting > balanceSheet ? reporting : balanceSheet;
+}
+
+function compareEffectGroups(left: EffectGroup, right: EffectGroup): number {
+  const date = right.last_date.localeCompare(left.last_date);
+  if (date !== 0) return date;
+  const leftMagnitude = effectGroupMagnitude(left);
+  const rightMagnitude = effectGroupMagnitude(right);
+  if (leftMagnitude !== rightMagnitude) return leftMagnitude > rightMagnitude ? -1 : 1;
+  return left.group_label.localeCompare(right.group_label);
+}
+
+function publicEffectGroup(group: EffectGroup): Row {
+  const { tx_ids: _txIds, ...row } = group;
+  return row;
+}
 
 export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandlers): Partial<ToolHandlers> {
   const {
@@ -143,6 +273,47 @@ export function transactionHandlers(ctx: ToolRuntimeContext, handlers: ToolHandl
         return row;
       });
       return { transactions: rows, items: rows, total, limit: args.limit ?? 50, offset: args.offset ?? 0 };
+    },
+
+    query_effects: (ledger, args) => {
+      const dateRange = args.year ? monthBounds(Number(args.year), args.month ? Number(args.month) : null) : [optionalDate(args.date_from), optionalDate(args.date_to)];
+      const groupBy = effectGroupBy(args.group_by);
+      const limit = args.limit ?? 100;
+      const offset = args.offset ?? 0;
+      const options = {
+        status: parseTxStatusFilter(args.status, "active"),
+        dateFrom: dateRange[0],
+        dateTo: dateRange[1],
+        query: args.query == null ? null : String(args.query),
+        accountId: args.account_id ? account(ledger, args.account_id) : args.category_id ? account(ledger, args.category_id) : null,
+        accountType: args.account_type == null ? null : String(args.account_type),
+        assetId: args.asset_id ? asset(ledger, args.asset_id) : null,
+        sort: args.sort ?? "date_desc"
+      };
+      if (groupBy === "none") {
+        const result = ledger.queryEffectLines({ ...options, limit, offset });
+        const effects = result.effects.map((effect) => ({
+          ...effect,
+          quantity_display: display(ledger, effect.quantity, effect.asset_id),
+          normal_amount_display: display(ledger, effect.normal_amount_cents, effect.asset_id)
+        }));
+        return { ...result, effects, items: effects, group_by: groupBy };
+      }
+
+      const effects = ledger.queryEffectLines({ ...options, limit: null, offset: 0 }).effects;
+      const groups = new Map<string, EffectGroup>();
+      for (const effect of effects) {
+        const seed = effectGroupSeed(effect, groupBy);
+        if (!seed) continue;
+        const existing = groups.get(seed.group_key) ?? seed;
+        addEffectToGroup(existing, effect);
+        groups.set(seed.group_key, existing);
+      }
+      const rows = [...groups.values()].sort(compareEffectGroups).map(publicEffectGroup);
+      const pageOffset = Math.max(0, Number(offset));
+      const pageLimit = limit == null ? null : Math.max(0, Number(limit));
+      const page = rows.slice(pageOffset, pageLimit == null ? undefined : pageOffset + pageLimit);
+      return { groups: page, items: page, total: rows.length, limit, offset, group_by: groupBy };
     },
 
     get_transaction: (ledger, args) => txWithEntries(ledger, args.id),

@@ -78,6 +78,57 @@ export interface JournalLine {
   qty_cents: bigint;
 }
 
+export interface JournalEffectLine {
+  tx_id: string;
+  date: string;
+  time: string;
+  posted_at: string;
+  status: TxStatus;
+  description: string;
+  description_key: string;
+  source_id: string | null;
+  external_id: string | null;
+  line_id: string;
+  line_no: number;
+  account_id: string;
+  account_name: string;
+  account_type: AccountType;
+  asset_id: string;
+  asset_symbol: string;
+  scale: number;
+  quantity: bigint;
+  quantity_cents: bigint;
+  normal_amount_cents: bigint;
+  income_cents: bigint;
+  expense_cents: bigint;
+  asset_cents: bigint;
+  liability_cents: bigint;
+  equity_cents: bigint;
+  balance_sheet_cents: bigint;
+  has_income: boolean;
+  has_expense: boolean;
+  has_balance_sheet: boolean;
+  is_balance_sheet_only: boolean;
+  is_transfer: boolean;
+  is_card_payment: boolean;
+  has_negative_expense: boolean;
+  has_mixed_reporting_signs: boolean;
+  is_refund: boolean;
+}
+
+export interface QueryEffectLinesOptions {
+  status?: TxStatus | "active" | "combined" | "all" | string | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
+  query?: string | null;
+  accountId?: string | null;
+  accountType?: AccountType | string | null;
+  assetId?: string | null;
+  sort?: "date_asc" | "date_desc" | "recent" | "latest" | "amount_asc" | "amount_desc" | string | null;
+  limit?: number | null;
+  offset?: number;
+}
+
 export interface PublicJournalLine extends Omit<JournalLine, "quantity" | "qty" | "qty_cents"> {
   quantity: number;
   qty: number;

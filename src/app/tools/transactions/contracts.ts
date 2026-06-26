@@ -151,6 +151,31 @@ export const transactionTools = defineToolGroup([
     mutation: "read"
   },
   {
+    name: "query_effects",
+    definition: {
+      parameters: [
+        ["year", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["month", "integer", { nullable: true, optional: true, defaultValue: null }],
+        ["date_from", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["date_to", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["status", "string", { nullable: true, optional: true, defaultValue: "active" }],
+        ["query", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["account_id", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["category_id", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["account_type", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["asset_id", "string", { nullable: true, optional: true, defaultValue: null }],
+        ["group_by", "string", { optional: true, defaultValue: "none" }],
+        ["limit", "integer", { optional: true, defaultValue: 100 }],
+        ["offset", "integer", { optional: true, defaultValue: 0 }],
+        ["sort", "string", { optional: true, defaultValue: "date_desc" }]
+      ],
+      returns: { type: "object" }
+    },
+    safety: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false, supportsDryRun: false, defaultDryRun: false },
+    workflow: "transactions",
+    mutation: "read"
+  },
+  {
     name: "get_transaction",
     definition: {
       parameters: [
